@@ -22,6 +22,8 @@
 //       [cycles=V の回数] [trialcycles=試しの V の回数] [trial=fixed(試しも毎刻み = 床の測り)] [galerkin=1]
 // T-1111: span-dump dump=<ファイル>(火事〔shape= の木〕の途中の列の系を書く。gpu_time_step_span_test が GPU で解き比べる)
 //         forward-estimate(早送りの待ちの見積もり〔D-650〕と実際に進めた解きの数)
+// T-1141: event-merge [check=0] [every=n dump=<ファイル>](1 出来事の列を組ごとに 1 本の系にまとめ、列ごとに解いた値とビット一致か・
+//         組の数・費用の式での GPU の待ち。every= で n 出来事に 1 つ列の系を書く = gpu_time_step_span_test --events が解き比べて測る)
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -988,6 +990,149 @@ namespace {
         Expect(!dumpPath.empty() && test::WriteTimeStepSpans(dumpPath, records), "火事の系: ファイルに書けた");
     }
 
+    // --- T-1141: 1 出来事の列を 1 本の系にまとめる形(GroupTimeTreeEvent)を、列ごとに解いた値とビット一致で確かめ、数える ---
+    bool mergeCheck = true;       // check=0 で比べない(数えるだけ)
+    uint32_t mergeDumpEvery = 0;  // every=n: n 出来事に 1 つ、列の系を dump= に書く(GPU の試験が組ごとに解き比べて測る)
+
+    std::vector<int64_t> SolveSystem(const EquilibriumSystem& system, uint32_t cycles) {
+        EquilibriumOptions options;
+        options.solver.cycles = cycles;
+        options.faceValues = false;
+        EquilibriumState state;
+        (void)SolveEquilibrium(system, options, state);
+
+        return state.values;
+    }
+
+    struct MergeCounts {
+        uint64_t events = 0;
+        uint64_t spans = 0;
+        uint64_t groups = 0;
+        uint64_t mergedGroups = 0;  // 2 つ以上の列をまとめた組
+        uint64_t compared = 0;
+        uint64_t mismatches = 0;
+        std::array<uint64_t, 4> spansPerEvent{};  // 1・2・3・4 以上
+        std::array<uint64_t, 4> groupsPerEvent{};
+        std::map<int32_t, uint32_t> levelsByExponent;  // e → 段の数の最大
+        uint64_t spanWaitNs = 0;                       // 列ごとの系(今の口)
+        uint64_t groupWaitNs = 0;                      // 組ごと
+        uint64_t eventWaitNs = 0;                      // 出来事を全部 1 本(T-1111 の見積もりの前提。値は組と違いうる)
+        uint64_t largestGroup = 0;
+    };
+
+    void CountEvent(const std::vector<TimeTreeEventSpan>& spans, MergeCounts& counts) {
+        const sim::TimeTreeSolveCost cost;
+        const std::vector<TimeTreeEventGroup> groups = GroupTimeTreeEvent(spans);
+        ++counts.events;
+        counts.spans += spans.size();
+        counts.groups += groups.size();
+        ++counts.spansPerEvent[std::min<size_t>(spans.size(), 4) - 1];
+        ++counts.groupsPerEvent[std::min<size_t>(groups.size(), 4) - 1];
+        uint64_t eventCells = 0;
+        uint64_t eventCycles = 0;
+        for (const TimeTreeEventSpan& span : spans) {
+            const uint64_t cells = span.system.nodes.size();
+            counts.spanWaitNs += TimeTreeEventNs(cost, cells, cells * span.cycles);
+            eventCells += cells;
+            eventCycles += cells * span.cycles;
+        }
+
+        counts.eventWaitNs += TimeTreeEventNs(cost, eventCells, eventCycles);
+        for (const TimeTreeEventGroup& group : groups) {
+            const uint64_t cells = group.system.nodes.size();
+            counts.groupWaitNs += TimeTreeEventNs(cost, cells, cells * group.cycles);
+            counts.largestGroup = std::max(counts.largestGroup, cells);
+            for (const uint32_t index : group.spans) {
+                uint32_t& levels = counts.levelsByExponent[spans[index].exponent];
+                levels = std::max(levels, group.levels);
+            }
+
+            if (group.spans.size() < 2)
+                continue;
+
+            ++counts.mergedGroups;
+            if (!mergeCheck)
+                continue;
+
+            // --- まとめた系の値 = 列ごとに解いた値を並べたもの ---
+            const std::vector<int64_t> merged = SolveSystem(group.system, group.cycles);
+            std::vector<int64_t> each;
+            for (const uint32_t index : group.spans) {
+                const std::vector<int64_t> values = SolveSystem(spans[index].system, spans[index].cycles);
+                each.insert(each.end(), values.begin(), values.end());
+            }
+
+            ++counts.compared;
+            counts.mismatches += merged != each ? 1u : 0u;
+        }
+    }
+
+    void CheckEventMerge(const Material& material, const Ignition& ignition) {
+        TimeTreeSetup setup = MakeSetup(material, TimeStepRule::Change);
+        setup.groupShift = groupShift;
+        MergeCounts counts;
+        std::vector<TimeTreeEventSpan> pending;
+        uint64_t pendingStart = 0;
+        std::vector<test::TimeStepSpanRecord> records;
+        const auto flush = [&]() {
+            if (pending.empty())
+                return;
+
+            if (mergeDumpEvery != 0 && counts.events % mergeDumpEvery == 0) {
+                for (const TimeTreeEventSpan& span : pending) {
+                    records.push_back({.exponent = span.exponent,
+                                       .start = pendingStart,
+                                       .cycles = span.cycles,
+                                       .event = static_cast<uint32_t>(counts.events),
+                                       .system = span.system});
+                }
+            }
+
+            CountEvent(pending, counts);
+            pending.clear();
+        };
+
+        // 同じ出来事の列は続けて(同じ歩の初めで)来る
+        const TimeTreeSpanObserver observer = [&](const TimeTreeSpanSolve& solve) {
+            if (!pending.empty() && solve.start != pendingStart)
+                flush();
+
+            pendingStart = solve.start;
+            pending.push_back({.system = solve.system, .exponent = solve.exponent, .cycles = solve.cycles});
+        };
+
+        setup.spanObserver = &observer;
+        const TimeTreeWorld world = MakeWorld(setup, material, sceneShape, Ambient(material.groundKelvin));
+        const uint64_t ticks = sceneTicks != 0 ? sceneTicks : FIRE_TICKS;
+        const RunResult run = Run(setup, material, world, ticks, ticks, ignition);
+        flush();
+        LogRun("列のまとめ", TrialName(), world, run, ticks);
+
+        std::string levels;
+        for (const auto& [exponent, count] : counts.levelsByExponent)
+            levels += std::format(" e{}:{}", exponent, count);
+
+        Log(Channel::Sim, Level::Info,
+            "列のまとめ: 出来事 {}・列 {}・組 {}(2 つ以上をまとめた組 {})・列の数 1/2/3/4+ = {}/{}/{}/{}・組の数 "
+            "1/2/3/4+ = "
+            "{}/{}/{}/{}・最も大きい組 {} セル・段の数の最大{}",
+            counts.events, counts.spans, counts.groups, counts.mergedGroups, counts.spansPerEvent[0],
+            counts.spansPerEvent[1], counts.spansPerEvent[2], counts.spansPerEvent[3], counts.groupsPerEvent[0],
+            counts.groupsPerEvent[1], counts.groupsPerEvent[2], counts.groupsPerEvent[3], counts.largestGroup, levels);
+        Log(Channel::Sim, Level::Info,
+            "列のまとめ: GPU の待ち(費用の式)列ごと {:.2f} 秒・組ごと {:.2f} 秒・出来事を全部 1 本 {:.2f} 秒・"
+            "比べた組 {}・食い違い {}",
+            (double)counts.spanWaitNs * 1.0e-9, (double)counts.groupWaitNs * 1.0e-9,
+            (double)counts.eventWaitNs * 1.0e-9, counts.compared, counts.mismatches);
+        Expect(run.conserved && run.steps.negativeValues == 0, "列のまとめ: 保存・負 0");
+        Expect(counts.spans == run.steps.solves, "列のまとめ: 見た列の数が試作の解きの数と同じ");
+        Expect(counts.mismatches == 0, "列のまとめ: まとめた系の値が列ごとに解いた値とビット一致");
+        if (mergeDumpEvery != 0) {
+            Log(Channel::Sim, Level::Info, "列のまとめ: {} 出来事に 1 つ書いた系 {}", mergeDumpEvery, records.size());
+            Expect(!dumpPath.empty() && test::WriteTimeStepSpans(dumpPath, records), "列のまとめ: ファイルに書けた");
+        }
+    }
+
     // --- D-650・T-1111: 早送りの待ちの見積もりを、実際に進めた解きの数と比べる(合格の判定には使わない)---
     // 1 出来事の GPU の費用(既定 = RTX 3070 Ti の測り。TimeTreeSolveCost)
     const sim::TimeTreeSolveCost forwardCost;
@@ -1137,6 +1282,10 @@ namespace {
                 solverGalerkin = value == "1";
             else if (key == "dump")
                 dumpPath = value;
+            else if (key == "check")
+                mergeCheck = value != "0";
+            else if (key == "every")
+                mergeDumpEvery = static_cast<uint32_t>(std::atoi(value.c_str()));
         }
 
         const bool all = part == "all";
@@ -1169,6 +1318,9 @@ namespace {
 
         if (part == "forward-estimate")
             CheckForwardEstimate(fire, fireIgnition);
+
+        if (part == "event-merge")
+            CheckEventMerge(fire, fireIgnition);
 
         if (part == "grain-fine-pond")
             CheckGranularity("池", pond, PondProfile(32.0), NIGHT_TICKS, {}, 1);

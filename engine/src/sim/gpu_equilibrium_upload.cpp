@@ -129,9 +129,9 @@ namespace bicameral::sim {
         return words;
     }
 
-    std::expected<GpuEquilibriumUpload, std::string> GpuEquilibriumUpload::Create(ID3D12Device5* device,
-                                                                                  const EquilibriumSystem& system,
-                                                                                  const ImplicitGrid& grid) {
+    std::expected<GpuEquilibriumUpload, std::string> GpuEquilibriumUpload::Create(
+        ID3D12Device5* device, const EquilibriumSystem& system, const ImplicitGrid& grid,
+        const GpuEquilibriumUploadOptions& options) {
         if (grid.cells.size() != system.nodes.size())
             return std::unexpected("段と系の節の数が違う(閉じた領域の系は扱わない)");
 
@@ -140,9 +140,10 @@ namespace bicameral::sim {
         if (words.empty())
             return std::unexpected("段 0 の形に入らない系(違うレベルの面・6 面を超える節)");
 
-        // V は 1 回ずつ積む(cycles 回は RecordSolve を cycles 回)
-        auto equilibrium = GpuEquilibrium::Create(device, grid,
-                                                  {.solver = {.method = ImplicitMethod::Multigrid, .cycles = 1}});
+        // V は cyclesPerRecord 回ずつ積む(cycles 回は部品の RecordSolve を cycles ÷ cyclesPerRecord 回)
+        const uint32_t perRecord = std::max(options.cyclesPerRecord, 1u);
+        auto equilibrium = GpuEquilibrium::Create(
+            device, grid, {.solver = {.method = ImplicitMethod::Multigrid, .cycles = perRecord}});
         if (!equilibrium)
             return std::unexpected(equilibrium.error());
 
@@ -150,10 +151,14 @@ namespace bicameral::sim {
         result.m_cells = static_cast<uint32_t>(system.nodes.size());
         result.m_terms = terms;
         result.m_rounding = system.rounding;
+        result.m_cyclesPerRecord = perRecord;
 
         // --- パイプライン・写し・読み戻し・時刻印 ---
         result.m_rootSignature = gpu::CreateRootSignature(device, ROOT_LAYOUT);
-        const auto bytecode = gpu::LoadShader("sim/equilibrium_upload_node.cso");
+        constexpr std::array<const char*, 3> STAGE_SHADERS = {"sim/equilibrium_upload_node.cso",
+                                                              "sim/equilibrium_upload_node_m1.cso",
+                                                              "sim/equilibrium_upload_node_m2.cso"};
+        const auto bytecode = gpu::LoadShader(STAGE_SHADERS[std::min<size_t>(options.stageVariant, 2)]);
         if (!result.m_rootSignature || !bytecode)
             return std::unexpected(bytecode ? std::string("ルート署名を作れない") : bytecode.error());
 
@@ -213,7 +218,10 @@ namespace bicameral::sim {
             m_equilibrium.RecordLevels(list, debugRing);
         }
 
-        for (uint32_t cycle = 0; cycle < cycles; ++cycle) {
+        if (cycles % m_cyclesPerRecord != 0)
+            return false;
+
+        for (uint32_t cycle = 0; cycle < cycles; cycle += m_cyclesPerRecord) {
             if (!m_equilibrium.RecordSolve(list, debugRing))
                 return false;
         }

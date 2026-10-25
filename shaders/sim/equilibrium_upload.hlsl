@@ -5,6 +5,8 @@
 // 写しの並び(64bit の語。engine/src/sim/gpu_equilibrium_upload.cpp の EQ_UPLOAD_*):
 //   節ごとに EQ_UPLOAD_NODE_WORDS 語 = 自分だけの係数(C_i + Σ 固定した面の係数。hi・lo)・6 面の係数(hi・lo)・隣の節(32bit × 6 を 3 語)・
 //   右辺の項の始まりと数(下 32bit・上 32bit)。その後に右辺の項が 3 語ずつ(値・係数の hi・lo)
+// 測りの変種(T-1141。値は壊れるので段 0 の時間だけを測る。CPU とは比べない): EQ_UPLOAD_MEASURE = 1 は右辺の項を割らずに足す
+//   (EqSourceTerm の 128bit の割り算を除く)・2 は段 0 も仕上げず、写しを読んだ語の和だけを右辺に置く(読むだけの床)。
 // 呼ぶ順: この段(節)→ 部品の段(shaders/sim/equilibrium.hlsl の粗い段 → V サイクル)。浮動小数点は使わない(04 §4)。
 #include "common/equilibrium.hlsli"
 #include "common/implicit_conduction.hlsli"
@@ -24,6 +26,10 @@ cbuffer EquilibriumUploadConstants : register(b0) {
     uint32_t g_upTermStart;  // 右辺の項の始まり(語)
     uint32_t g_upRounding;   // 右辺の項の割り方(EQ_ROUNDING_*)
 };
+
+#ifndef EQ_UPLOAD_MEASURE
+#define EQ_UPLOAD_MEASURE 0
+#endif
 
 #define EQ_MAX_NODES g_upMaxNodes
 #define EQ_MAX_LINKS g_upMaxLinks
@@ -57,7 +63,13 @@ FxU128 UpLoadWide(uint32_t word) {
         neighbors[f] = (f & 1) == 0 ? (uint32_t)packed : (uint32_t)(packed >> 32);
     }
 
+#if EQ_UPLOAD_MEASURE >= 2
+    FxU128 diagonal = UpLoadWide(base);
+    FX_UNROLL for (uint32_t g = 0; g < EQ_GPU_FACES_MAX; ++g)
+        diagonal.lo += coefficients[g].lo + coefficients[g].hi + neighbors[g];
+#else
     const FxU128 diagonal = EqGpuFinishNode(node, UpLoadWide(base), neighbors, coefficients);
+#endif
 
     // --- 右辺 = Σ 項 ÷ D(CPU の SourceRhs・MakeLocal の固定した面の項と同じ関数。足す順は結果に効かない)---
     const uint64_t terms = g_upStage[base + EQ_UPLOAD_TERMS];
@@ -66,8 +78,17 @@ FxU128 UpLoadWide(uint32_t word) {
     int64_t rhs = 0;
     for (uint32_t k = 0; k < count; ++k) {
         const uint32_t word = g_upTermStart + (EQ_UPLOAD_TERM_WORDS * (first + k));
+#if EQ_UPLOAD_MEASURE >= 1
+        const FxU128 factor = UpLoadWide(word + 1);
+        rhs += (int64_t)(g_upStage[word] + factor.hi + factor.lo + diagonal.lo);
+#else
         rhs += EqSourceTerm(g_upRounding, (int64_t)g_upStage[word], UpLoadWide(word + 1), diagonal);
+#endif
     }
+
+#if EQ_UPLOAD_MEASURE >= 2
+    rhs += (int64_t)(diagonal.lo + diagonal.hi);
+#endif
 
     EqGpuSetRhs(node, rhs);
 }

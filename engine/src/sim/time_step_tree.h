@@ -16,9 +16,11 @@
 #include <array>
 #include <cstdint>
 #include <functional>
+#include <span>
 #include <vector>
 
 #include "common/fixed.hlsli"
+#include "sim/equilibrium.h"
 #include "sim/multires_nest.h"
 #include "sim/time_step_lab.h"
 
@@ -36,8 +38,6 @@ namespace bicameral::sim {
         // ほかは毎刻み。毎刻みの枠の隣は毎刻み(前線が長い歩の枠に入らないための 1 枠の緩衝)。隣の差 1 段の決まりは使わない
         Jump,
     };
-
-    struct EquilibriumSystem;
 
     // 列の解きを見る口(T-1111。GPU の試験が同じ系を GPU で解き直す)。系は δ = 0 から V を cycles 回で解く(SolveSpan と同じ)。
     // 残差で止める形(residualStop)の時は呼ばない
@@ -230,6 +230,28 @@ namespace bicameral::sim {
         uint64_t cells = 0;  // 刻むセルの数
     };
     TimeTreeRecordBytes MeasureTimeTreeRecords(const TimeTreeWorld& world);
+
+    // --- 1 出来事の列を 1 本の系にまとめる(T-1141。GPU の早送りで起動の数と固定費を減らす)---
+    // 同じ刻みに解く列どうしは面を持たない(列の外は値 0 を固定した面)ので、節を並べただけの系(塊の対角)は列ごとに解いたのと
+    // ビット一致する。ただし部品の段の作り方は系全体で決まる(粗い段を足すかは「どれかの節の重み < 1/2」・縮約は座標の親)ので、
+    // まとめてよいのは V の回数・段の数・節のレベルが同じで、縮約がブロック(8 セル角)の中で閉じる(粗い段 3 つまで)列だけ。
+    // ほかは列ごとの系のまま(組を分ける)。CPU の試作の解き(列ごと)はこのまとめで変わらない(試験 event-merge で確かめる)
+    struct TimeTreeEventSpan {
+        EquilibriumSystem system;
+        int32_t exponent = 0;
+        uint32_t cycles = 0;  // V の回数(e ごとの表)
+    };
+
+    struct TimeTreeEventGroup {
+        EquilibriumSystem system;  // 列の系を入力の順に並べた(節・面・固定した面・右辺の項の番号をずらす)
+        uint32_t cycles = 0;
+        uint32_t levels = 0;               // 部品の段の数
+        std::vector<uint32_t> spans;       // まとめた列(入力の番号)
+        std::vector<uint32_t> nodeStarts;  // 列ごとの節の始まり(spans の順)
+    };
+
+    // 1 出来事の列(SolveSpans の順)を組に分けてまとめる。組は最初の列の順
+    std::vector<TimeTreeEventGroup> GroupTimeTreeEvent(std::span<const TimeTreeEventSpan> spans);
 
     // --- 早送りの待ちの見積もり(D-650・T-1111。ゲームはこれを読んで眠れる条件などを決める。法則は変えない)---
     // 1 出来事(その刻みに解く列を 1 本の系にまとめた形。T-0951)の GPU の費用の式。既定は RTX 3070 Ti・release の測り

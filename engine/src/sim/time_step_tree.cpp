@@ -1103,6 +1103,89 @@ namespace bicameral::sim {
         return std::max(cost.eventNs + slope, cost.eventFloorNs);
     }
 
+    namespace {
+
+        // まとめてよい列の組の鍵(V の回数・段の数・節のレベル)。まとめられない列は own = true(その列だけの組)
+        struct GroupKey {
+            uint32_t cycles = 0;
+            uint32_t levels = 0;
+            int32_t level = 0;
+            bool own = false;
+        };
+
+        // 縮約がブロックの中で閉じる粗い段の数(8 セル角 = 2^3)
+        constexpr uint32_t MERGE_MAX_COARSE_LEVELS = 3;
+
+        GroupKey KeyOf(const TimeTreeEventSpan& span) {
+            const EquilibriumSystem& system = span.system;
+            GroupKey key{.cycles = span.cycles};
+
+            // --- 段の数(部品が作る段。解かずに数える)---
+            EquilibriumOptions options;
+            options.solver.cycles = 0;
+            options.faceValues = false;
+            EquilibriumState state;
+            key.levels = SolveEquilibrium(system, options, state).gridLevels;
+
+            // --- 節のレベルが 1 つで、縮約がブロックの中で閉じるか ---
+            key.level = system.nodes.empty() ? 0 : system.nodes.front().level;
+            const bool sameLevel = std::ranges::all_of(
+                system.nodes, [&key](const EquilibriumNode& node) { return node.level == key.level; });
+            key.own = !sameLevel || key.levels > MERGE_MAX_COARSE_LEVELS + 1;
+
+            return key;
+        }
+
+        bool SameGroup(const GroupKey& a, const GroupKey& b) {
+            return !a.own && !b.own && a.cycles == b.cycles && a.levels == b.levels && a.level == b.level;
+        }
+
+        // 列の系を組の系の後ろに足す(番号を節の数だけずらす)
+        void Append(EquilibriumSystem& into, const EquilibriumSystem& from) {
+            const auto offset = static_cast<uint32_t>(into.nodes.size());
+            into.rounding = from.rounding;
+            into.nodes.insert(into.nodes.end(), from.nodes.begin(), from.nodes.end());
+            for (EquilibriumFace face : from.faces) {
+                face.fine += offset;
+                face.coarse += offset;
+                into.faces.push_back(face);
+            }
+
+            for (EquilibriumFixedFace fixed : from.fixedFaces) {
+                fixed.node += offset;
+                into.fixedFaces.push_back(fixed);
+            }
+
+            for (EquilibriumSource source : from.sources) {
+                source.node += offset;
+                into.sources.push_back(source);
+            }
+        }
+
+    }  // namespace
+
+    std::vector<TimeTreeEventGroup> GroupTimeTreeEvent(std::span<const TimeTreeEventSpan> spans) {
+        std::vector<TimeTreeEventGroup> groups;
+        std::vector<GroupKey> keys;
+        for (uint32_t index = 0; index < spans.size(); ++index) {
+            const GroupKey key = KeyOf(spans[index]);
+            const auto found = std::ranges::find_if(keys,
+                                                    [&key](const GroupKey& other) { return SameGroup(key, other); });
+            const auto at = static_cast<size_t>(found - keys.begin());
+            if (found == keys.end()) {
+                keys.push_back(key);
+                groups.push_back({.cycles = key.cycles, .levels = key.levels});
+            }
+
+            TimeTreeEventGroup& group = groups[at];
+            group.spans.push_back(index);
+            group.nodeStarts.push_back(static_cast<uint32_t>(group.system.nodes.size()));
+            Append(group.system, spans[index].system);
+        }
+
+        return groups;
+    }
+
     TimeTreeForwardEstimate EstimateTimeTreeForward(const TimeTreeSetup& setup, const TimeTreeWorld& world,
                                                     uint64_t ticks, const TimeTreeSolveCost& cost) {
         // --- e ごとの刻むセルの数 ---

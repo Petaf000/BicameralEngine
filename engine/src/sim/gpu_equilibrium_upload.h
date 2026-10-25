@@ -20,14 +20,21 @@
 
 namespace bicameral::sim {
 
+    struct GpuEquilibriumUploadOptions {
+        // 部品を作る時の V の回数(RecordSolve の cycles はこの倍数。部品の RecordSolve を cycles ÷ これ 回積む。値は同じ。T-1141 の測り)
+        uint32_t cyclesPerRecord = 1;
+        // 段 0 の段の測りの変種(0 = 本物。1 = 右辺の項を割らない・2 = 段 0 を仕上げず読むだけ。値は壊れる = 段 0 の時間だけを測る。T-1141)
+        uint32_t stageVariant = 0;
+    };
+
     class GpuEquilibriumUpload {
     public:
         static constexpr uint32_t MAX_TIMESTAMPS = 256;
 
         // grid は system を SolveEquilibrium が組んだ段(閉じない道。節の順は system と同じ)
-        [[nodiscard]] static std::expected<GpuEquilibriumUpload, std::string> Create(ID3D12Device5* device,
-                                                                                     const EquilibriumSystem& system,
-                                                                                     const ImplicitGrid& grid);
+        [[nodiscard]] static std::expected<GpuEquilibriumUpload, std::string> Create(
+            ID3D12Device5* device, const EquilibriumSystem& system, const ImplicitGrid& grid,
+            const GpuEquilibriumUploadOptions& options = {});
 
         // 段の形・段 0 の写しを写し、前の答えを 0 に(リストの初め。バッファは COMMON の時)
         [[nodiscard]] bool RecordUpload(ID3D12GraphicsCommandList* list, const ImplicitGrid& grid);
@@ -69,6 +76,7 @@ namespace bicameral::sim {
         uint32_t m_cells = 0;
         uint32_t m_terms = 0;
         uint32_t m_rounding = 0;
+        uint32_t m_cyclesPerRecord = 1;
 
         ComPtr<ID3D12RootSignature> m_rootSignature;
         ComPtr<ID3D12PipelineState> m_pipeline;

@@ -261,6 +261,9 @@ endforeach()
 
 # 部品の段 0 を CPU が組んだ系の写しから仕上げる法則の段(T-1111。時間を飛ばす試作の列の系を GPU で解き比べる。engine/src/sim/gpu_equilibrium_upload.cpp)
 bicameral_add_shader(sim/equilibrium_upload.hlsl PROFILE cs_6_8 ENTRY EquilibriumUploadNode NAME equilibrium_upload_node)
+# 段 0 の時間の測りの変種(T-1141。1 = 右辺の項を割らない・2 = 読むだけ。値は壊れる。gpu_time_step_span_test --stage-variants)
+bicameral_add_shader(sim/equilibrium_upload.hlsl PROFILE cs_6_8 ENTRY EquilibriumUploadNode NAME equilibrium_upload_node_m1 DEFINES EQ_UPLOAD_MEASURE=1)
+bicameral_add_shader(sim/equilibrium_upload.hlsl PROFILE cs_6_8 ENTRY EquilibriumUploadNode NAME equilibrium_upload_node_m2 DEFINES EQ_UPLOAD_MEASURE=2)
 
 # 成分を持つ節の釣り合いの GPU の段(T-0970。成分の数 k = 1・2・3・6 ごとに別々に作る。呼ぶ順は engine/src/sim/gpu_equilibrium_block.cpp)
 foreach(_k IN ITEMS 1 2 3 6)
