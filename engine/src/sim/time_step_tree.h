@@ -239,9 +239,10 @@ namespace bicameral::sim {
         uint32_t smallCells = 1024;
         uint64_t smallEventNs = 13300;  // 小さい出来事の段 0 + 段の重み(512 セル)
         uint64_t smallCycleNs = 26000;  // 小さい出来事の V 1 回
-        // 大きい出来事: 固定費 + セルの数 × 傾き。ただし下限(1 スレッドの 128bit の割り算の待ち。8,192〜6.6 万セルはほぼこの値)
+        // 大きい出来事: 固定費 + セルの数 × 傾き。ただし下限(8,192〜6.6 万セルはほぼこの値。測りで 0.06〜0.52 ms と揺れた:
+        // 512 セルの系を 16 並べた 8,192 は 0.06 ms・広げた木の 8,192 は 0.26〜0.52 ms。原因は未確認 = T-1140)
         uint64_t eventNs = 120000;
-        uint64_t eventFloorNs = 520000;
+        uint64_t eventFloorNs = 260000;
         uint64_t cellPs = 2530;       // 段 0 + 段の重みのセル 1 つ
         uint64_t cellCyclePs = 1940;  // V 1 回のセル 1 つ
     };
