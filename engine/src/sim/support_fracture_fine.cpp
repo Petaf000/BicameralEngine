@@ -437,6 +437,23 @@ namespace bicameral::sim {
             }
         }
 
+        // 戻さない所: 比が coarsenIndex 以上のセルから coarsenRing のセルまで(分ける所より広く・低い線で = 場所と線の両方に幅を持たせる)
+        std::vector<uint8_t> hold(m_scene.solid.size(), 0);
+        const auto holdRing = (int64_t)m_fracture.coarsenRing;
+        for (uint32_t at = 0; at < worst.size(); ++at) {
+            if (worst[at] < m_fracture.coarsenIndex)
+                continue;
+
+            const auto cx = (int64_t)(at % m_scene.width);
+            const auto cy = (int64_t)(at / m_scene.width);
+            for (int64_t y = std::max<int64_t>(cy - holdRing, 0);
+                 y <= std::min<int64_t>(cy + holdRing, m_scene.height - 1); ++y) {
+                for (int64_t x = std::max<int64_t>(cx - holdRing, 0);
+                     x <= std::min<int64_t>(cx + holdRing, m_scene.width - 1); ++x)
+                    hold[(size_t)x + (size_t)m_scene.width * (size_t)y] = 1;
+            }
+        }
+
         std::vector<uint8_t> next = m_scene.fine;
         bool changed = false;
         for (uint32_t up = 0; up < m_scene.height; ++up) {
@@ -456,7 +473,7 @@ namespace bicameral::sim {
                 }
 
                 uint16_t& calm = m_calmTicks[at];
-                const bool quiet = worst[at] < m_fracture.coarsenIndex && split[at] == 0;
+                const bool quiet = hold[at] == 0 && split[at] == 0;
                 calm = quiet ? (uint16_t)std::min<uint32_t>(calm + 1u, UINT16_MAX) : 0;
                 if (calm >= m_fracture.coarsenTicks && CanMerge(x, up)) {
                     next[at] = 0;
