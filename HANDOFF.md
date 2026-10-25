@@ -7,7 +7,7 @@
   D-658 の既定化(熱の放射も組で待たせる。emitSlots 15・thermalInSlots true)と組の式 (bx + 4 bz + 6 by)(T-1146 Done)・
   T-1147(口を 64³ 4.42 → 0.46〜0.55 ms。向きを刻みで回す形は値で選べるが既定は切)・T-1100〜T-1102・T-1116・T-1117 の記録。
 - 記録: **D-661**(早送りの待ちの見積もりは今の変化の速さが続くと見なす外挿)・**D-662**(費用の値は起動時に小さい系を解いて測る・機種の表は持たない)。どちらも 2026-10-26 ユーザー。ADR-0472・wt4 の T-1111。
-- 通した試験: release 警告 0・archmap OK・CPU 7 本(sky_port・sun_column・cascade_light 801 s・cascade_light_swing 783 s・reaction_package・standard_packages・radiation_scene 240 s)・GPU GPU_PLACEHOLDER
+- 通した試験: release 警告 0・archmap OK・CPU 7 本(sky_port・sun_column・cascade_light 801 s・cascade_light_swing 783 s・reaction_package・standard_packages・radiation_scene 240 s)・GPU 3 本(gpu_sun_column 4 s・gpu_cascade_light 48 s・gpu_cascade_light_wide 30 s)。push 済み
 - **マージしていないブランチ(2026-10-26)**:
   - wt2 t-0872-rb2-fracture: T-1120・T-1086 Done・T-1067 作業中
   - wt3 t-1105-air-agitation: T-1106 Done・T-1136 作業中
