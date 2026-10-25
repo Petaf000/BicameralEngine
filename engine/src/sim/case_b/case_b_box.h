@@ -38,6 +38,9 @@ namespace bicameral::sim::case_b {
     enum class MomentumLayout : uint8_t {
         PerPhase,       // 案 ①: 相ごとの面 ×3(気体・液体・粒)
         GrainSeparate,  // 案 ④: 粒だけ別 + 気体と液体は混ざった運動量(流体・粒)
+        // 案 ④ + 舞う粒(T-1138・D-668。研究): 流体・積もった層の粒・舞う粒の 3 つ。粒の 2 つの状態(FlowOptions::grainTwoStates)と
+        // 一緒に使い、層と舞う粒がそれぞれの速さを持つ。2 つの状態を使わない時は ④ と同じ(舞う粒の置き場は 0 のまま)
+        GrainTwoState,
     };
 
     // --- 物質の欄(21 §1.1。書かなければ std::nullopt)---
@@ -206,7 +209,10 @@ namespace bicameral::sim::case_b {
     [[nodiscard]] uint32_t CellIndex(const Box& box, uint32_t x, uint32_t y, uint32_t z);
     [[nodiscard]] std::array<uint32_t, 3> CellCoordinates(const Box& box, uint32_t cell);
     [[nodiscard]] uint32_t SlotCount(MomentumLayout layout);
-    [[nodiscard]] uint32_t MomentumSlot(MomentumLayout layout, Phase phase);  // Phase は動く相(0〜2)
+    // Phase は動く相(0〜2)。GrainTwoState の粒は積もった層の置き場
+    [[nodiscard]] uint32_t MomentumSlot(MomentumLayout layout, Phase phase);
+    // 舞う粒の置き場(T-1138)。GrainTwoState だけ層と別で、ほかの置き場は粒の置き場と同じ
+    [[nodiscard]] uint32_t SuspendedGrainSlot(MomentumLayout layout);
     [[nodiscard]] uint32_t FaceIndex(const Box& box, uint32_t cell, uint32_t slot);
     // 軸 axis で cell の + 側の隣(無ければ std::nullopt = 壁)
     [[nodiscard]] std::optional<uint32_t> Neighbor(const Box& box, uint32_t cell, uint32_t axis);

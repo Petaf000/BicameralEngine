@@ -28,6 +28,12 @@ namespace {
     bool restsOnLayerOverride = false;  // 2 本目の見直し 1(T-1137)。引数のどこかに keeplayer2
     bool keepLayerOverride = false;     // 層は落ちても層のまま(T-1137 の 2 本目)。引数のどこかに keeplayer
     bool twoStatesOverride = false;  // 粒を層と舞う粒の 2 つの状態で持つ(T-1136・D-659 の研究)。引数のどこかに twostate
+    bool splitOverride =
+        false;  // 層と舞う粒に別々の運動量の置き場(T-1138。④ の場面を GrainTwoState に)。引数のどこかに split
+
+    MomentumLayout SplitLayout(MomentumLayout layout) {
+        return splitOverride && layout == MomentumLayout::GrainSeparate ? MomentumLayout::GrainTwoState : layout;
+    }
 
     void Expect(bool condition, const char* text, int line) {
         if (condition)
@@ -183,7 +189,7 @@ namespace {
     Run RunR2(const Scene& scene, int32_t level, uint32_t ticksPerSecond, uint64_t seconds,
               const std::vector<std::string>& regionNames, bool drag = true,
               const std::function<void(Box&)>& prepare = nullptr) {
-        auto created = BuildScene(scene, level, MomentumLayout::GrainSeparate);
+        auto created = BuildScene(scene, level, SplitLayout(MomentumLayout::GrainSeparate));
         EXPECT(created.has_value());
         Run run{.recording = {},
                 .stats = {},
@@ -544,7 +550,7 @@ namespace {
                       uint64_t seconds, const std::vector<std::string>& regionNames, bool drag,
                       const std::function<void(Box&)>& prepare, const std::function<void(Box&)>& afterTick,
                       bool splitSurfaceLayer = false) {
-        auto created = BuildScene(scene, level, layout);
+        auto created = BuildScene(scene, level, SplitLayout(layout));
         EXPECT(created.has_value());
         PlaceRun run{.recording = {}, .stats = {}, .box = std::move(*created), .liquidHeightUm = {}};
         run.box.config.ticksPerSecond = ticksPerSecond;
@@ -739,6 +745,8 @@ int main(int argc, char** argv) {
             twoStatesOverride = keepLayerOverride = restsOnLayerOverride = true;
         else if (std::string(argv[index]) == "keeplayer")
             twoStatesOverride = keepLayerOverride = true;
+        else if (std::string(argv[index]) == "split")
+            twoStatesOverride = splitOverride = true;
         else
             argv[kept++] = argv[index];
     }

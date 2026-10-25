@@ -236,6 +236,14 @@ namespace {
         EXPECT(MomentumSlot(MomentumLayout::GrainSeparate, Phase::Gas) ==
                MomentumSlot(MomentumLayout::GrainSeparate, Phase::Liquid));
         EXPECT(MomentumSlot(MomentumLayout::GrainSeparate, Phase::Grain) == 1);
+        // 層と舞う粒(T-1138): 流体・層・舞う粒の 3 つ。ほかの置き場では舞う粒は粒の置き場
+        EXPECT(SlotCount(MomentumLayout::GrainTwoState) == 3);
+        EXPECT(MomentumSlot(MomentumLayout::GrainTwoState, Phase::Gas) == 0 &&
+               MomentumSlot(MomentumLayout::GrainTwoState, Phase::Liquid) == 0);
+        EXPECT(MomentumSlot(MomentumLayout::GrainTwoState, Phase::Grain) == 1 &&
+               SuspendedGrainSlot(MomentumLayout::GrainTwoState) == 2);
+        EXPECT(SuspendedGrainSlot(MomentumLayout::GrainSeparate) == 1 &&
+               SuspendedGrainSlot(MomentumLayout::PerPhase) == MomentumSlot(MomentumLayout::PerPhase, Phase::Grain));
         EXPECT(box.faceMomentum[0].size() == 24u * 3);
     }
 

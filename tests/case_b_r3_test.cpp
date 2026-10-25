@@ -48,6 +48,9 @@ namespace {
     }
 
     const char* LayoutName(MomentumLayout layout) {
+        if (layout == MomentumLayout::GrainTwoState)
+            return "④+舞う粒";
+
         return layout == MomentumLayout::PerPhase ? "①" : "④";
     }
 
@@ -179,6 +182,20 @@ namespace {
     int64_t MaxGrainSpeed(const Box& box) {
         const uint32_t slot = MomentumSlot(box.config.layout, Phase::Grain);
         int64_t speed = 0;
+        if (box.config.layout == MomentumLayout::GrainTwoState) {
+            // 層と舞う粒の置き場(T-1138): 置き場ごとの面の速さ(面の運動量 ÷ その置き場の質量の平均)の最大
+            const View view = BuildView(box);
+            for (uint32_t cell = 0; cell < CellCount(box); ++cell) {
+                for (uint32_t axis = 0; axis < 3; ++axis) {
+                    for (const uint32_t arm : {slot, SuspendedGrainSlot(box.config.layout)})
+                        speed = std::max<int64_t>(
+                            speed, std::abs(FaceVelocity(box, view, {.axis = axis, .cell = cell, .slot = arm})));
+                }
+            }
+
+            return speed;
+        }
+
         for (uint32_t cell = 0; cell < CellCount(box); ++cell) {
             for (uint32_t axis = 0; axis < 3; ++axis) {
                 const std::optional<uint32_t> neighbor = Neighbor(box, cell, axis);
@@ -429,11 +446,13 @@ namespace {
     std::optional<uint32_t> movingSpeedOverride;
     std::shared_ptr<FlowStats> currentStats;  // 走っている場面の段の数え(刻みの後の操作から読む。T-1003 の測り)
     bool movingByCellOverride = false;
-    uint32_t dragScaleOverride = 1000;     // 引きずりの倍率(‰。T-1003 の根の測り。引数 drag=<‰>)
-    bool sideDragOverride = false;         // 層の横の面の Kozeny–Carman(T-1136 の 1 本目の計画)。引数 sidedrag
-    bool restsOnLayerOverride = false;     // 2 本目の見直し 1(T-1137)。引数 keeplayer2
-    bool keepLayerOverride = false;        // 層は落ちても層のまま(T-1137 の 2 本目)。引数 keeplayer(twostate も入る)
-    bool twoStatesOverride = false;        // 粒を層と舞う粒の 2 つの状態で持つ(T-1136・D-659 の研究)。引数 twostate
+    uint32_t dragScaleOverride = 1000;  // 引きずりの倍率(‰。T-1003 の根の測り。引数 drag=<‰>)
+    bool sideDragOverride = false;      // 層の横の面の Kozeny–Carman(T-1136 の 1 本目の計画)。引数 sidedrag
+    bool restsOnLayerOverride = false;  // 2 本目の見直し 1(T-1137)。引数 keeplayer2
+    bool keepLayerOverride = false;     // 層は落ちても層のまま(T-1137 の 2 本目)。引数 keeplayer(twostate も入る)
+    bool twoStatesOverride = false;     // 粒を層と舞う粒の 2 つの状態で持つ(T-1136・D-659 の研究)。引数 twostate
+    bool splitOverride =
+        false;  // 層と舞う粒に別々の運動量の置き場(T-1138・D-668。④ の場面を GrainTwoState に)。引数 split(twostate も入る)
     bool restLayerOverride = false;        // 積もった層を解く間は障害物に(T-1043 の 2 回目。打ち切り)。引数 layer
     uint32_t cyclesOverride = CYCLES;      // 陰の圧力の V サイクルの回数(T-1105)。引数 cycles=<回>
     uint32_t ticksOverride = 0;            // 1 秒の刻みの数(T-1105)。引数 tps=<数>。0 = 場面の既定
@@ -472,7 +491,10 @@ namespace {
             }
         }
 
-        auto created = BuildScene(scene, options.level, options.layout);
+        const MomentumLayout layout = splitOverride && options.layout == MomentumLayout::GrainSeparate
+                                          ? MomentumLayout::GrainTwoState
+                                          : options.layout;
+        auto created = BuildScene(scene, options.level, layout);
         EXPECT(created.has_value());
         Run run{.recording = {}, .stats = {}, .box = std::move(*created), .grainSpeed = {}};
         run.box.config.ticksPerSecond = ticksOverride != 0 ? ticksOverride : options.ticksPerSecond;
@@ -1445,6 +1467,8 @@ int main(int argc, char** argv) {
             twoStatesOverride = keepLayerOverride = restsOnLayerOverride = true;
         else if (word == "keeplayer")
             twoStatesOverride = keepLayerOverride = true;
+        else if (word == "split")
+            twoStatesOverride = splitOverride = true;
         else if (word == "probe")
             probeOverride = true;
         else if (word == "sidedrag")

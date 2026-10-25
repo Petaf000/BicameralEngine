@@ -158,7 +158,11 @@ namespace bicameral::sim::case_b {
         //   床が支えられたセルの舞う粒 → 層: 舞う粒 × min(1, w_s Δt ÷ 層の上の空きの高さ)(w_s = 1 粒の終端の速さ。粒の大きさ・密度・流体から導く)。
         // 支え・有効応力・摩擦は層だけ(舞う粒は押し合わない)。引きずりは層 = Kozeny–Carman(層の詰まり・層の体積だけ)+ 舞う粒 = ばらけた粒の式
         // (舞う粒の体積)。運ぶ段は風上の層と舞う粒の割合で一緒に運び、層の分は床が支えられたセルへ入れば層・そうでなければ舞う粒になる。
-        // 運動量は 1 つの粒の置き場を層と舞う粒が共有する(分けるのは退く道 ②)
+        // 運動量は 1 つの粒の置き場を層と舞う粒が共有する。箱の置き場が GrainTwoState なら分ける(退く道 ②・T-1138・D-668):
+        //   層と舞う粒がそれぞれ面の運動量を持ち、重さ・浮力は置き場ごと、引きずりは層 = Kozeny–Carman・舞う粒 = ばらけた粒の式で
+        //   流体を真ん中にした星の形で消去する(層と舞う粒は直接つながない。仮)。降伏(押し合い・摩擦)は層の置き場だけ。
+        //   運ぶ段は置き場ごとの流れで運び、層が舞う粒になった分(縁からこぼれる・上へ出る)はその割合の運動量を舞う粒の置き場へ、
+        //   刻みの初めの受け渡しで沈んだ・舞い上がった分も同じ割合で移す(運動量の和は保つ)
         bool grainTwoStates = false;
         // 層が詰まり切らないセル(層の上に澄んだ空気)の横の面でも、層を Kozeny–Carman で流体とつなぐ(1 本目の計画どおり。比べる時だけ)。
         // false(既定)= 横の面は詰まったセルの層だけつなぐ(層の上を流れる空気は層の孔をほぼ通らない。T-1136 の見直し 1)
@@ -236,6 +240,10 @@ namespace bicameral::sim::case_b {
         // --- 粒の 2 つの状態(T-1136)---
         uint64_t settledGrainMg = 0;  // 舞う粒 → 層(刻みの累計)
         uint64_t liftedGrainMg = 0;   // 層 → 舞う粒(床が支えられていないセル。刻みの累計)
+
+        // --- 層と舞う粒の置き場を分けた時(T-1138)---
+        uint64_t suspendedFaces = 0;    // 舞う粒を層と別の速さで解いた面(刻みの累計)
+        uint64_t convertedGrainMg = 0;  // 運ぶ段で層から舞う粒になった質量(縁からこぼれる・上へ出る。刻みの累計)
     };
 
     struct FlowStages {
@@ -245,7 +253,7 @@ namespace bicameral::sim::case_b {
 
     [[nodiscard]] FlowCell MeasureFlowCell(const Box& box, const View& view, uint32_t cell, const FlowOptions& options);
 
-    // 置き場は ④(GrainSeparate)と ①(PerPhase。T-0963)。段は pressure・transport・apply を使う(drag なら粒も動かす)
+    // 置き場は ④(GrainSeparate)・①(PerPhase。T-0963)・④ + 舞う粒(GrainTwoState。T-1138)。段は pressure・transport・apply を使う(drag なら粒も動かす)
     [[nodiscard]] FlowStages MakeFlowStages(const FlowOptions& options);
 
 }  // namespace bicameral::sim::case_b
