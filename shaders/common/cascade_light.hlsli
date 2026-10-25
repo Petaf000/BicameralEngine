@@ -115,6 +115,51 @@ FX_FN RcBands RcFaceEmission(uint32_t temperatureMk, RcCellLight light, RcCellLi
     return bands;
 }
 
+// 参照の温度との差の放つ量(T-1102・ADR-0461)。referenceWord の下 31bit = 参照の温度(mK。0 なら今のまま)・bit 31 = 負の側。
+// 正の側は「自分 − 参照」、負の側は「参照 − 自分」の大きさ(どちらも 0 未満は 0)。正の側と負の側を別の刻みの組で運び、差を取ると
+// 参照の温度の黒体との差だけを運んだことになる(同じ温度の所は何も放たない = 坂を下るが構造で 0)。
+// 64bit の「0 で止める引き算」は HW で誤るので符号付きの差で(T-0185。量は 2^63 未満)
+FX_CONST uint32_t RC_REFERENCE_NEGATIVE = 0x80000000u;
+
+FX_FN uint64_t RcPositivePart(uint64_t a, uint64_t b) {
+    const int64_t difference = (int64_t)a - (int64_t)b;
+    if (difference <= 0)
+        return 0;
+
+    return (uint64_t)difference;
+}
+
+FX_FN RcBands RcFaceEmissionRelative(uint32_t temperatureMk, uint32_t referenceWord, RcCellLight light,
+                                     RcCellLight across) {
+    const uint32_t referenceMk = referenceWord & ~RC_REFERENCE_NEGATIVE;
+    const bool negative = (referenceWord & RC_REFERENCE_NEGATIVE) != 0;
+    const RcBands own = RcFaceEmission(temperatureMk, light, across);
+    if (referenceMk == 0 && !negative)
+        return own;
+
+    const RcBands reference = RcFaceEmission(referenceMk, light, across);
+    RcBands bands;
+    bands.shortBand = negative ? RcPositivePart(reference.shortBand, own.shortBand)
+                               : RcPositivePart(own.shortBand, reference.shortBand);
+    bands.longBand = negative ? RcPositivePart(reference.longBand, own.longBand)
+                              : RcPositivePart(own.longBand, reference.longBand);
+
+    return bands;
+}
+
+// 黒体が水平な面へ放つ強さ(帯ごとの mW/m²)。RcFaceBlackEmission(0.25 m²・1/60 s・2^−16 mJ)を W/m² に直す: × 240 ÷ 2^16。
+// 空との交換の口(sim/sky_port。T-1102)が、参照の温度の分の空との出入り(空の光 − 参照の黒体)を作るのに使う
+FX_FN RcBands RcBlackIrradianceMilliwatts(uint32_t temperatureMk) {
+    const uint64_t black = RcFaceBlackEmission(temperatureMk);
+    const uint64_t blackShort = FxShiftRightU128(FxMulU64Full(black, RcShortFractionQ32(temperatureMk)), 32);
+
+    RcBands bands;
+    bands.shortBand = (blackShort * 240) >> RC_ENERGY_SHIFT;
+    bands.longBand = ((black - blackShort) * 240) >> RC_ENERGY_SHIFT;
+
+    return bands;
+}
+
 // 軸 axis に a、(axis + 1) % 3 に u、(axis + 2) % 3 に v を置いた時の、軸 want の値
 FX_FN int64_t RcAxisValueOf(uint32_t want, uint32_t axis, int64_t a, int64_t u, int64_t v) {
     return want == axis ? a : (want == (axis + 1) % 3 ? u : v);
@@ -500,13 +545,16 @@ FX_CONST uint32_t RC_SLOTS_LIMIT = 64;
 // 持ち越しの表にたまった光(照り返し・待った熱の光)を放つ。待つ間の光は表にあり、放つ時にまとめて出る(保存はそのまま)。
 // 組をブロックで揃えるのは、同じ刻みに放つ面が同じ最上段のブロックに集まり、段の袋の数(費用の芯)が組の数で割れるから。
 // 組の数は奇数にする(升目の中のずらしの巡り 159 × 組の数 が 256 と互いに素で、組の刻みだけでも 16 × 16 を一巡する)。
+// 組 = (bx + 4 bz + 6 by) mod 組の数(T-1146)。光は光源の近くのブロックに集まるので、どの軸の面でも隣り合う 3 × 3 のブロックが
+// 違う組になること(前の bx + 3 bz + 5 by と同じ)を先に守り、その中で軸に揃った面のブロック n × n を組に配った偏りが小さい係数を選んだ
+// (15 組の 8 × 8 の面: 前の式は 2〜6 個 = 3 倍、今の式は地面 4〜5 個・壁 3〜5 個。2 × 2〜16 × 16 は「割り切れる時の最小の差 + 3」以内)
 FX_FN bool RcEmitSlotActive(FX_IN(RcStepConstants) constants, int64_t cellX, int64_t cellY, int64_t cellZ) {
     if (constants.emitSlots <= 1)
         return true;
 
     const uint32_t shift = constants.levels - 1;
     const int64_t slots = (int64_t)constants.emitSlots;
-    const int64_t spread = (cellX >> shift) + (3 * (cellZ >> shift)) + (5 * (cellY >> shift));
+    const int64_t spread = (cellX >> shift) + (4 * (cellZ >> shift)) + (6 * (cellY >> shift));
     const int64_t slot = ((spread % slots) + slots) % slots;
 
     return (uint64_t)slot == constants.tick % (uint64_t)constants.emitSlots;
@@ -1058,7 +1106,7 @@ struct RcGpuParams {
     uint32_t emitSlots;   // RcStepConstants と同じ
     uint32_t thermalInSlots;
     uint32_t stateFaceFlags;  // 放つ面の列に入れた印(セル × 6 の uint32。T-1010)
-    uint32_t padding;
+    uint32_t referenceWord;   // 参照の温度と負の側の印(RcFaceEmissionRelative。0 = 今のまま。T-1102)
 };
 
 // 頭の語(uint64 の番号)

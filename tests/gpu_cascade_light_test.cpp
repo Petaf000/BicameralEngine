@@ -11,6 +11,7 @@
 #include <functional>
 #include <span>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "core/log.h"
@@ -156,6 +157,15 @@ namespace {
         cases.push_back({"放つ面の組 5・熱も待つ", FireGround(32, 4, 6, Material::Stone), Params(4, 5, 1, 5, true), 7});
         cases.push_back(
             {"放つ面の組 3・照り返しだけ", FireGround(32, 4, 4, Material::Stone), Params(4, 5, 1, 3, false), 4});
+        // 参照の温度との差(T-1102): 正の側(焚き火)と負の側(参照より冷たい地面)。冷たい物も放つので quietBelowMk は使わない
+        for (const bool negative : {false, true}) {
+            sim::CascadeParams relative = Params(4, 5, 1);
+            relative.referenceMk = 600000;
+            relative.negativePart = negative;
+            cases.push_back({negative ? "参照の温度との差・負の側" : "参照の温度との差・正の側",
+                             FireGround(32, 4, 4, Material::Stone), relative, 3});
+        }
+
         Case shifted{"世界の隅が負の座標", FireGround(24, 4, 3, Material::Stone), Params(4, 4, 1), 2};
         shifted.grid.low = {-5, 3, -9};
         cases.push_back(std::move(shifted));
@@ -294,7 +304,7 @@ namespace {
                                                 const sim::CascadeGrid& grid, const Form& form) {
         const sim::CascadeParams params = Params(form.baseTexels, 5, form.raysPerBag, form.emitSlots,
                                                  form.thermalInSlots);
-        auto light = Prepare(context, grid, params, {.faces = 1u << 14, .bags = 1u << 21, .carry = 1u << 18});
+        auto light = Prepare(context, grid, params, {.faces = 1u << 15, .bags = 1u << 21, .carry = 1u << 19});
         if (!light)
             return std::unexpected(light.error());
 
@@ -404,7 +414,122 @@ namespace {
         return {};
     }
 
-    int Run(std::span<char*> arguments) {
+    // 1 刻みの最大が跳ねる理由を見る(T-1116): 15 刻みを 1 本のリストで、刻みごとにタイムスタンプ(GPU が休まない)と、
+    // 同じ 15 刻みを 1 刻みずつのリスト(間で GPU が休む)で。刻みごとの ms・光線・放つ面を並べる
+    std::expected<void, std::string> ProfileTicks(const GpuContext& context, const char* scene,
+                                                  const sim::CascadeGrid& grid, const Form& form) {
+        constexpr uint32_t COUNT = 15;
+        const sim::CascadeParams params = Params(form.baseTexels, 5, form.raysPerBag, form.emitSlots,
+                                                 form.thermalInSlots);
+        auto light = Prepare(context, grid, params, {.faces = 1u << 15, .bags = 1u << 21, .carry = 1u << 19});
+        if (!light)
+            return std::unexpected(light.error());
+
+        const D3D12_GPU_VIRTUAL_ADDRESS ring = context.ring->GpuAddress();
+        ID3D12GraphicsCommandList10* warm = context.queue->Begin();
+        if (warm == nullptr)
+            return std::unexpected("暖機のリストを始められない");
+
+        for (uint32_t tick = 0; tick < MEASURE_WARMUP; ++tick)
+            light->RecordTick(warm, *context.nest, ring, tick);
+
+        if (!context.queue->ExecuteAndWait())
+            return std::unexpected("暖機で回せない");
+
+        uint64_t frequency = 0;
+        if (FAILED(context.queue->Native()->GetTimestampFrequency(&frequency)) || frequency == 0)
+            return std::unexpected("タイムスタンプの周波数を読めない");
+
+        ID3D12GraphicsCommandList10* batch = context.queue->Begin();
+        if (batch == nullptr)
+            return std::unexpected("リストを始められない");
+
+        for (uint32_t tick = 0; tick < COUNT; ++tick) {
+            context.nest->RecordTimestamp(batch, tick);
+            light->RecordTick(batch, *context.nest, ring, MEASURE_WARMUP + tick);
+        }
+
+        context.nest->RecordTimestamp(batch, COUNT);
+        context.nest->RecordReadback(batch);
+        if (!context.queue->ExecuteAndWait())
+            return std::unexpected("GPU での実行に失敗");
+
+        const std::vector<uint64_t> stamps = context.nest->ReadTimestamps(COUNT + 1);
+        if (stamps.size() != COUNT + 1)
+            return std::unexpected("タイムスタンプを読めない");
+
+        std::string continuous;
+        for (uint32_t tick = 0; tick < COUNT; ++tick)
+            continuous += std::format(" {:.2f}", static_cast<double>(stamps[tick + 1] - stamps[tick]) * 1000.0 /
+                                                     static_cast<double>(frequency));
+
+        // 同じ刻みの番号(組の巡り)を 1 刻みずつ
+        std::string separate;
+        std::string rays;
+        for (uint32_t tick = 0; tick < COUNT; ++tick) {
+            ID3D12GraphicsCommandList10* list = context.queue->Begin();
+            if (list == nullptr)
+                return std::unexpected("リストを始められない");
+
+            context.nest->RecordTimestamp(list, 0);
+            light->RecordTick(list, *context.nest, ring, MEASURE_WARMUP + COUNT + tick);
+            context.nest->RecordTimestamp(list, 1);
+            context.nest->RecordReadback(list);
+            light->RecordReadback(list);
+            if (!context.queue->ExecuteAndWait())
+                return std::unexpected("GPU での実行に失敗");
+
+            const std::vector<uint64_t> one = context.nest->ReadTimestamps(2);
+            const auto read = light->Read();
+            if (one.size() != 2 || !read)
+                return std::unexpected("タイムスタンプか結果を読めない");
+
+            separate += std::format(" {:.2f}",
+                                    static_cast<double>(one[1] - one[0]) * 1000.0 / static_cast<double>(frequency));
+            rays += std::format(" {}", read->result.rays / 1000);
+        }
+
+        Log(Channel::Gpu, Level::Info,
+            "刻みごと [{}] {}: 続けて ms(刻み {}〜):{} / 1 刻みずつ ms(刻み {}〜):{} / 光線 千本:{}", form.name, scene,
+            MEASURE_WARMUP, continuous, MEASURE_WARMUP + COUNT, separate, rays);
+
+        return {};
+    }
+
+    // 世界の広さで回した時の費用(T-1101): 96³・127³(世界の箱の上限。ADR-0432)の照り返す地面。--wide の時だけ
+    std::expected<void, std::string> MeasureWide(const GpuContext& context) {
+        constexpr std::array<Form, 2> FORMS = {Form{"今の形", 4, 1, 1, false}, Form{"熱も 15 組", 4, 1, 15, true}};
+        for (const Form& form : FORMS) {
+            for (const int64_t side : {64, 96, 127}) {
+                for (const int64_t hot : {1, 16}) {
+                    const std::string scene = std::format("{}³・照り返す地面・熱いセル {}", side, hot * hot);
+                    const sim::CascadeGrid grid = FireGround(side, 8, hot, Material::Stone);
+                    if (auto measured = MeasureOne(context, scene.c_str(), grid, form); !measured)
+                        return std::unexpected(std::format("{} {}: {}", form.name, scene, measured.error()));
+
+                    if (form.emitSlots > 1 && side >= 96) {
+                        if (auto profiled = ProfileTicks(context, scene.c_str(), grid, form); !profiled)
+                            return std::unexpected(std::format("{} {}: {}", form.name, scene, profiled.error()));
+                    }
+                }
+            }
+        }
+
+        return {};
+    }
+
+    int Run(std::span<char*> given) {
+        // --wide は費用の広さの測りだけ(ビット一致は通常の組で見る)。残りの引数は共通の口へ
+        std::vector<char*> kept;
+        bool wide = false;
+        for (char* argument : given) {
+            if (std::string_view(argument) == "--wide")
+                wide = true;
+            else
+                kept.push_back(argument);
+        }
+
+        const std::span<char*> arguments(kept);
         const auto options = test::ParseGpuTestOptions(arguments);
         if (!options) {
             Log(Channel::Gpu, Level::Error,
@@ -435,6 +560,16 @@ namespace {
         }
 
         const GpuContext context{.device = device->Get(), .queue = &*queue, .ring = &*ring, .nest = &*nest};
+        if (wide) {
+            if (auto measured = MeasureWide(context); !measured) {
+                Log(Channel::Gpu, Level::Error, "gpu_cascade_light_test: FAILED(広さの費用: {})", measured.error());
+                return 1;
+            }
+
+            Log(Channel::Gpu, Level::Info, "gpu_cascade_light_test: OK(広さの費用)");
+            return 0;
+        }
+
         const auto compared = CompareCases(context);
         if (!compared) {
             Log(Channel::Gpu, Level::Error, "gpu_cascade_light_test: FAILED ({})", compared.error());

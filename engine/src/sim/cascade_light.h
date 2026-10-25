@@ -35,9 +35,16 @@ namespace bicameral::sim {
         // 段 k ≥ 1 の袋 1 つから出す光線の数(1 = 今の形。量を等分し、升目の中のずらしの巡りの続きを使う。T-0959 の費用の比べ)
         uint32_t raysPerBag = 1;
         // 放つ面を最上段のブロックごとに何組に分けて刻みで回すか(1 = 毎刻み全部。奇数。T-1010・ADR-0444)。
-        // 自分の組でない刻みの光は持ち越しの表で待つ。thermalInSlots なら熱で放つ光も待つ(でなければ照り返しだけ)
-        uint32_t emitSlots = 1;
-        bool thermalInSlots = false;
+        // 自分の組でない刻みの光は持ち越しの表で待つ。thermalInSlots なら熱で放つ光も待つ(でなければ照り返しだけ)。
+        // 既定は 15 組・熱も待つ(D-658・Q156 (a)。2026-10-25 ユーザー決定: 遠くの火の熱が最大 14 刻み = 0.23 秒遅れるのを受け入れ、
+        // 64³ の照り返す地面で 1 ms 前後に収める。T-1146)。1・false で毎刻み全部の形に戻せる
+        uint32_t emitSlots = 15;
+        bool thermalInSlots = true;
+        // 参照の温度との差だけを運ぶ(T-1102・ADR-0461。0 = 今のまま)。正の側(自分 − 参照)と負の側(参照 − 自分。negativePart)を
+        // 別の刻みの組で運び、吸った・放ったの差を取る(StepCascadeLightRelative)。同じ温度の所は放たないので、坂を下るは構造で 0。
+        // 0 でない時は quietBelowMk を使わない(冷たい物も負の側で放つ)。参照の温度 2^31 mK 未満
+        uint32_t referenceMk = 0;
+        bool negativePart = false;
     };
 
     // 段 0(レベル 0 のセル)の密な写し。添字 = IndexOf
@@ -118,6 +125,17 @@ namespace bicameral::sim {
     // 1 刻み。carry = 前の刻みに返された光。reverse なら放つセル・袋を逆の順に回す(結果は順によらない: R3 の確かめ用)
     [[nodiscard]] CascadeTickResult StepCascadeLight(const CascadeGrid& grid, const CascadeCarry& carry,
                                                      const CascadeParams& params, uint64_t tick, bool reverse = false);
+
+    // 参照の温度との差を運ぶ 1 刻み(T-1102): 正の側と負の側の 2 つの結果。セルの正味 = (正.吸った − 正.放った) − (負.吸った − 負.放った)。
+    // 持ち越しも側ごと(carry[0] = 正・carry[1] = 負)。params.referenceMk が 0 でないこと
+    struct CascadeRelativeResult {
+        std::array<CascadeTickResult, 2> sides;
+    };
+
+    [[nodiscard]] CascadeRelativeResult StepCascadeLightRelative(const CascadeGrid& grid,
+                                                                 const std::array<CascadeCarry, 2>& carry,
+                                                                 const CascadeParams& params, uint64_t tick,
+                                                                 bool reverse = false);
 
     // 持ち越しのハッシュ(セーブとハッシュに入れる。エントリの順 = セル・面・帯)
     [[nodiscard]] uint64_t HashCascadeCarry(const CascadeCarry& carry);

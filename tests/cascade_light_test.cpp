@@ -18,6 +18,7 @@
 #include <cstdio>
 #include <functional>
 #include <numbers>
+#include <numeric>
 #include <utility>
 #include <vector>
 
@@ -92,8 +93,16 @@ namespace {
         return grid;
     }
 
+    // 運び方の試験は毎刻み全部の形(組 1)で 1 刻みずつ確かめる(既定の 15 組・熱も待つ〔D-658〕は持ち越しを続けて渡す時だけ同じ量になる。
+    // 組の形は Slotted の試験と筋の試験の組の欄で見る)
     CascadeParams Params(uint32_t baseTexels = 4, uint32_t levels = 5) {
-        return {.baseTexels = baseTexels, .levels = levels, .intervalBlocks = 1, .seed = 7, .quietBelowMk = QUIET_MK};
+        return {.baseTexels = baseTexels,
+                .levels = levels,
+                .intervalBlocks = 1,
+                .seed = 7,
+                .quietBelowMk = QUIET_MK,
+                .emitSlots = 1,
+                .thermalInSlots = false};
     }
 
     uint64_t Received(const CascadeTickResult& result, size_t cell) {
@@ -207,7 +216,84 @@ namespace {
             carry = result.carry;
         }
 
-        std::printf("保存: 3 刻み(持ち越しつき)・放つ面の組 3 で 7 刻み、帯ごとにビット単位\n");
+        // 既定の形(15 組・熱も待つ。D-658): 持ち越しを渡し続ければ保存はそのまま、熱で放った量は毎刻み同じ(待つのは届く時だけ)
+        const CascadeParams defaults{.seed = 7, .quietBelowMk = QUIET_MK};
+        EXPECT(defaults.emitSlots == 15 && defaults.thermalInSlots);
+        const CascadeTickResult whole = StepCascadeLight(grid, {}, Params(), 0);
+        carry = {};
+        uint64_t heldTotal = 0;
+        for (uint64_t tick = 0; tick < 16; ++tick) {
+            const CascadeTickResult result = StepCascadeLight(grid, carry, defaults, tick);
+            EXPECT(Conserves(result));
+            EXPECT(result.ledger[rx::LT_BAND_LONG].emitted == whole.ledger[rx::LT_BAND_LONG].emitted);
+            heldTotal += result.ledger[rx::LT_BAND_LONG].held;
+            carry = result.carry;
+        }
+
+        EXPECT(heldTotal != 0);
+        std::printf("保存: 3 刻み(持ち越しつき)・放つ面の組 3 で 7 刻み・既定の 15 組で 16 刻み、帯ごとにビット単位\n");
+    }
+
+    // --- 2b. 放つ面の組の釣り合い(T-1146): 軸に揃った面のブロック n × n を組に配った数の偏り ---
+
+    void TestSlotBalance() {
+        constexpr uint32_t SLOTS = 15;
+        rx::RcStepConstants constants{};
+        constants.levels = 1;  // ブロック = 1 セル(組の式だけを見る)
+        constants.emitSlots = SLOTS;
+        uint32_t worstExcess = 0;
+        for (int64_t n = 2; n <= 16; ++n) {
+            for (int axis = 0; axis < 3; ++axis) {
+                for (const int64_t fixed : {int64_t{0}, int64_t{1}, int64_t{5}, int64_t{-3}}) {
+                    std::array<uint32_t, SLOTS> counts{};
+                    for (int64_t u = 0; u < n; ++u) {
+                        for (int64_t v = 0; v < n; ++v) {
+                            const std::array<int64_t, 3> cell = axis == 0   ? std::array<int64_t, 3>{fixed, u, v}
+                                                                : axis == 1 ? std::array<int64_t, 3>{u, fixed, v}
+                                                                            : std::array<int64_t, 3>{u, v, fixed};
+                            for (uint32_t slot = 0; slot < SLOTS; ++slot) {
+                                constants.tick = slot;
+                                if (rx::RcEmitSlotActive(constants, cell[0], cell[1], cell[2]))
+                                    ++counts[slot];
+                            }
+                        }
+                    }
+
+                    const auto [low, high] = std::ranges::minmax(counts);
+                    const uint32_t ideal = (n * n) % SLOTS == 0 ? 0u : 1u;
+                    worstExcess = std::max(worstExcess, high - low - ideal);
+                    EXPECT(std::accumulate(counts.begin(), counts.end(), 0u) == static_cast<uint32_t>(n * n));
+                }
+            }
+        }
+
+        // 前の式(bx + 3 bz + 5 by)は 16 × 16 で 9 個の差・8 × 8 で 2〜6 個。今の式は 2 × 2〜16 × 16 のどの軸の面も、割り切れる時の最小の差 + 3 以内
+        EXPECT(worstExcess <= 3);
+
+        // 光源の近く: どの軸の面でも隣り合う 3 × 3 のブロックは違う組
+        bool distinct = true;
+        for (int axis = 0; axis < 3; ++axis) {
+            std::array<uint32_t, SLOTS> counts{};
+            for (int64_t u = -1; u <= 1; ++u) {
+                for (int64_t v = -1; v <= 1; ++v) {
+                    const std::array<int64_t, 3> cell = axis == 0   ? std::array<int64_t, 3>{0, u, v}
+                                                        : axis == 1 ? std::array<int64_t, 3>{u, 0, v}
+                                                                    : std::array<int64_t, 3>{u, v, 0};
+                    for (uint32_t slot = 0; slot < SLOTS; ++slot) {
+                        constants.tick = slot;
+                        if (rx::RcEmitSlotActive(constants, cell[0], cell[1], cell[2]))
+                            ++counts[slot];
+                    }
+                }
+            }
+
+            distinct = distinct && std::ranges::max(counts) == 1;
+        }
+
+        EXPECT(distinct);
+        std::printf(
+            "組の釣り合い: 15 組・軸に揃った面 2×2〜16×16 で組ごとの数の差は最小 + %u 以内・隣り合う 3×3 は違う組\n",
+            worstExcess);
     }
 
     // --- 3. 決定的 ---
@@ -637,6 +723,7 @@ int main() {
     std::setvbuf(stdout, nullptr, _IONBF, 0);  // 途中で切れても(時間切れ)出した行が残るように
     TestGridFromTree();
     TestConservation();
+    TestSlotBalance();
     TestDeterministic();
     TestWallShadow();
     RecordRing();

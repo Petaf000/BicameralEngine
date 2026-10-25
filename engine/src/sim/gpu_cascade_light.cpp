@@ -175,6 +175,7 @@ namespace bicameral::sim {
         gpu.emitSlots = params.emitSlots;
         gpu.thermalInSlots = params.thermalInSlots ? 1u : 0u;
         gpu.quietBelowMk = params.quietBelowMk;
+        gpu.referenceWord = params.referenceMk | (params.negativePart ? rx::RC_REFERENCE_NEGATIVE : 0u);
         gpu.cellCount = static_cast<uint32_t>(cells);
         gpu.texelsPerFace = perFace;
         gpu.bagCapacity = capacity.bags;
