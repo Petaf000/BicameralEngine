@@ -1090,15 +1090,18 @@ namespace bicameral::sim {
         return bytes;
     }
 
-    uint64_t TimeTreeEventNs(const TimeTreeSolveCost& cost, uint64_t cells, uint64_t cellCycles) {
+    uint64_t TimeTreeEventNs(const TimeTreeSolveCost& cost, uint64_t cells, uint64_t cellCycles, uint32_t levels) {
         if (cells == 0)
             return 0;
 
-        // 固定費 + V の回数 × V 1 回の固定費 + セルの傾き(V の回数の違う列は別の組なので、平均の切り上げで数える)
+        // 固定費 + 段と V の起動 + セルの傾き(V の回数の違う列は別の組なので、平均の切り上げで数える)
         const uint64_t cycles = (cellCycles + cells - 1) / cells;
+        const uint64_t coarse = levels > 1 ? levels - 1 : 0;
+        const uint64_t launches = cost.eventNs + (coarse * cost.levelNs) +
+                                  (cycles * (cost.cycleNs + (coarse * cost.levelCycleNs)));
         const uint64_t slope = ((cells * cost.cellPs) + (cellCycles * cost.cellCyclePs)) / 1000;
 
-        return cost.eventNs + (cycles * cost.cycleNs) + slope;
+        return launches + slope;
     }
 
     namespace {
@@ -1184,8 +1187,34 @@ namespace bicameral::sim {
         return groups;
     }
 
+    namespace {
+
+        // 見積もりの 1 出来事の組(V の回数・段の数が同じ列。T-1152)
+        struct EstimateGroup {
+            uint32_t cycles = 0;
+            uint32_t levels = 0;
+            uint64_t cells = 0;
+        };
+
+        void AddEstimateGroup(std::vector<EstimateGroup>& groups, uint32_t cycles, uint32_t levels, uint64_t cells) {
+            if (cells == 0)
+                return;
+
+            for (EstimateGroup& group : groups) {
+                if (group.cycles == cycles && group.levels == levels) {
+                    group.cells += cells;
+                    return;
+                }
+            }
+
+            groups.push_back({.cycles = cycles, .levels = levels, .cells = cells});
+        }
+
+    }  // namespace
+
     TimeTreeForwardEstimate EstimateTimeTreeForward(const TimeTreeSetup& setup, const TimeTreeWorld& world,
-                                                    uint64_t ticks, const TimeTreeSolveCost& cost) {
+                                                    uint64_t ticks, const TimeTreeSolveCost& cost,
+                                                    std::span<const uint32_t> levelsAt) {
         // --- e ごとの刻むセルの数 ---
         const auto exponents = static_cast<size_t>(std::max(setup.maxExponent, 0)) + 1;
         std::vector<uint64_t> cellsAt(exponents, 0);
@@ -1199,22 +1228,32 @@ namespace bicameral::sim {
         }
 
         // --- 出来事の組 j = 2^j の倍数の刻み(2^(j+1) の倍数を除く。最後の組は残り全部): 解くのは e ≤ j の列 ---
+        // 列は (V の回数・段の数) ごとの組にまとまる
         TimeTreeForwardEstimate estimate;
         uint64_t nanoseconds = 0;
-        uint64_t cells = 0;
-        uint64_t cycles = 0;
+        std::vector<EstimateGroup> groups;
         for (size_t j = 0; j < exponents; ++j) {
-            cells += cellsAt[j];
-            cycles += cellsAt[j] * CyclesFor(setup, static_cast<int32_t>(j));
+            const auto exponent = static_cast<int32_t>(j);
+            const uint32_t levels = j < levelsAt.size() ? std::max(levelsAt[j], 1u) : 1u;
+            AddEstimateGroup(groups, CyclesFor(setup, exponent), levels, cellsAt[j]);
             const uint64_t multiples = ticks >> j;
             const uint64_t events = j + 1 < exponents ? multiples - (ticks >> (j + 1)) : multiples;
+            uint64_t eventNs = 0;
+            uint64_t cells = 0;
+            uint64_t cycles = 0;
+            for (const EstimateGroup& group : groups) {
+                eventNs += TimeTreeEventNs(cost, group.cells, group.cells * group.cycles, group.levels);
+                cells += group.cells;
+                cycles += group.cells * group.cycles;
+            }
+
             if (cells == 0 || events == 0)
                 continue;
 
             estimate.events += events;
             estimate.cellSolves += events * cells;
             estimate.cellCycles += events * cycles;
-            nanoseconds += events * TimeTreeEventNs(cost, cells, cycles);
+            nanoseconds += events * eventNs;
         }
 
         estimate.waitMicroseconds = nanoseconds / 1000;

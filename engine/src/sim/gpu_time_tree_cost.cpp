@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <optional>
+#include <span>
 #include <vector>
 
 #include "common/equilibrium.hlsli"
@@ -22,9 +23,10 @@ namespace bicameral::sim {
         constexpr int64_t PROBE_VALUE_UNIT = int64_t{1} << 16;
         constexpr int64_t PROBE_VALUE_KINDS = 64;
 
-        // 1 つの物差しで 4 つの時間を測る回の上限(時刻印は 1 つの部品に 256 まで)
+        // 測る回の上限(時刻印は 1 つの部品に 256 まで)
         constexpr uint32_t PROBE_MAX_ROUNDS = 32;
         constexpr uint32_t PROBE_PARTS = 2;  // 箱ごとに V 1・V 2
+        constexpr size_t PROBE_BOXES = 3;    // 段 1 の小・大・段の多い大
 
         int64_t ProbeValue(uint32_t x, uint32_t y, uint32_t z) {
             return static_cast<int64_t>(((x * 37) + (y * 11) + (z * 5)) % PROBE_VALUE_KINDS) * PROBE_VALUE_UNIT;
@@ -157,36 +159,62 @@ namespace bicameral::sim {
             return {};
         }
 
-        // 回ごとに 箱 × V 1・V 2 の時刻印。時刻印の番号: 小 = 回 × 4 + 部 × 2・大 = 1 + 同じ
-        bool RecordProbe(ID3D12GraphicsCommandList* list, uint64_t ring, ProbeBox& smallBox, ProbeBox& largeBox,
+        // 回ごとに 箱 × V 1・V 2 の時刻印(箱ごとの番号 = 回 × 4 + 部 × 2)
+        bool RecordProbe(ID3D12GraphicsCommandList* list, uint64_t ring, std::span<ProbeBox* const> boxes,
                          uint32_t rounds) {
-            if (!smallBox.gpu->RecordUpload(list, smallBox.grid) || !largeBox.gpu->RecordUpload(list, largeBox.grid))
-                return false;
-
-            largeBox.gpu->RecordTimestamp(list, 0);
+            for (ProbeBox* box : boxes) {
+                if (!box->gpu->RecordUpload(list, box->grid))
+                    return false;
+            }
 
             for (uint32_t repeat = 0; repeat < rounds; ++repeat) {
-                for (uint32_t part = 0; part < 2 * PROBE_PARTS; ++part) {
-                    ProbeBox& box = part < PROBE_PARTS ? smallBox : largeBox;
-                    const uint32_t cycles = 1 + (part % PROBE_PARTS);
-                    const uint32_t stamp = (repeat * 2 * PROBE_PARTS) + (2 * (part % PROBE_PARTS)) +
-                                           (part < PROBE_PARTS ? 0 : 1);
-                    box.gpu->RecordTimestamp(list, stamp);
-                    if (!box.gpu->RecordSolve(list, ring, cycles))
-                        return false;
+                for (ProbeBox* box : boxes) {
+                    for (uint32_t part = 0; part < PROBE_PARTS; ++part) {
+                        const uint32_t stamp = (repeat * 2 * PROBE_PARTS) + (2 * part);
+                        box->gpu->RecordTimestamp(list, stamp);
+                        if (!box->gpu->RecordSolve(list, ring, 1 + part))
+                            return false;
 
-                    box.gpu->RecordTimestamp(list, stamp + 1);
+                        box->gpu->RecordTimestamp(list, stamp + 1);
+                    }
                 }
             }
 
-            const uint32_t stamps = rounds * 2 * PROBE_PARTS;
-            largeBox.gpu->RecordTimestamp(list, stamps + 1);
-            smallBox.gpu->RecordTimestampReadback(list, stamps);
-            largeBox.gpu->RecordTimestampReadback(list, stamps + 2);
-            smallBox.gpu->RecordEnd(list);
-            largeBox.gpu->RecordEnd(list);
+            for (ProbeBox* box : boxes) {
+                box->gpu->RecordTimestampReadback(list, rounds * 2 * PROBE_PARTS);
+                box->gpu->RecordEnd(list);
+            }
 
             return true;
+        }
+
+        // 回ごとの最小(箱 × V 1・V 2 = solveNs の 2 × 箱 + 部)と、測りの GPU の時間
+        std::expected<void, std::string> ReadProbe(std::array<ProbeBox, PROBE_BOXES>& boxes, uint32_t rounds,
+                                                   uint64_t frequency, TimeTreeCostProbe& probe) {
+            const uint32_t stamps = rounds * 2 * PROBE_PARTS;
+            std::array<std::vector<uint64_t>, PROBE_BOXES> ticks;
+            for (size_t index = 0; index < PROBE_BOXES; ++index) {
+                boxes[index].gpu->ReleaseStaging();
+                ticks[index] = boxes[index].gpu->ReadTimestamps(stamps);
+                if (ticks[index].size() != stamps || frequency == 0)
+                    return std::unexpected("時刻印を読めない");
+            }
+
+            probe.times.solveNs.fill(UINT64_MAX);
+            for (uint32_t repeat = 0; repeat < rounds; ++repeat) {
+                for (size_t index = 0; index < PROBE_BOXES; ++index) {
+                    for (uint32_t part = 0; part < PROBE_PARTS; ++part) {
+                        const uint32_t stamp = (repeat * 2 * PROBE_PARTS) + (2 * part);
+                        const uint64_t ns = TicksToNs(ticks[index][stamp], ticks[index][stamp + 1], frequency);
+                        uint64_t& best = probe.times.solveNs[(index * PROBE_PARTS) + part];
+                        best = std::min(best, ns);
+                    }
+                }
+            }
+
+            probe.gpuNs = TicksToNs(ticks.front().front(), ticks.back().back(), frequency);
+
+            return {};
         }
 
         int64_t AtLeastZero(int64_t value) {
@@ -240,23 +268,29 @@ namespace bicameral::sim {
         return system;
     }
 
-    TimeTreeSolveCost FitTimeTreeSolveCost(const std::array<uint64_t, 4>& solveNs, uint64_t smallCells,
-                                           uint64_t largeCells, uint32_t marginPercent) {
-        // t(n, V) = 固定費 + V × V の固定費 + n × セルの傾き + n × V × セル × V の傾き(ps で解く)
-        const auto ps = [&solveNs](size_t index) {
-            return static_cast<int64_t>(solveNs[index]) * 1000;
+    TimeTreeSolveCost FitTimeTreeSolveCost(const TimeTreeProbeTimes& times, uint32_t marginPercent) {
+        // t = 固定費 + (段 − 1) × 段の固定費 + V × (V の固定費 + (段 − 1) × 段の V の固定費) + n × セル + n × V × セル × V。
+        // 段 1 の小・大の箱で 段 1 の値を、段 levels の箱で段ごとの値を解く(ps で。負は 0)
+        const auto ps = [&times](size_t index) {
+            return static_cast<int64_t>(times.solveNs[index]) * 1000;
         };
-        const auto smallCount = static_cast<int64_t>(smallCells);
-        const auto largeCount = static_cast<int64_t>(std::max(largeCells, smallCells + 1));
+        const auto smallCount = static_cast<int64_t>(times.smallCells);
+        const auto largeCount = static_cast<int64_t>(std::max(times.largeCells, times.smallCells + 1));
+        const int64_t extraLevels = std::max<int64_t>(static_cast<int64_t>(times.levels) - 1, 1);
         const int64_t smallStep = ps(1) - ps(0);  // 小さい箱の V 1 回 = V の固定費 + 小 × 傾き
         const int64_t largeStep = ps(3) - ps(2);
+        const int64_t levelStep = ps(5) - ps(4);  // 段の多い箱(大と同じセル)の V 1 回
         const int64_t cellCycle = AtLeastZero((largeStep - smallStep) / (largeCount - smallCount));
         const int64_t cycle = AtLeastZero(smallStep - (smallCount * cellCycle));
         const int64_t cell = AtLeastZero(((ps(2) - ps(0)) / (largeCount - smallCount)) - cellCycle);
         const int64_t event = AtLeastZero(ps(0) - cycle - (smallCount * (cell + cellCycle)));
+        const int64_t levelCycle = times.levels > 1 ? AtLeastZero((levelStep - largeStep) / extraLevels) : 0;
+        const int64_t level = times.levels > 1 ? AtLeastZero(((ps(4) - ps(2)) / extraLevels) - levelCycle) : 0;
 
         return {.eventNs = static_cast<uint64_t>(event / 1000),
+                .levelNs = static_cast<uint64_t>(level / 1000),
                 .cycleNs = static_cast<uint64_t>(cycle / 1000),
+                .levelCycleNs = static_cast<uint64_t>(levelCycle / 1000),
                 .cellPs = static_cast<uint64_t>(cell),
                 .cellCyclePs = static_cast<uint64_t>(cellCycle),
                 .marginPercent = marginPercent};
@@ -267,55 +301,45 @@ namespace bicameral::sim {
                                                                          gpu::DebugRing& ring,
                                                                          uint64_t timestampFrequency,
                                                                          const TimeTreeCostProbeOptions& options) {
-        ProbeBox smallBox;
-        ProbeBox largeBox;
-        for (auto [box, side] : {std::pair{&smallBox, options.smallSide}, std::pair{&largeBox, options.largeSide}}) {
-            const auto made = MakeProbeBox(device, queue, ring, side, options.exponent, *box);
+        // 段 1 の小・大の箱と、大と同じセルで段の多い箱(面の係数 × 2^levelExponent)
+        std::array<ProbeBox, PROBE_BOXES> boxes;
+        const std::array<std::pair<uint32_t, int32_t>, PROBE_BOXES> shapes = {
+            {{options.smallSide, 0}, {options.largeSide, 0}, {options.largeSide, options.levelExponent}}};
+        for (size_t index = 0; index < PROBE_BOXES; ++index) {
+            const auto made = MakeProbeBox(device, queue, ring, shapes[index].first, shapes[index].second,
+                                           boxes[index]);
             if (!made)
                 return std::unexpected(made.error());
         }
 
-        // --- 熱してから 4 つの時間を続けて積む ---
         TimeTreeCostProbe probe;
-        const auto heated = Heat(queue, ring, largeBox, timestampFrequency, options, probe);
+        const auto heated = Heat(queue, ring, boxes[1], timestampFrequency, options, probe);
         if (!heated)
             return std::unexpected(heated.error());
 
+        // --- 6 つの時間を続けて積む ---
         const uint32_t rounds = std::clamp<uint32_t>(options.rounds, 1, PROBE_MAX_ROUNDS);
         ID3D12GraphicsCommandList10* list = queue.Begin();
         if (list == nullptr)
             return std::unexpected("コマンドリストを始められない");
 
+        const std::array<ProbeBox*, PROBE_BOXES> pointers = {&boxes[0], &boxes[1], &boxes[2]};
         ring.RecordBegin(list);
-        if (!RecordProbe(list, ring.GpuAddress(), smallBox, largeBox, rounds))
+        if (!RecordProbe(list, ring.GpuAddress(), pointers, rounds))
             return std::unexpected("解きを積めない");
 
         const auto executed = Execute(queue, ring, list);
         if (!executed)
             return std::unexpected(executed.error());
 
-        smallBox.gpu->ReleaseStaging();
-        largeBox.gpu->ReleaseStaging();
-        const uint32_t stamps = rounds * 2 * PROBE_PARTS;
-        const std::vector<uint64_t> smallTicks = smallBox.gpu->ReadTimestamps(stamps);
-        const std::vector<uint64_t> largeTicks = largeBox.gpu->ReadTimestamps(stamps + 2);
-        if (smallTicks.size() != stamps || largeTicks.size() != stamps + 2 || timestampFrequency == 0)
-            return std::unexpected("時刻印を読めない");
+        const auto read = ReadProbe(boxes, rounds, timestampFrequency, probe);
+        if (!read)
+            return std::unexpected(read.error());
 
-        // --- 回ごとの最小 ---
-        probe.solveNs.fill(UINT64_MAX);
-        for (uint32_t repeat = 0; repeat < rounds; ++repeat) {
-            for (uint32_t part = 0; part < 2 * PROBE_PARTS; ++part) {
-                const bool isSmall = part < PROBE_PARTS;
-                const uint32_t stamp = (repeat * 2 * PROBE_PARTS) + (2 * (part % PROBE_PARTS)) + (isSmall ? 0 : 1);
-                const std::vector<uint64_t>& ticks = isSmall ? smallTicks : largeTicks;
-                const uint64_t ns = TicksToNs(ticks[stamp], ticks[stamp + 1], timestampFrequency);
-                probe.solveNs[part] = std::min(probe.solveNs[part], ns);
-            }
-        }
-
-        probe.gpuNs = TicksToNs(largeTicks[0], largeTicks[stamps + 1], timestampFrequency);
-        probe.cost = FitTimeTreeSolveCost(probe.solveNs, smallBox.cells, largeBox.cells, options.marginPercent);
+        probe.times.smallCells = boxes[0].cells;
+        probe.times.largeCells = boxes[1].cells;
+        probe.times.levels = static_cast<uint32_t>(boxes[2].grid.levels.size());
+        probe.cost = FitTimeTreeSolveCost(probe.times, options.marginPercent);
 
         return probe;
     }

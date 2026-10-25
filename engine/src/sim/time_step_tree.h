@@ -254,21 +254,25 @@ namespace bicameral::sim {
     std::vector<TimeTreeEventGroup> GroupTimeTreeEvent(std::span<const TimeTreeEventSpan> spans);
 
     // --- 早送りの待ちの見積もり(D-650・T-1111。ゲームはこれを読んで眠れる条件などを決める。法則は変えない)---
-    // 1 出来事(その刻みに解く列を組にまとめた形。T-1141)の GPU の費用の式(T-1152): 固定費 + V 1 回の固定費 × V の回数
-    // + セル × 傾き + セル × V の回数 × 傾き。出来事を続けて積んだ形(早送りの形。GPU の時計が高いまま)の測り。
+    // 1 組(その刻みに解く列を組にまとめた系 1 本。T-1141)の GPU の費用の式(T-1152):
+    //   固定費 + (段 − 1) × 段の固定費 + V × (V の固定費 + (段 − 1) × 段の V の固定費) + セル × 傾き + セル × V × 傾き。
+    // 4,096 セルまでの組はほぼ起動の固定費で決まり(段の数と V の回数)、セルの数はほとんど効かない(docs/perf.md の T-1152)。
+    // 出来事を続けて積んだ形(早送りの形。GPU の時計が高いまま)の測り。
     // 値は起動時にその PC で測る(D-662: sim/gpu_time_tree_cost の ProbeTimeTreeSolveCost)。既定は RTX 3070 Ti・release の測り
     // (docs/perf.md の T-1152)。浮動小数点を使わないので ps の整数
     struct TimeTreeSolveCost {
-        uint64_t eventNs = 12000;     // 1 出来事の固定費(段 0 + 段の重みの起動)
-        uint64_t cycleNs = 25000;     // V 1 回の固定費(段ごとの起動)
-        uint64_t cellPs = 2530;       // 段 0 + 段の重みのセル 1 つ
-        uint64_t cellCyclePs = 1940;  // V 1 回のセル 1 つ
+        uint64_t eventNs = 13000;       // 1 組の固定費(段 0 の起動)
+        uint64_t levelNs = 30000;       // 粗い段 1 つの固定費(段の重み)
+        uint64_t cycleNs = 23000;       // V 1 回の固定費(段 1 つ)
+        uint64_t levelCycleNs = 10000;  // V 1 回の、粗い段 1 つぶんの固定費
+        uint64_t cellPs = 0;            // 段 0 + 段の重みのセル 1 つ
+        uint64_t cellCyclePs = 3100;    // V 1 回のセル 1 つ
         // 測りの揺れの余裕(D-662。見積もりの上の値 = 式 × これ ÷ 100。GPU の時計が下がった時・測りの揺れ。T-1140)
         uint32_t marginPercent = 200;
     };
 
-    // 1 出来事の GPU の待ち(ns)。cells = 解くセル、cellCycles = Σ セル × V の回数(V の回数は平均を切り上げ)
-    uint64_t TimeTreeEventNs(const TimeTreeSolveCost& cost, uint64_t cells, uint64_t cellCycles);
+    // 1 組の GPU の待ち(ns)。cells = 解くセル、cellCycles = Σ セル × V の回数(V の回数は平均を切り上げ)、levels = 部品の段の数
+    uint64_t TimeTreeEventNs(const TimeTreeSolveCost& cost, uint64_t cells, uint64_t cellCycles, uint32_t levels = 1);
 
     struct TimeTreeForwardEstimate {
         uint64_t events = 0;      // 出来事(解く刻み)の数
@@ -281,8 +285,11 @@ namespace bicameral::sim {
 
     // 今の枠ごとの刻みの長さ e が、この先 ticks 刻みの間そのまま続くと見なして数える(見積もり。結果にも状態にも効かない)。
     // 出来事は最も短い歩の終わりごと(長い歩の終わりはそれに重なり、同じ刻みの列は 1 本の系にまとめる)。
-    // 前線は動くが毎刻みの範囲の大きさは保たれる見込み(T-1089)。眠る・起こす・前線の広がりは数に入れない
+    // 前線は動くが毎刻みの範囲の大きさは保たれる見込み(T-1089)。眠る・起こす・前線の広がりは数に入れない。
+    // levelsAt[e] = e の列の系の部品の段の数(法則の係数で決まる。GPU の早送りが前に作った段から渡す。空・範囲の外は 1)。
+    // 1 出来事は (V の回数・段の数) が同じ e の列を 1 組に数える(GroupTimeTreeEvent と同じ見立て)
     TimeTreeForwardEstimate EstimateTimeTreeForward(const TimeTreeSetup& setup, const TimeTreeWorld& world,
-                                                    uint64_t ticks, const TimeTreeSolveCost& cost);
+                                                    uint64_t ticks, const TimeTreeSolveCost& cost,
+                                                    std::span<const uint32_t> levelsAt = {});
 
 }  // namespace bicameral::sim

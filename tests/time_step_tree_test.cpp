@@ -1062,7 +1062,7 @@ namespace {
         counts.eventCellCycles += eventCycles;
         for (const TimeTreeEventGroup& group : groups) {
             const uint64_t cells = group.system.nodes.size();
-            counts.groupWaitNs += TimeTreeEventNs(cost, cells, cells * group.cycles);
+            counts.groupWaitNs += TimeTreeEventNs(cost, cells, cells * group.cycles, group.levels);
             counts.largestGroup = std::max(counts.largestGroup, cells);
             ++counts.groupsByCycles[group.cycles];
             for (const uint32_t index : group.spans) {

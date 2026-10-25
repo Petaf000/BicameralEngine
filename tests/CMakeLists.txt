@@ -845,6 +845,10 @@ set_tests_properties(time_step_event_merge PROPERTIES TIMEOUT 900 FIXTURES_SETUP
 bicameral_add_gpu_test_case(gpu_time_step_event gpu_time_step_span_test gpu --queue compute --no-gbv
                             --spans ${CMAKE_CURRENT_BINARY_DIR}/time_step_events.bin)
 set_tests_properties(gpu_time_step_event PROPERTIES FIXTURES_REQUIRED time_step_events)
+# 起動時に費用の式の値を測る口(D-662)と、出来事を続けて積んだ・間を空けた形の時間(T-1152。値は比べず、口が通って式の値が出ること)
+bicameral_add_gpu_test_case(gpu_time_step_event_cost gpu_time_step_span_test gpu --queue compute --no-gbv --continuous
+                            --spans ${CMAKE_CURRENT_BINARY_DIR}/time_step_events.bin)
+set_tests_properties(gpu_time_step_event_cost PROPERTIES FIXTURES_REQUIRED time_step_events)
 
 # 計測は job.py run -Preset release -Exe gpu_gas_projection_test -- --no-gbv --measure --edge 32
 bicameral_add_gpu_test(gpu_gas_projection_test)

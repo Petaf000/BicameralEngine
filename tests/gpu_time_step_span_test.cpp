@@ -622,10 +622,15 @@ namespace {
         }
     }
 
+    std::string CostText(const sim::TimeTreeSolveCost& cost) {
+        return std::format("固定費 {} ns・段 {} ns・V {} ns・段の V {} ns・セル {} ps・セル × V {} ps", cost.eventNs,
+                           cost.levelNs, cost.cycleNs, cost.levelCycleNs, cost.cellPs, cost.cellCyclePs);
+    }
+
     double PredictMs(const sim::TimeTreeSolveCost& cost, const sim::TimeTreeEventGroup& group) {
         const uint64_t cells = group.system.nodes.size();
 
-        return (double)sim::TimeTreeEventNs(cost, cells, cells * group.cycles) * 1.0e-6;
+        return (double)sim::TimeTreeEventNs(cost, cells, cells * group.cycles, group.levels) * 1.0e-6;
     }
 
     // 式の見積もりと測りの比(全体の和の比・組ごとの比の最小と最大)
@@ -646,11 +651,11 @@ namespace {
         }
 
         Log(Channel::Sim, Level::Info,
-            "式 {}(固定費 {} ns・V {} ns・セル {} ps・セル × V {} ps): 見積もり ÷ 続けて積んだ測り {:.2f}(組ごと "
+            "式 {}({}): 見積もり ÷ 続けて積んだ測り {:.2f}(組ごと "
             "{:.2f}〜{:.2f})・"
             "見積もり ÷ 間を空けた測り {:.2f}・余裕を見込んだ上の値 ÷ 間を空けた測り {:.2f}",
-            name, cost.eventNs, cost.cycleNs, cost.cellPs, cost.cellCyclePs, predicted / actual, low, high,
-            predicted / gap, predicted * (double)cost.marginPercent / 100.0 / gap);
+            name, CostText(cost), predicted / actual, low, high, predicted / gap,
+            predicted * (double)cost.marginPercent / 100.0 / gap);
     }
 
     // 出来事のセルの数の段ごとの平均(続けて積んだ・間を空けた・揺れ)
@@ -695,13 +700,14 @@ namespace {
             return std::unexpected(probe.error());
 
         Log(Channel::Sim, Level::Info,
-            "起動時の測り {}(箱 {}・{}・e {}・{:.1f} 秒の時点): 熱した {} 回 {:.1f} ms・小 V 1 {} ns・小 V 2 {} ns・"
-            "大 V 1 {} ns・大 V 2 {} ns・GPU {:.2f} ms・全体 {:.1f} ms → 固定費 {} ns・V {} ns・セル {} ps・セル × V "
-            "{} ps",
-            name, options.smallSide, options.largeSide, options.exponent, at, probe->heatBatches,
-            (double)probe->heatNs * 1.0e-6, probe->solveNs[0], probe->solveNs[1], probe->solveNs[2], probe->solveNs[3],
-            (double)probe->gpuNs * 1.0e-6, (SecondsSince(context) - at) * 1000.0, probe->cost.eventNs,
-            probe->cost.cycleNs, probe->cost.cellPs, probe->cost.cellCyclePs);
+            "起動時の測り {}(箱 {}・{}・段の多い箱 e {} = 段 {}・{:.1f} 秒の時点): 熱した {} 回 {:.1f} ms・小 V 1 {} "
+            "ns・"
+            "小 V 2 {} ns・大 V 1 {} ns・大 V 2 {} ns・段の多い大 V 1 {} ns・V 2 {} ns・GPU {:.2f} ms・全体 {:.1f} ms "
+            "→ {}",
+            name, options.smallSide, options.largeSide, options.levelExponent, probe->times.levels, at,
+            probe->heatBatches, (double)probe->heatNs * 1.0e-6, probe->times.solveNs[0], probe->times.solveNs[1],
+            probe->times.solveNs[2], probe->times.solveNs[3], probe->times.solveNs[4], probe->times.solveNs[5],
+            (double)probe->gpuNs * 1.0e-6, (SecondsSince(context) - at) * 1000.0, CostText(probe->cost));
 
         return probe;
     }
@@ -787,7 +793,7 @@ namespace {
             {"直後・熱さない", {.heatNs = 0}},
             {"直後", {}},
             {"直後・大きい箱 32", {.largeSide = 32}},
-            {"直後・e 10", {.exponent = 10}}};
+            {"直後・段の多い箱 e 14", {.levelExponent = 14}}};
         for (const auto& [name, options] : variants) {
             const auto probe = RunProbe(context, name, options);
             if (!probe)
