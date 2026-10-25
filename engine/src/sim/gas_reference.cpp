@@ -730,6 +730,42 @@ namespace bicameral::sim {
             return (cell.energy * 1000) - ChemicalEnergy(box.config, cell) - KineticEnergy(box.config, cell, mass);
         }
 
+        // 風上のセルから出ていく塊の和(熱の列が残りの運動のエネルギーを数える。T-0691)
+        struct MovedKinetic {
+            GasCell out;         // 出ていく塊の成分の物質量と運動量(Transfer と同じ GfMovedMomentum)の和
+            uint64_t share = 0;  // 塊が持って出る運動のエネルギーの分け前の和(µJ。GfMovedEnergy と同じ)
+        };
+
+        void AddMovedKinetic(MovedKinetic& sum, const GasBox& box, const GasCell& source, const GasCell& moved,
+                             int64_t sourceKinetic, uint64_t fraction) {
+            for (uint32_t s = 0; s < box.config.speciesCount; ++s)
+                sum.out.amounts[s] += moved.amounts[s];
+
+            for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+                sum.out.momentum[axis] += gas::GfMovedMomentum(source.momentum[axis], fraction);
+
+            sum.share += gas::GfKineticShare(sourceKinetic, fraction);
+        }
+
+        // 塊は運動量を割合で、質量を移す物質量(MUSCL)で持って出るので、残る運動のエネルギー |P − ΣP_塊|² ÷ 2 m_残りは
+        // 「運動のエネルギー − 分け前の和」と一致しない。残りの方が大きい分(µJ)は風上の熱から出る(T-0691 の測り: 燃える木箱で
+        // 割合 0.7167・質量 0.7200 の差が 1 セル 4 J の負の熱)。残りの質量は残る成分から出す(質量の丸めが速さに効く)。小さい分は 0
+        uint64_t RestKineticExcess(const GasBox& box, const GasCell& source, uint64_t mass, const MovedKinetic& sum) {
+            GasCell rest;
+            for (uint32_t s = 0; s < box.config.speciesCount; ++s)
+                rest.amounts[s] = source.amounts[s] - sum.out.amounts[s];
+
+            for (uint32_t axis = 0; axis < GAS_AXES; ++axis)
+                rest.momentum[axis] = source.momentum[axis] - sum.out.momentum[axis];
+
+            const uint64_t restMass = CellMass(box.config, box.coefficients, rest);
+            if (restMass == 0)
+                return 0;
+
+            return gas::GfRestKineticExcess(KineticEnergy(box.config, rest, restMass),
+                                            KineticEnergy(box.config, source, mass), sum.share);
+        }
+
         // --- 当てる段の上限の熱の列(T-0787・ADR-0355。D-508 の安全網。設計 20 §2.4 ②「量・エネルギー〔押し出す仕事込み〕の列ごとの最小」)---
         // 風上のセルは、自分の熱(力を当てた後)− 余裕より多くの熱を塊で持ち出せない(式は gas_flow.hlsli の GfMovedHeatPart・GfHeatRoom。
         // 塊のエネルギーは Transfer と同じ MovedEnergy)。超えるセルは出ていく面の割合と成分の量を同じ倍率で縮める(当てる段の TxMakeLimit・
@@ -744,6 +780,7 @@ namespace bicameral::sim {
 
             const auto count = (uint32_t)box.cells.size();
             std::vector<uint64_t> outgoing(count, 0);
+            std::vector<MovedKinetic> kinetic(count);
             for (const GasFace& face : faces) {
                 const FaceSide donor = face.flow > 0 ? face.left : face.right;
                 if (face.fraction == 0 || donor.kind != SideKind::Cell)
@@ -754,9 +791,10 @@ namespace bicameral::sim {
                 GasCell moved;
                 moved.amounts = face.moved;
                 const int64_t energy = MovedEnergy(box.config, source, sourceDerived, moved, face.fraction);
-                outgoing[donor.index] += gas::GfMovedHeatPart(energy, ChemicalEnergy(box.config, moved),
-                                                              KineticEnergy(box.config, source, sourceDerived.mass),
+                const int64_t sourceKinetic = KineticEnergy(box.config, source, sourceDerived.mass);
+                outgoing[donor.index] += gas::GfMovedHeatPart(energy, ChemicalEnergy(box.config, moved), sourceKinetic,
                                                               face.fraction);
+                AddMovedKinetic(kinetic[donor.index], box, source, moved, sourceKinetic, face.fraction);
             }
 
             std::vector<multires::TxLimit> limits(count, multires::TxNoLimit());
@@ -765,6 +803,7 @@ namespace bicameral::sim {
                 if (outgoing[index] == 0)
                     continue;
 
+                outgoing[index] += RestKineticExcess(box, forced[index], derived[index].mass, kinetic[index]);
                 limits[index] = multires::TxMakeLimit(gas::GfHeatRoom(CellHeat(box, forced[index])), outgoing[index],
                                                       multires::TX_ROOM_UNLIMITED, 0);
                 any = any || !multires::TxScaleIsOne(limits[index].outScale);

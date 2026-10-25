@@ -181,8 +181,6 @@ add_executable(probe_gas_test probe_gas_test.cpp)
 target_precompile_headers(probe_gas_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
 target_link_libraries(probe_gas_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)
 add_test(NAME probe_gas COMMAND probe_gas_test)
-# 燃える木箱の熱が負のセル(強い爆発の陽解法。T-0691)が現実の伝導率(T-1066)で刻みの終わりまで残る。T-0691 を直すまで止める
-set_tests_properties(probe_gas PROPERTIES DISABLED TRUE)
 set_tests_properties(probe_gas PROPERTIES TIMEOUT 1800)
 
 add_executable(probe_liquid_test probe_liquid_test.cpp)
