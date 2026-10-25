@@ -118,6 +118,22 @@ namespace {
         return {};
     }
 
+    // 段の中で隣どうしの節が同じ色なら、その節の組と段(無ければ空)。同じ色の隣は CPU の 1 本の回しと GPU の並びの答えを分ける(R3)
+    std::string SameColorLink(const sim::EquilibriumBlockGrid& grid) {
+        for (size_t depth = 0; depth < grid.levels.size(); ++depth) {
+            const sim::EquilibriumBlockLevel& level = grid.levels[depth];
+            for (size_t i = 0; i < level.x.size(); ++i) {
+                for (uint32_t link = level.rowStarts[i]; link < level.rowStarts[i + 1]; ++link) {
+                    if (level.colors[level.neighbors[link]] == level.colors[i])
+                        return std::format("段 {} の節 {} と {} が同じ色 {}", depth, i, level.neighbors[link],
+                                           level.colors[i]);
+                }
+            }
+        }
+
+        return {};
+    }
+
     // GPU(順のまま・逆順)を 1 回ずつ。CPU の刻みごとの値 cpuTicks と比べる
     std::expected<void, std::string> CompareRuns(Context& context, std::string_view name,
                                                  const sim::EquilibriumBlockSystem& system,
@@ -125,6 +141,10 @@ namespace {
                                                  const sim::EquilibriumBlockOptions& solve,
                                                  std::span<const int64_t> warm,
                                                  const std::vector<std::vector<int64_t>>& cpuTicks) {
+        const std::string sameColor = SameColorLink(grid);
+        if (!sameColor.empty())
+            return std::unexpected(std::format("{}: {}", name, sameColor));
+
         const auto ticks = (uint32_t)cpuTicks.size();
         uint64_t firstHash = 0;
         for (const bool reverse : {false, true}) {

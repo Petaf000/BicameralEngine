@@ -164,7 +164,7 @@ namespace bicameral::sim {
             m_systems[c].rounding = EQ_ROUNDING_EXACT;
             for (uint32_t cell = 0; cell < m_cells.size(); ++cell) {
                 const auto [x, up] = m_cells[cell];
-                const int32_t level = m_mixed && m_cellFine[cell] == 0 ? 1 : 0;
+                const int32_t level = m_mixed && m_cellFine[cell] != 0 ? 1 : 0;
                 m_systems[c].nodes.push_back({.level = level, .x = x, .y = up, .z = 0, .capacity = 1});
             }
         }
@@ -440,7 +440,9 @@ namespace bicameral::sim {
         system.prolongation = RigidProlongation();
         for (uint32_t cell = 0; cell < m_cells.size(); ++cell) {
             const auto [x, up] = m_cells[cell];
-            const int32_t level = m_mixed && m_cellFine[cell] == 0 ? 1 : 0;  // 混ざる場面は細かいセルがレベル 0
+            // 混ざる場面は細かいセルがレベル 1(細かいほど大きい = EquilibriumNode の約束。座標は細かいセルの単位)。
+            // T-1120 の初めは逆(粗いセルが 1)で、段の作りが粗いセルを先にまとめて細かいセルの座標と重ね、同じ色の節が隣り合った(T-1104 で見つけた)
+            const int32_t level = m_mixed && m_cellFine[cell] != 0 ? 1 : 0;
             system.nodes.push_back({.level = level, .x = x, .y = up, .z = 0});
         }
 
