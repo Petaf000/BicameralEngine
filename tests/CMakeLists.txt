@@ -353,6 +353,11 @@ add_executable(support_law_test support_law_test.cpp)
 target_link_libraries(support_law_test PRIVATE bicameral_multires bicameral_core)
 add_test(NAME support_law COMMAND support_law_test)
 set_tests_properties(support_law PROPERTIES TIMEOUT 3000)
+# T-1120: 0.5 m と 0.25 m のセルが混ざる場面(違う大きさの梁 2 通り)を全部 0.25 m と比べる
+add_executable(support_mixed_test support_mixed_test.cpp)
+target_link_libraries(support_mixed_test PRIVATE bicameral_multires bicameral_core)
+add_test(NAME support_mixed COMMAND support_mixed_test)
+set_tests_properties(support_mixed PROPERTIES TIMEOUT 1200)
 
 # 支えの法則の割れ(研究 R-B2・T-0872): 2 通り(強さ / 強さで割れ始め + 割れ面のエネルギー)を片持ち梁・張り出し・洞窟で 0.5 / 0.25 m
 add_executable(support_fracture_test support_fracture_test.cpp)

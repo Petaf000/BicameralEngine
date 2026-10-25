@@ -10,12 +10,19 @@
 // Lagged: 成分ごとの式の対角と負の非対角(C-0 が解く形)は面と固定した面に、成分の間の項と φ どうしの正の非対角は遅らせて右辺の項へ。
 // Coupled(T-0919): 同じエネルギーの各項 ½ c (g · [x_a; x_b])² を 3 × 3 の面のブロック c g gᵀ にそのまま入れ(成分の間の項も面の中)、
 //   成分を持つ節の C-0(equilibrium_block)で 1 つの系として解く。延ばし方は剛体の動き(RigidProlongation)。
+// 違う大きさのセル(T-1120): 板の厚さ D = cellMm のままなので、同じ大きさのセルどうしの面は大きさによらず ka = E × D・b = ka ÷ 6
+//   (梁の式の dx が消える)。粗いセル C(一辺 2s・φ_C = 角 × s)と細かいセル F(一辺 s・φ_F = 角 × s/2)の間は、長さ L = 1.5 s・
+//   面の幅 s の Euler–Bernoulli の梁(MixedBeam::FaceOffset。粗い側の端は C の中心から横へ σ s/2 の点 = 剛体の動きで n_C + ε σ φ_C / 2):
+//     ½ b (2 Δn')²  +  ½ (b/9) (4 Δt + ε (3 φ_C + 6 φ_F))²  +  ½ (b/3) (s 角_high − s 角_low)²(s 角_C = φ_C・s 角_F = 2 φ_F)
+//   (ε = −1 は x の面・+1 は上の面。軸 E w D / L = 4b・ずれ 12 E I / L³ = 16b/9・曲げ E I / L = b/3。I = D s³ / 12。
+//   粗い面に並ぶ 2 本の梁の断面の二次モーメントの和 2 (D s³/12) + 2 (s D)(s/2)² = D (2s)³ / 12 は粗い梁と同じ)
 #include "sim/support_law.h"
 
 #include <algorithm>
 
 #include "common/equilibrium.hlsli"
 #include "common/implicit_conduction.hlsli"
+#include "core/aliases.h"
 #include "sim/equilibrium_fields.h"
 
 using namespace bicameral::fx;
@@ -30,6 +37,7 @@ namespace bicameral::sim {
         constexpr uint32_t UNIT_SHIFT = 32;   // 係数の Q(2^-32 mN/nm)
         constexpr uint32_t FORCE_SHIFT = 48;  // 力 mN → 右辺(2^-16 nm × 2^-32 mN/nm)
         constexpr uint64_t NO_CELL = UINT32_MAX;
+        constexpr uint32_t SPLIT_CELL = UINT32_MAX - 1;  // m_index: 2 × 2 の細かいセルに分けたセル(T-1120)
         constexpr uint32_t
             BLOCK_COEFFICIENT_SHIFT = 32;           // Coupled の右辺の単位 2^-16 mN(係数 2^-32 × 変位 2^-16 ÷ 2^32)
         constexpr uint32_t BLOCK_FORCE_SHIFT = 16;  // mN → 2^-16 mN
@@ -84,9 +92,10 @@ namespace bicameral::sim {
             return FxDivU128By64(product, PER_MILLION).quotient;
         }
 
-        // セル 1 つの重さ ρ g dx³(kg/m³ × µm/s² × mm³ = 10^-12 mN)
-        int64_t CellWeight(const SupportScene& scene) {
-            const uint64_t volume = scene.cellMm * scene.cellMm * scene.cellMm;
+        // セル 1 つの重さ ρ g dx³(kg/m³ × µm/s² × mm³ = 10^-12 mN)。細かいセルは (dx/2)² × dx(板の厚さは dx のまま。T-1120)
+        int64_t CellWeight(const SupportScene& scene, bool fine) {
+            const uint64_t side = fine ? scene.cellMm / 2 : scene.cellMm;
+            const uint64_t volume = side * side * scene.cellMm;
             const FxU128 product = FxMulU64Full(scene.densityKgPerM3 * scene.gravityUmPerS2, volume);
 
             return (int64_t)FxDivU128By64(product, PER_TRILLION).quotient;
@@ -137,34 +146,42 @@ namespace bicameral::sim {
         m_bondUp = BondUnit(upKpa, m_scene.cellMm) / 6;
         // 式の係数 = 棒の硬さ ÷ 2 = 6b × 分子 ÷ (2 × 分母)(既定 1/12 で (b_x + b_上) / 8)
         m_brace = (m_bondX + m_bondUp) * 3 * m_options.braceNumerator / (2 * m_options.braceDenominator);
-        m_weight = CellWeight(m_scene);
+        m_weight = CellWeight(m_scene, false);
+        m_mixed = rng::any_of(m_scene.fine, [](uint8_t fine) { return fine != 0; });
+        FX_ASSERT(!m_mixed || Coupled());  // 混ざる場面は Coupled の格子の梁だけ(T-1120)
 
-        m_index.assign((size_t)width * height, (uint32_t)NO_CELL);
-        for (uint32_t up = 0; up < height; ++up) {
-            for (uint32_t x = 0; x < width; ++x) {
-                if (m_scene.solid[x + (size_t)width * up] == 0)
-                    continue;
+        if (m_mixed)
+            BuildMixedCells();
+        else
+            BuildCells();
 
-                m_index[x + (size_t)width * up] = (uint32_t)m_cells.size();
-                m_cells.push_back({x, up});
-            }
-        }
-
+        BuildLoads();
         m_bondAt.assign(m_cells.size() * 2, (uint32_t)NO_CELL);
 
         for (uint32_t c = 0; c < ComponentCount(); ++c) {
             m_systems[c].rounding = EQ_ROUNDING_EXACT;
-            for (const auto& [x, up] : m_cells)
-                m_systems[c].nodes.push_back({.level = 0, .x = x, .y = up, .z = 0, .capacity = 1});
+            for (uint32_t cell = 0; cell < m_cells.size(); ++cell) {
+                const auto [x, up] = m_cells[cell];
+                const int32_t level = m_mixed && m_cellFine[cell] == 0 ? 1 : 0;
+                m_systems[c].nodes.push_back({.level = level, .x = x, .y = up, .z = 0, .capacity = 1});
+            }
         }
 
-        for (uint32_t cell = 0; cell < m_cells.size(); ++cell) {
-            const auto [x, up] = m_cells[cell];
-            if (x + 1 < width && m_index[x + 1 + (size_t)width * up] != NO_CELL)
-                AddBond({.low = cell, .high = m_index[x + 1 + (size_t)width * up], .axis = 0});
+        // 分けたセルの隣(SPLIT_CELL)の面は BuildMixedBonds が細かいセルから足す
+        const auto present = [&](uint32_t x, uint32_t up) {
+            return m_index[x + (size_t)width * up] < SPLIT_CELL;
+        };
 
-            if (up + 1 < height && m_index[x + (size_t)width * (up + 1)] != NO_CELL)
-                AddBond({.low = cell, .high = m_index[x + (size_t)width * (up + 1)], .axis = 1});
+        for (uint32_t cell = 0; cell < m_cells.size(); ++cell) {
+            if (m_mixed && m_cellFine[cell] != 0)
+                continue;
+
+            const auto [x, up] = m_cells[cell];
+            if (x + 1 < width && present(x + 1, up))
+                AddBond({.low = cell, .high = m_index[x + 1 + (size_t)width * up], .axis = 0}, Intact(x, up, 0));
+
+            if (up + 1 < height && present(x, up + 1))
+                AddBond({.low = cell, .high = m_index[x + (size_t)width * (up + 1)], .axis = 1}, Intact(x, up, 1));
 
             const uint8_t clamps = m_scene.clamps[x + (size_t)width * up];
             if ((clamps & SUPPORT_CLAMP_LEFT) != 0)
@@ -186,9 +203,15 @@ namespace bicameral::sim {
                     continue;
 
                 const uint32_t diagonal = m_index[(size_t)sideX + (size_t)width * (up + 1)];
-                const bool side = m_index[(size_t)sideX + (size_t)width * up] != NO_CELL;
-                const bool above = m_index[x + (size_t)width * (up + 1)] != NO_CELL;
+                const uint32_t sideCell = m_index[(size_t)sideX + (size_t)width * up];
+                const uint32_t aboveCell = m_index[x + (size_t)width * (up + 1)];
+                const bool side = sideCell != NO_CELL;
+                const bool above = aboveCell != NO_CELL;
                 if (diagonal == NO_CELL || side == above)
+                    continue;
+
+                // 段の斜めの棒は同じ大きさのセルの間だけ(分けたセルが絡む段は T-1067 の残り)
+                if (diagonal == SPLIT_CELL || sideCell == SPLIT_CELL || aboveCell == SPLIT_CELL)
                     continue;
 
                 const uint32_t intact = BraceIntact(x, up, (uint32_t)sideX, side);
@@ -196,6 +219,173 @@ namespace bicameral::sim {
                     AddBrace({.low = cell, .high = diagonal, .across = across, .unit = Scaled(m_brace, intact)});
             }
         }
+
+        if (m_mixed)
+            BuildMixedBonds();
+    }
+
+    // --- セル(1 つの大きさ)---
+    void SupportLaw::BuildCells() {
+        const uint32_t width = m_scene.width;
+        m_index.assign((size_t)width * m_scene.height, (uint32_t)NO_CELL);
+        for (uint32_t up = 0; up < m_scene.height; ++up) {
+            for (uint32_t x = 0; x < width; ++x) {
+                if (m_scene.solid[x + (size_t)width * up] == 0)
+                    continue;
+
+                m_index[x + (size_t)width * up] = (uint32_t)m_cells.size();
+                m_cells.push_back({x, up});
+            }
+        }
+    }
+
+    // --- セル(違う大きさが混ざる。T-1120): 分けたセルは 2 × 2 の細かいセル(細かい格子の座標)---
+    void SupportLaw::BuildMixedCells() {
+        const uint32_t width = m_scene.width;
+        m_index.assign((size_t)width * m_scene.height, (uint32_t)NO_CELL);
+        m_fineIndex.assign((size_t)4 * width * m_scene.height, (uint32_t)NO_CELL);
+        for (uint32_t up = 0; up < m_scene.height; ++up) {
+            for (uint32_t x = 0; x < width; ++x) {
+                const size_t at = x + (size_t)width * up;
+                if (m_scene.solid[at] == 0)
+                    continue;
+
+                if (m_scene.fine[at] == 0) {
+                    m_index[at] = (uint32_t)m_cells.size();
+                    m_cells.push_back({x, up});
+                    m_cellFine.push_back(0);
+                    continue;
+                }
+
+                m_index[at] = SPLIT_CELL;
+                for (uint32_t part = 0; part < 4; ++part) {
+                    const uint32_t fx = 2 * x + (part & 1);
+                    const uint32_t fup = 2 * up + (part >> 1);
+                    m_fineIndex[fx + (size_t)2 * width * fup] = (uint32_t)m_cells.size();
+                    m_cells.push_back({fx, fup});
+                    m_cellFine.push_back(1);
+                }
+            }
+        }
+    }
+
+    // --- セルの重さ + 載せた荷(分けたセルの荷は 4 つに分け、割り切れない分は左下の細かいセルへ)---
+    void SupportLaw::BuildLoads() {
+        const int64_t fineWeight = m_mixed ? CellWeight(m_scene, true) : 0;
+        m_loads.assign(m_cells.size(), 0);
+        for (uint32_t cell = 0; cell < m_cells.size(); ++cell) {
+            const auto [x, up] = m_cells[cell];
+            const bool fine = m_mixed && m_cellFine[cell] != 0;
+            const size_t at = fine ? x / 2 + (size_t)m_scene.width * (up / 2) : x + (size_t)m_scene.width * up;
+            const int64_t load = m_scene.loadMn.empty() ? 0 : m_scene.loadMn[at];
+            if (!fine) {
+                m_loads[cell] = m_weight + load;
+                continue;
+            }
+
+            const bool first = (x & 1) == 0 && (up & 1) == 0;
+            m_loads[cell] = fineWeight + (first ? load - 3 * (load / 4) : load / 4);
+        }
+    }
+
+    // --- 細かいセルの面(T-1120): 細かいセルどうしは同じ形の面・分けていないセルとの間は違う大きさの梁 ---
+    void SupportLaw::BuildMixedBonds() {
+        const uint32_t fineWidth = 2 * m_scene.width;
+        const uint32_t fineHeight = 2 * m_scene.height;
+        for (uint32_t cell = 0; cell < m_cells.size(); ++cell) {
+            if (m_cellFine[cell] == 0)
+                continue;
+
+            const auto [fx, fup] = m_cells[cell];
+            AddFineClamps(cell);
+            for (uint32_t axis = 0; axis < 2; ++axis) {
+                const uint32_t stepX = axis == 0 ? 1 : 0;
+                const uint32_t stepUp = 1 - stepX;
+                const int64_t offset = ((axis == 0 ? fup : fx) & 1) != 0 ? 1 : -1;  // 粗いセルの中心から見た横の側 σ
+
+                // + 側
+                const uint32_t nextX = fx + stepX;
+                const uint32_t nextUp = fup + stepUp;
+                if (nextX < fineWidth && nextUp < fineHeight) {
+                    const uint32_t intact = (nextX / 2 == fx / 2 && nextUp / 2 == fup / 2)
+                                                ? SUPPORT_INTACT_FULL
+                                                : Intact(fx / 2, fup / 2, axis);
+                    const uint32_t next = m_fineIndex[nextX + (size_t)fineWidth * nextUp];
+                    const uint32_t coarse = m_index[nextX / 2 + (size_t)m_scene.width * (nextUp / 2)];
+                    if (next != NO_CELL)
+                        AddBond({.low = cell, .high = next, .axis = axis}, intact);
+                    else if (coarse < SPLIT_CELL)
+                        AddMixedBond(coarse, cell, axis, false, offset, intact);
+                }
+
+                // − 側(分けていないセルとの間だけ。細かいセルどうしは − 側のセルが足す)
+                if ((axis == 0 ? fx : fup) == 0)
+                    continue;
+
+                const uint32_t backX = fx - stepX;
+                const uint32_t backUp = fup - stepUp;
+                const uint32_t coarse = m_index[backX / 2 + (size_t)m_scene.width * (backUp / 2)];
+                if (m_fineIndex[backX + (size_t)fineWidth * backUp] == NO_CELL && coarse < SPLIT_CELL)
+                    AddMixedBond(coarse, cell, axis, true, offset, Intact(backX / 2, backUp / 2, axis));
+            }
+        }
+    }
+
+    // 分けたセルの固定した面は、向きの側の細かいセルへ(半分の長さの梁の式は大きさによらず同じ = 冒頭)
+    void SupportLaw::AddFineClamps(uint32_t cell) {
+        const auto [fx, fup] = m_cells[cell];
+        const uint8_t clamps = m_scene.clamps[fx / 2 + (size_t)m_scene.width * (fup / 2)];
+        if ((clamps & SUPPORT_CLAMP_LEFT) != 0 && (fx & 1) == 0)
+            AddClamp({.cell = cell, .axis = 0, .side = -1});
+
+        if ((clamps & SUPPORT_CLAMP_RIGHT) != 0 && (fx & 1) != 0)
+            AddClamp({.cell = cell, .axis = 0, .side = 1});
+
+        if ((clamps & SUPPORT_CLAMP_BOTTOM) != 0 && (fup & 1) == 0)
+            AddClamp({.cell = cell, .axis = 1, .side = -1});
+    }
+
+    // 違う大きさの梁(冒頭の式。低い側 = −軸の側)。MixedBeam::CenterLine は粗い側の端の横のずれ σ を見ない
+    void SupportLaw::AddMixedBond(uint32_t coarse, uint32_t fine, uint32_t axis, bool coarseLow, int64_t offset,
+                                  uint32_t intact) {
+        if (intact == 0)
+            return;
+
+        const uint64_t b = Scaled(axis == 0 ? m_bondX : m_bondUp, intact);
+        const uint32_t along = axis == 0 ? SUPPORT_X : SUPPORT_UP;
+        const uint32_t across = axis == 0 ? SUPPORT_UP : SUPPORT_X;
+        const int64_t turnSign = axis == 0 ? -1 : 1;  // ε
+        const int64_t coarseSide = coarseLow ? -1 : 1;
+        const int64_t fineSide = -coarseSide;
+        const bool faceOffset = m_options.mixedBeam == MixedBeam::FaceOffset;
+        const auto term = [&](uint64_t coefficient) {
+            return MixedTerm{
+                .low = coarseLow ? coarse : fine, .high = coarseLow ? fine : coarse, .coefficient = coefficient};
+        };
+        const auto gradientOf = [&](MixedTerm& each, bool ofCoarse) -> std::array<int64_t, SUPPORT_COMPONENTS>& {
+            return ofCoarse == coarseLow ? each.gradientLow : each.gradientHigh;
+        };
+
+        // 軸: ½ b (2 Δn')²(2 n_C' = 2 n_C + ε σ φ_C)
+        MixedTerm axial = term(b);
+        gradientOf(axial, true)[along] = 2 * coarseSide;
+        gradientOf(axial, false)[along] = 2 * fineSide;
+        gradientOf(axial, true)[SUPPORT_TURN] = faceOffset ? coarseSide * turnSign * offset : 0;
+        m_mixedTerms.push_back(axial);
+
+        // ずれ: ½ (b/9) (4 Δt + ε (3 φ_C + 6 φ_F))²
+        MixedTerm shear = term(b / 9);
+        gradientOf(shear, true)[across] = 4 * coarseSide;
+        gradientOf(shear, false)[across] = 4 * fineSide;
+        gradientOf(shear, true)[SUPPORT_TURN] = 3 * turnSign;
+        gradientOf(shear, false)[SUPPORT_TURN] = 6 * turnSign;
+        m_mixedTerms.push_back(shear);
+
+        // 曲げ: ½ (b/3) (s 角_high − s 角_low)²
+        MixedTerm bend = term(b / 3);
+        gradientOf(bend, true)[SUPPORT_TURN] = coarseSide;
+        gradientOf(bend, false)[SUPPORT_TURN] = 2 * fineSide;
+        m_mixedTerms.push_back(bend);
     }
 
     // --- 成分を持つ節の系(Coupled。T-0919): Lagged と同じエネルギーの項を 3 × 3 の面のブロックへ ---
@@ -204,8 +394,11 @@ namespace bicameral::sim {
         system.components = SUPPORT_COMPONENTS;
         system.coefficientShift = BLOCK_COEFFICIENT_SHIFT;
         system.prolongation = RigidProlongation();
-        for (const auto& [x, up] : m_cells)
-            system.nodes.push_back({.level = 0, .x = x, .y = up, .z = 0});
+        for (uint32_t cell = 0; cell < m_cells.size(); ++cell) {
+            const auto [x, up] = m_cells[cell];
+            const int32_t level = m_mixed && m_cellFine[cell] == 0 ? 1 : 0;  // 混ざる場面は細かいセルがレベル 0
+            system.nodes.push_back({.level = level, .x = x, .y = up, .z = 0});
+        }
 
         // 面: ½ 6b Δn² + ½ 6b (Δt ∓ (φ_a + φ_b))² + ½ 2b Δφ²(∓ は x の面で −・上の面で +)
         for (const Bond& bond : m_bonds) {
@@ -236,6 +429,15 @@ namespace bicameral::sim {
         for (const Brace& brace : m_braces) {
             EquilibriumBlockFace face{.low = brace.low, .high = brace.high};
             AddTerm(face, brace.unit, {-brace.across, -1, 0}, {brace.across, 1, 0});
+            system.faces.push_back(face);
+        }
+
+        // 違う大きさの梁(T-1120): 同じ 2 節の 3 つの項を 1 つの面へ
+        for (size_t first = 0; first < m_mixedTerms.size(); first += 3) {
+            EquilibriumBlockFace face{.low = m_mixedTerms[first].low, .high = m_mixedTerms[first].high};
+            for (size_t i = first; i < first + 3; ++i)
+                AddTerm(face, m_mixedTerms[i].coefficient, m_mixedTerms[i].gradientLow, m_mixedTerms[i].gradientHigh);
+
             system.faces.push_back(face);
         }
 
@@ -283,17 +485,10 @@ namespace bicameral::sim {
     }
 
     int64_t SupportLaw::CellLoad(uint32_t cell) const {
-        if (m_scene.loadMn.empty())
-            return m_weight;
-
-        const auto [x, up] = m_cells[cell];
-
-        return m_weight + m_scene.loadMn[x + (size_t)m_scene.width * up];
+        return m_loads[cell];
     }
 
-    void SupportLaw::AddBond(const Bond& candidate) {
-        const auto [lowX, lowUp] = m_cells[candidate.low];
-        const uint32_t intact = Intact(lowX, lowUp, candidate.axis);
+    void SupportLaw::AddBond(const Bond& candidate, uint32_t intact) {
         if (intact == 0)
             return;
 
@@ -380,10 +575,8 @@ namespace bicameral::sim {
         if (Coupled()) {
             m_blockState.values.assign(m_cells.size() * SUPPORT_COMPONENTS, 0);
             for (uint32_t cell = 0; cell < m_cells.size(); ++cell) {
-                for (uint32_t c = 0; c < SUPPORT_COMPONENTS; ++c) {
-                    m_blockState.values[cell * SUPPORT_COMPONENTS + c] = before.Value(m_cells[cell][0],
-                                                                                      m_cells[cell][1], c);
-                }
+                for (uint32_t c = 0; c < SUPPORT_COMPONENTS; ++c)
+                    m_blockState.values[cell * SUPPORT_COMPONENTS + c] = CarriedValue(before, cell, c);
             }
 
             return;
@@ -449,51 +642,108 @@ namespace bicameral::sim {
         }
     }
 
+    // 掘る・割れる前の答え before からこのセルの値(T-1120: 大きさが変わったセルは剛体の動きで配る・平均でまとめる)
+    int64_t SupportLaw::CarriedValue(const SupportLaw& before, uint32_t cell, uint32_t component) const {
+        const auto [x, up] = m_cells[cell];
+        const bool fine = m_mixed && m_cellFine[cell] != 0;
+        if (!fine) {
+            if (!before.IsFine(2 * x, 2 * up))
+                return before.Value(x, up, component);
+
+            // 細かい 4 つの平均(回りは単位が 2 倍: φ_粗 = 角 × s = 2 φ_細)
+            int64_t sum = 0;
+            for (uint32_t part = 0; part < 4; ++part)
+                sum += before.FineValue(2 * x + (part & 1), 2 * up + (part >> 1), component);
+
+            return component == SUPPORT_TURN ? sum / 2 : sum / 4;
+        }
+
+        if (before.IsFine(x, up))
+            return before.FineValue(x, up, component);
+
+        // 粗いセルから剛体の動きで(RigidProlongation と同じ: 横 ∓ φ/2・上 ± φ/2・回り φ/2)
+        const int64_t turn = before.Value(x / 2, up / 2, SUPPORT_TURN);
+        const int64_t value = before.Value(x / 2, up / 2, component);
+        if (component == SUPPORT_TURN)
+            return turn / 2;
+
+        if (component == SUPPORT_X)
+            return value + ((up & 1) != 0 ? -turn / 2 : turn / 2);
+
+        return value + ((x & 1) != 0 ? turn / 2 : -turn / 2);
+    }
+
     // --- 読む ---
     int64_t SupportLaw::Value(uint32_t x, uint32_t up, uint32_t component) const {
-        if (x >= m_scene.width || up >= m_scene.height || component >= ComponentCount())
+        if (x >= m_scene.width || up >= m_scene.height)
             return 0;
 
         const uint32_t cell = m_index[x + (size_t)m_scene.width * up];
+
+        return cell >= SPLIT_CELL ? 0 : CellValue(cell, component);
+    }
+
+    int64_t SupportLaw::CellValue(uint32_t cell, uint32_t component) const {
+        if (component >= ComponentCount())
+            return 0;
+
         if (Coupled()) {
             const size_t at = (size_t)cell * SUPPORT_COMPONENTS + component;
-            return cell == NO_CELL || at >= m_blockState.values.size() ? 0 : m_blockState.values[at];
+            return at >= m_blockState.values.size() ? 0 : m_blockState.values[at];
         }
 
         const std::vector<int64_t>& values = m_states[component].values;
-        if (cell == NO_CELL || cell >= values.size())
-            return 0;
 
-        return values[cell];
+        return cell >= values.size() ? 0 : values[cell];
+    }
+
+    bool SupportLaw::IsFine(uint32_t fx, uint32_t fup) const {
+        if (!m_mixed || fx >= 2 * m_scene.width || fup >= 2 * m_scene.height)
+            return false;
+
+        return m_fineIndex[fx + (size_t)2 * m_scene.width * fup] != NO_CELL;
+    }
+
+    int64_t SupportLaw::FineValue(uint32_t fx, uint32_t fup, uint32_t component) const {
+        if (IsFine(fx, fup))
+            return CellValue(m_fineIndex[fx + (size_t)2 * m_scene.width * fup], component);
+
+        return Value(fx / 2, fup / 2, component);
     }
 
     int64_t SupportLaw::UpForceOnBond(const Bond& bond) const {
-        const auto [lowX, lowUp] = m_cells[bond.low];
-        const auto [highX, highUp] = m_cells[bond.high];
-        const int64_t difference = Value(highX, highUp, SUPPORT_UP) - Value(lowX, lowUp, SUPPORT_UP);
+        const int64_t difference = CellValue(bond.high, SUPPORT_UP) - CellValue(bond.low, SUPPORT_UP);
         if (bond.axis == 1)
             return -Flow(6 * bond.unit, difference);
 
         if (m_options.form == SupportForm::PerComponent)
             return -Flow(3 * bond.unit, difference);
 
-        const int64_t turns = Value(lowX, lowUp, SUPPORT_TURN) + Value(highX, highUp, SUPPORT_TURN);
+        const int64_t turns = CellValue(bond.low, SUPPORT_TURN) + CellValue(bond.high, SUPPORT_TURN);
 
         return -Flow(6 * bond.unit, difference - turns);
     }
 
     int64_t SupportLaw::UpForceOnBrace(const Brace& brace) const {
-        const auto [lowX, lowUp] = m_cells[brace.low];
-        const auto [highX, highUp] = m_cells[brace.high];
-        const int64_t slide = Value(highX, highUp, SUPPORT_X) - Value(lowX, lowUp, SUPPORT_X);
-        const int64_t lift = Value(highX, highUp, SUPPORT_UP) - Value(lowX, lowUp, SUPPORT_UP);
+        const int64_t slide = CellValue(brace.high, SUPPORT_X) - CellValue(brace.low, SUPPORT_X);
+        const int64_t lift = CellValue(brace.high, SUPPORT_UP) - CellValue(brace.low, SUPPORT_UP);
 
         return -Flow(brace.unit, brace.across * slide + lift);
     }
 
+    // 項 ½ c (g · x)² が high のセルへ当てる上の力 −c (g · x) g_high,上(low へは g_low,上 = −g_high,上 なので同じ値の逆)
+    int64_t SupportLaw::UpForceOnTerm(const MixedTerm& term) const {
+        int64_t projection = 0;
+        for (uint32_t c = 0; c < SUPPORT_COMPONENTS; ++c) {
+            projection += term.gradientLow[c] * CellValue(term.low, c);
+            projection += term.gradientHigh[c] * CellValue(term.high, c);
+        }
+
+        return -Flow(term.coefficient, projection) * term.gradientHigh[SUPPORT_UP];
+    }
+
     int64_t SupportLaw::UpForceOnClamp(const Clamp& clamp) const {
-        const auto [x, up] = m_cells[clamp.cell];
-        const int64_t lift = Value(x, up, SUPPORT_UP);
+        const int64_t lift = CellValue(clamp.cell, SUPPORT_UP);
         if (clamp.axis == 1)
             return -Flow(12 * m_bondUp, lift);
 
@@ -501,7 +751,7 @@ namespace bicameral::sim {
             return -Flow(6 * m_bondX, lift);
 
         // 8ka (t ± φ/2) = 24b (2t ± φ)
-        return -Flow(24 * m_bondX, 2 * lift + clamp.side * Value(x, up, SUPPORT_TURN));
+        return -Flow(24 * m_bondX, 2 * lift + clamp.side * CellValue(clamp.cell, SUPPORT_TURN));
     }
 
     // 面の力(梁の切り口。dx = セル・ka = 6b): N = ka Δn・ずれ = ka (Δt ∓ (φ_a + φ_b))・6M/dx = ka (φ_b − φ_a)。
@@ -512,8 +762,9 @@ namespace bicameral::sim {
         if (m_options.form != SupportForm::BeamLattice || highX >= m_scene.width || highUp >= m_scene.height)
             return {};
 
+        // 分けたセル(SPLIT_CELL)が絡む面は読まない(違う大きさの面の割れの数え方は T-1067)
         const uint32_t cell = m_index[x + (size_t)m_scene.width * up];
-        if (cell == NO_CELL || m_index[highX + (size_t)m_scene.width * highUp] == NO_CELL)
+        if (cell >= SPLIT_CELL || m_index[highX + (size_t)m_scene.width * highUp] >= SPLIT_CELL)
             return {};
 
         const uint32_t bondIndex = m_bondAt[(size_t)cell * 2 + axis];
@@ -565,6 +816,12 @@ namespace bicameral::sim {
             net[brace.low] -= force;
         }
 
+        for (const MixedTerm& term : m_mixedTerms) {
+            const int64_t force = UpForceOnTerm(term);
+            net[term.high] += force;
+            net[term.low] -= force;
+        }
+
         for (const Clamp& clamp : m_clamps) {
             const int64_t force = UpForceOnClamp(clamp);
             net[clamp.cell] += force;
@@ -583,8 +840,8 @@ namespace bicameral::sim {
         uint64_t hash = 14695981039346656037ull;
         if (Coupled()) {
             for (uint32_t c = 0; c < SUPPORT_COMPONENTS; ++c) {
-                for (const auto& [x, up] : m_cells) {
-                    hash ^= (uint64_t)Value(x, up, c);
+                for (uint32_t cell = 0; cell < m_cells.size(); ++cell) {
+                    hash ^= (uint64_t)CellValue(cell, c);
                     hash *= 1099511628211ull;
                 }
             }
