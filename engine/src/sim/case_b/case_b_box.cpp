@@ -562,6 +562,10 @@ namespace bicameral::sim::case_b {
         }
 
         error.negativeMass = rng::any_of(box.massMg, [](int64_t value) { return value < 0; });
+        // 層は 0 以上・そのセルの質量以下(T-1136。層は質量の内訳)
+        for (size_t index = 0; index < box.grainLayerMg.size(); ++index)
+            error.negativeMass = error.negativeMass || box.grainLayerMg[index] < 0 ||
+                                 box.grainLayerMg[index] > box.massMg[index];
 
         return error;
     }
@@ -582,6 +586,10 @@ namespace bicameral::sim::case_b {
         }
 
         hash = HashVector(hash, box.pressureMicroPascal);
+        // 層が全部 0 の箱(粒が無い)は層を持たない箱と同じハッシュ(T-1136)
+        if (rng::any_of(box.grainLayerMg, [](int64_t value) { return value != 0; }))
+            hash = HashVector(hash, box.grainLayerMg);
+
         for (uint32_t axis = 0; axis < 3; ++axis) {
             hash = HashVector(hash, box.faceMomentum[axis]);
             hash = HashVector(hash, box.faceCarry[axis]);
@@ -654,6 +662,14 @@ namespace bicameral::sim::case_b {
             const uint32_t target = CellIndex(coarse, at[0] / merge[0], at[1] / merge[1], at[2] / merge[2]);
             for (uint32_t material = 0; material < materials; ++material)
                 CellMass(coarse, target, material) += CellMass(fine, cell, material) * extrude;
+
+            // 層も和(21 §2.12。T-1136)
+            if (!fine.grainLayerMg.empty()) {
+                coarse.grainLayerMg.resize(coarse.massMg.size(), 0);
+                for (uint32_t material = 0; material < materials; ++material)
+                    coarse.grainLayerMg[((size_t)target * materials) +
+                                        material] += fine.grainLayerMg[((size_t)cell * materials) + material] * extrude;
+            }
 
             coarse.energyMillijoules[target] += fine.energyMillijoules[cell] * extrude;
             occupancy[target] += fine.bodyOccupancyQ16[cell];

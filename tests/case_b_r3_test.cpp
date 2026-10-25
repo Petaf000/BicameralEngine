@@ -249,6 +249,8 @@ namespace {
     std::shared_ptr<FlowStats> currentStats;  // 走っている場面の段の数え(刻みの後の操作から読む。T-1003 の測り)
     bool movingByCellOverride = false;
     uint32_t dragScaleOverride = 1000;     // 引きずりの倍率(‰。T-1003 の根の測り。引数 drag=<‰>)
+    bool sideDragOverride = false;         // 層の横の面の Kozeny–Carman(T-1136 の 1 本目の計画)。引数 sidedrag
+    bool twoStatesOverride = false;        // 粒を層と舞う粒の 2 つの状態で持つ(T-1136・D-659 の研究)。引数 twostate
     bool restLayerOverride = false;        // 積もった層を解く間は障害物に(T-1043 の 2 回目。打ち切り)。引数 layer
     uint32_t cyclesOverride = CYCLES;      // 陰の圧力の V サイクルの回数(T-1105)。引数 cycles=<回>
     uint32_t ticksOverride = 0;            // 1 秒の刻みの数(T-1105)。引数 tps=<数>。0 = 場面の既定
@@ -322,6 +324,8 @@ namespace {
         flowOptions.grainLayerPoreDrag = poreDragOverride;
         flowOptions.columnPerOpenArea = openColumnOverride;
         flowOptions.buoyancyFromColumn = buoyancyOverride;
+        flowOptions.grainTwoStates = twoStatesOverride;
+        flowOptions.grainLayerSideDrag = sideDragOverride;
 
         const FlowStages flow = MakeFlowStages(flowOptions);
         currentStats = flow.stats;
@@ -356,6 +360,9 @@ namespace {
             (unsigned long long)run.stats.turnedGrainImpulse, (unsigned long long)run.stats.restLayerGrainFaces,
             (unsigned long long)run.stats.restLockedGrainFaces, (unsigned long long)run.stats.heldGrainFaces,
             (unsigned long long)run.stats.releasedGrainFaces, (unsigned long long)run.stats.surfaceLayerGrainFaces);
+        if (twoStatesOverride)
+            std::printf("    2 つの状態(T-1136): 舞う粒 → 層 %llu mg・層 → 舞う粒 %llu mg(累計)\n",
+                        (unsigned long long)run.stats.settledGrainMg, (unsigned long long)run.stats.liftedGrainMg);
     }
 
     // 1 mm/s 以上で動く粒の質量の割合(‰。面の粒の質量で重み)
@@ -1243,6 +1250,12 @@ int main(int argc, char** argv) {
             surfaceLayerOverride = frictionInSolveOverride = surfaceHeldOnlyOverride = true;
         else if (word == "layer")
             restLayerOverride = true;
+        else if (word == "twostate")
+            twoStatesOverride = true;
+        else if (word == "sidedrag")
+            sideDragOverride = true;
+        else if (word == "nosidedrag")
+            sideDragOverride = false;
         else if (word.starts_with("drag="))
             dragScaleOverride = (uint32_t)std::stoi(word.substr(5));
         else

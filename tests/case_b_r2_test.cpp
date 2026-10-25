@@ -25,6 +25,7 @@ namespace {
     using namespace bicameral::sim::case_b;
 
     int failureCount = 0;
+    bool twoStatesOverride = false;  // 粒を層と舞う粒の 2 つの状態で持つ(T-1136・D-659 の研究)。引数のどこかに twostate
 
     void Expect(bool condition, const char* text, int line) {
         if (condition)
@@ -198,7 +199,7 @@ namespace {
         for (const std::string& name : regionNames)
             regions.push_back(*FindRegion(scene, name, level));
 
-        const FlowStages flow = MakeFlowStages({.drag = drag});
+        const FlowStages flow = MakeFlowStages({.drag = drag, .grainTwoStates = twoStatesOverride});
         const PressureSolver solver = MakeImplicitGridSolver(CYCLES, TOLERANCE_NL);
         run.grainHeightUm.push_back(GrainHeightUm(run.box));
         run.recording = RunScene(run.box, flow.stages, solver, seconds * ticksPerSecond, regions, [&](Box& box) {
@@ -551,7 +552,8 @@ namespace {
         for (const std::string& name : regionNames)
             regions.push_back(*FindRegion(scene, name, level));
 
-        const FlowStages flow = MakeFlowStages({.drag = drag, .splitSurfaceLayer = splitSurfaceLayer});
+        const FlowStages flow = MakeFlowStages(
+            {.drag = drag, .splitSurfaceLayer = splitSurfaceLayer, .grainTwoStates = twoStatesOverride});
         const PressureSolver solver = MakeImplicitGridSolver(CYCLES, TOLERANCE_NL);
         run.liquidHeightUm.push_back(LiquidHeightUm(run.box));
         run.recording = RunScene(run.box, flow.stages, solver, seconds * ticksPerSecond, regions, [&](Box& box) {
@@ -721,6 +723,15 @@ namespace {
 int main(int argc, char** argv) {
     // 引数で場面を 1 つに絞れる(0 = 決定性・1 = 水中の砂・2 = 空気中の粉・3 = Darcy・4 = 1 mg・
     // 5 = しずく・6 = 水面の風・7 = 砂の芯・8 = 砂の堤。5〜8 は置き場 ①。T-0963)。無ければ全部
+    int kept = 1;
+    for (int index = 1; index < argc; ++index) {
+        if (std::string(argv[index]) == "twostate")
+            twoStatesOverride = true;
+        else
+            argv[kept++] = argv[index];
+    }
+
+    argc = kept;
     const int only = argc > 1 ? std::stoi(argv[1]) : -1;
     if (only < 0 || only == 0) {
         Determinism();

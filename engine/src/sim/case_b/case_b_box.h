@@ -169,6 +169,11 @@ namespace bicameral::sim::case_b {
         std::vector<std::array<int64_t, 3>> bodyVelocity;  // 物の速さ(2^-20 m/s。決まった相)
         std::vector<int64_t> pressureMicroPascal;          // 導かれる圧力(段が書く。次の刻みの初めの近似)
 
+        // --- 粒の 2 つの状態(T-1136・D-659。研究の 1 本目。空 = 使わない = 今までと同じ)---
+        // セル × 物質の「積もった層」の質量(粒の物質だけ。0 ≤ 層 ≤ そのセルの質量)。残り(質量 − 層)= 空気・水の中に舞う粒。
+        // 保存量は massMg のまま(層 ↔ 舞う粒はセルの中の受け渡しで、帳簿は増えない)。運ぶ段が層の分を一緒に運ぶ(case_b_flow)
+        std::vector<int64_t> grainLayerMg;
+
         // --- 面の開き具合(導かれる値。ハッシュ・保存・粗くするの外。T-0937 の欄 face.blocked と同じ形と意味・ADR-0420)---
         // 番号 = セル(+ 側の面)。空の軸は全部 0(欄の無い頁 = 塞がない)。運ぶ段が FoFaceOpen・FoGrainFaceOpen で読む
         std::array<std::vector<uint32_t>, 3> faceBlockedQ16;  // 面の塞ぐ割合(Q16)
