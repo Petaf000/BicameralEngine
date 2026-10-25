@@ -315,6 +315,7 @@ namespace {
 
         const std::vector<reaction::RxCell> world = MakeWorld(table, scene, *field);
         ProbeReference reference(table, world);
+        reference.SetCascadeRadiation({.enabled = false});  // GPU の仮の世界に放射の段が入るまで(T-1154)
         failures.Check(reference.EnableLiquid(options).has_value(), std::format("{}: CPU の区画", name));
 
         auto queue = gpu::Queue::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, L"LiquidTestSim");

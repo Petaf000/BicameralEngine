@@ -74,6 +74,7 @@ namespace {
     void CheckStill(ID3D12Device5* device, const BakedReactionTable& table, std::string_view name, Failures& failures) {
         const std::vector<reaction::RxCell> world = MakeBlankProbeWorld();
         ProbeReference reference(table, world);
+        reference.SetCascadeRadiation({.enabled = false});  // GPU の仮の世界に放射の段が入るまで(T-1154)
         const uint64_t initialHash = ProbeStateHash(reference.State(0));
 
         uint32_t debugAssertCount = 0;

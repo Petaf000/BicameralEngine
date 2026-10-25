@@ -127,6 +127,7 @@ namespace {
         PhysicsWorld world(scene,
                            PhysicsParametersFor(StandardWorldPhysics()));  // サンプルの世界と同じ標準の重力(D-480)
         ProbeReference reference(table);
+        reference.SetCascadeRadiation({.enabled = false});  // GPU の仮の世界に放射の段が入るまで(T-1154)
         const std::vector<ProbeCommand> commands = MakePushCommands();
         std::vector<physics::PxHeatEntry> heat;  // 前の刻みの物理の熱の入口
         for (uint64_t tick = 0; tick < ticks; ++tick) {

@@ -46,6 +46,7 @@
 #include "gpu/readback_ring.h"
 #include "gpu/work_graph.h"
 #include "gpu/work_graph_stats.h"
+#include "sim/cascade_light.h"
 #include "sim/command.h"
 #include "sim/gpu_gas.h"
 #include "sim/gpu_physics.h"
@@ -668,6 +669,29 @@ namespace bicameral::sim {
         uint64_t seed = 0;  // 向きの組と線の格子のずれを決める世界の種(R6。sim/radiation_lines)
     };
 
+    // 熱の放射の段の既定(T-1113・D-646・D-658): 世界の中の光の距離ごとの段(RC。sim/cascade_light)で、熱の放射と照り返しを運び、
+    // 吸った・放った量をセルのエネルギーへ当てる。段は 気体 → 液体 → **放射** → 伝導と反応 の位置(23 §3.5)。
+    // 表のどの物質も光の値(light_absorption_*・light_reflectance_*・radiation_absorption_mm2_per_mol)を書いていなければ流さない
+    // (仮〔ユーザー未確認〕: 書いた表では書かない固体・液体は D-610 の灰色。T-1113 のチケット)。
+    // GPU の仮の世界にはまだ無い(T-1154)ので、GPU と比べる試験は enabled = false で比べる
+    struct ProbeCascadeOptions {
+        bool enabled = true;
+        CascadeParams params;  // 既定は D-658 の形(15 組・熱も待つ)
+    };
+
+    // 最後の Advance の放射の段(RC)で起きたこと。量は 2^−16 mJ(RC_ENERGY_SHIFT)
+    struct ProbeCascadeReport {
+        bool ran = false;                // 段を流した(表が光の値を書いている)
+        uint64_t emitted = 0;            // セルから引いた(熱で放った。待たせた分も含む)
+        uint64_t absorbed = 0;           // セルへ足した
+        uint64_t escaped = 0;            // 世界の外へ出た(帳簿の出)
+        int64_t rounding = 0;            // mJ に丸めた端数(セルへ当てなかった分。帳簿の「丸め」。正 = 世界から消えた)
+        int64_t appliedMilliJoules = 0;  // セルのエネルギーの変化の和(mJ)
+        uint32_t changedCells = 0;       // エネルギーが変わったセル
+        uint32_t negativeCells = 0;      // 当てた後に温度が 0 K 以下になったセル(陽の段の安定の見張り。0 であること)
+        uint64_t rays = 0;               // 歩いた光線の数(費用の目安)
+    };
+
     // 最後の Advance の放射の段で起きたこと
     struct ProbeRadiationReport {
         uint64_t pairs = 0;             // 線が見つけた対の数
@@ -712,8 +736,15 @@ namespace bicameral::sim {
 
         // 放射の段を入れる(T-0585・ADR-0263。CPU だけ)。次の Advance から、気体の段の後・伝導と反応の前に放射の 1 刻みを入れる。
         // 表の物質がどれも a を書いていなければ何もしない(呼ばなければ今までと同じ)
+        // 対の形(ADR-0262。退く道・比べる参照)。入れると既定の RC の段は流さない(1 つの世界に放射の段は 1 つ)
         void EnableRadiation(const ProbeRadiationOptions& options) { m_radiation = options; }
         [[nodiscard]] const ProbeRadiationReport& LastRadiationReport() const { return m_radiationReport; }
+
+        // 熱の放射の既定の段(RC。T-1113)。既定で入っている。持ち越し(照り返し・組を待つ光)はハッシュに入る(D-619)
+        void SetCascadeRadiation(const ProbeCascadeOptions& options) { m_cascade = options; }
+        [[nodiscard]] const ProbeCascadeOptions& CascadeRadiation() const { return m_cascade; }
+        [[nodiscard]] const ProbeCascadeReport& LastCascadeReport() const { return m_cascadeReport; }
+        [[nodiscard]] const CascadeCarry& CascadeRadiationCarry() const { return m_cascadeCarry; }
         // 液体の区画を載せる(T-0609・ADR-0266。CPU だけ)。次の Advance から、気体の後・伝導と反応の前に液体の 1 刻みを入れる。
         // 区画が空・重力が 0 の表などは断る(呼ばなければ今までと同じ)
         [[nodiscard]] std::expected<void, std::string> EnableLiquid(const ProbeLiquidOptions& options);
@@ -757,12 +788,17 @@ namespace bicameral::sim {
         ProbeGasStepReport m_gasReport;
         std::optional<ProbeRadiationOptions> m_radiation;  // 放射の段(T-0585。無ければ流さない)
         ProbeRadiationReport m_radiationReport;
+        ProbeCascadeOptions m_cascade;  // 熱の放射の既定の段(T-1113)
+        ProbeCascadeReport m_cascadeReport;
+        CascadeCarry m_cascadeCarry;               // 次の刻みへの持ち越し(照り返し・組を待つ光)
         std::optional<ProbeLiquidField> m_liquid;  // 液体の区画(T-0609。無ければ流さない)
         ProbeLiquidStepReport m_liquidReport;
 
         void RemapSpecies(uint64_t tick, const BakedReactionTable& newTable);
         // 放射の 1 刻み(刻みの初めの温度で対を交換し、current の世代のエネルギーに足す)。変わったブロックを予定の種にする
         void StepRadiation(uint64_t tick, size_t currentBase, std::vector<uint8_t>& seeds);
+        // 熱の放射の既定の段(RC。sim/probe_reference_radiation.cpp)。刻みの初めの温度で放ち、current の世代のエネルギーへ当てる
+        void StepCascadeRadiation(uint64_t tick, size_t currentBase, std::vector<uint8_t>& seeds);
     };
 
     // ブロックごとの初めの起こす刻みの印(待ちの丸め。ADR-0018・T-0122): 刻み 0 を tc = 0 で計算してみて、変わるブロックは刻み 0 の印、

@@ -614,6 +614,8 @@ namespace {
         const std::vector<ProbeCommand> commands = MakeCommands();
         const SlopeGaugeTable gaugeTable = MakeSlopeGaugeTable(table);
         ProbeReference reference(table);
+        // 坂の計器は伝導と反応の流れだけを数える(刻みの前後のセルの差から)。熱の放射の段(T-1113)の流れはまだ数えないので切る(T-1113 の残り)
+        reference.SetCascadeRadiation({.enabled = false});
         Tally tally;
         tally.rules.resize(table.rules.size());
         tally.burn.initialCellulose = TotalAmount(reference.State(0), table.SpeciesId("cellulose"));

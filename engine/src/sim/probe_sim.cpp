@@ -1653,8 +1653,11 @@ namespace bicameral::sim {
         }
 
         // (1d) 放射(段を入れた時だけ。T-0585・ADR-0263): 液体の後・伝導と反応の前(段の順: コマンド → 物理の熱 → 気体 → 液体 → 放射 → 伝導と反応)
+        m_cascadeReport = {};
         if (m_radiation)
             StepRadiation(tick, currentBase, seeds);
+        else if (m_cascade.enabled)
+            StepCascadeRadiation(tick, currentBase, seeds);
 
         m_wokenBlocks = CountWokenBlocks(m_blockFlags, m_scheduled);
         m_scheduled = ScheduleBlocks(seeds);
@@ -1795,6 +1798,10 @@ namespace bicameral::sim {
 
         if (m_liquid)
             hash += m_liquid->HashTerm();
+
+        // 放射の持ち越し(D-619)。持ち越しが無い世界(放射の段の無い世界・GPU と比べる試験)は今までと同じ値
+        if (!m_cascadeCarry.entries.empty())
+            hash += HashCascadeCarry(m_cascadeCarry);
 
         return hash;
     }

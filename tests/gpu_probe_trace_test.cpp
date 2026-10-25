@@ -132,6 +132,7 @@ namespace {
     CpuRun RunReference(const BakedReactionTable& table, std::span<const ProbeCommand> commands,
                         const GraphTraceFilter& filter, uint64_t ticks) {
         ProbeReference reference(table);
+        reference.SetCascadeRadiation({.enabled = false});  // GPU の仮の世界に放射の段が入るまで(T-1154)
         CpuRun result;
         for (uint64_t tick = 0; tick < ticks; ++tick) {
             const std::vector<uint8_t> flagsBefore(reference.BlockFlags().begin(), reference.BlockFlags().end());

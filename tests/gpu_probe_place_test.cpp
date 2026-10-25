@@ -340,6 +340,7 @@ namespace {
 
     Reference RunReference(const BakedReactionTable& table, std::span<const ProbeCommand> commands) {
         ProbeReference reference(table);
+        reference.SetCascadeRadiation({.enabled = false});  // GPU の仮の世界に放射の段が入るまで(T-1154)
         Reference result;
         result.ticks.push_back(
             {.tick = 0, .hash = ProbeStateHash(reference.State(0)), .energy = ProbeEnergySum(reference.State(0))});
