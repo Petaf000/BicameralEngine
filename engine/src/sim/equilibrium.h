@@ -126,6 +126,11 @@ namespace bicameral::sim {
 
     using EquilibriumObserver = std::function<void(const EquilibriumSolveView&)>;
 
+    // 閉じた領域(§9.3): 種の節(seeds が 0 でない)と、どれかの種から物理の長さ closeLengthMm(mm)の内の節に 1。
+    // SolveEquilibrium の未知数の選び方そのもの。成分を持つ節(equilibrium_block。T-1087)も同じ長さの約束で使う
+    std::vector<uint8_t> EquilibriumCloseRegion(std::span<const EquilibriumNode> nodes,
+                                                const std::vector<uint8_t>& seeds, uint64_t closeLengthMm);
+
     // 解く。state.values は全部の節の答えになる(外の節は前の値のまま)
     EquilibriumResult SolveEquilibrium(const EquilibriumSystem& system, const EquilibriumOptions& options,
                                        EquilibriumState& state, const EquilibriumObserver* observer = nullptr);

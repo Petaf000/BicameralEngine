@@ -506,6 +506,215 @@ namespace bicameral::sim {
             (void)StoreWarmStart(options.conjugateResidual, system.nodes, state.conjugateResidual, system.components);
         }
 
+        // --- 解きの芯(閉じた領域でも同じ)---
+
+        // 右辺 = 右辺の項 + 固定した面の block × value ÷ 2^shift
+        std::vector<int64_t> BlockRhs(const EquilibriumBlockSystem& system) {
+            const uint32_t k = system.components;
+            std::vector<int64_t> rhs(system.nodes.size() * k, 0);
+            for (const EquilibriumBlockSource& source : system.sources)
+                rhs[source.node * k + source.component] += source.value;
+
+            for (const EquilibriumBlockFixed& fixed : system.fixedFaces) {
+                const EquilibriumVector added = EqbNarrow(
+                    EqbAddProduct(EqbZeroWideVector(), fixed.block, fixed.value, k), k, system.coefficientShift);
+                for (uint32_t row = 0; row < k; ++row)
+                    rhs[fixed.node * k + row] += added[row];
+            }
+
+            return rhs;
+        }
+
+        // V サイクルをちょうど cycles 回(lineSearch なら V の直しを前処理とする共役勾配の歩。T-1068)
+        void RunCycles(const EquilibriumBlockGrid& grid, const EquilibriumBlockOptions& options,
+                       const std::vector<int64_t>& rhs, std::vector<int64_t>& values, ConjugateMemory& memory,
+                       uint64_t& updates) {
+            const bool across = options.lineSearch && options.conjugateAcrossTicks;
+            for (uint32_t cycle = 0; cycle < options.cycles; ++cycle) {
+                if (!options.lineSearch) {
+                    VCycle(grid, 0, rhs, values, options, updates);
+                    continue;
+                }
+
+                const std::vector<int64_t> before = values;
+                VCycle(grid, 0, rhs, values, options, updates);
+                ConjugateStep(grid.levels[0], rhs, before, values, grid.components, grid.coefficientShift, across,
+                              memory);
+            }
+        }
+
+        // 節ごとの残差の成分の最大(右辺の単位)
+        std::vector<uint64_t> NodeResidualMaxima(const EquilibriumBlockLevel& cells, const std::vector<int64_t>& rhs,
+                                                 const std::vector<int64_t>& values, uint32_t k, uint32_t shift) {
+            std::vector<uint64_t> result(cells.x.size(), 0);
+            for (size_t i = 0; i < cells.x.size(); ++i) {
+                const EquilibriumVector residual = NodeResidual(cells, rhs, values, i, k, shift);
+                for (uint32_t c = 0; c < k; ++c)
+                    result[i] = std::max(result[i], FxAbsU64(residual[c]));
+            }
+
+            return result;
+        }
+
+        // --- 閉じた領域(T-1087)---
+
+        // 種: 前の刻みが無い・数が違う時は全部。右辺の成分が seedTolerance より大きく変わった・対角のブロックが変わった節。
+        // 法則が足す種。前の解きの残差の成分が residualSeed を超えた節(スカラーの Seeds と同じ約束)
+        std::vector<uint8_t> BlockSeeds(const EquilibriumBlockState& state, const std::vector<int64_t>& rhs,
+                                        const EquilibriumBlockLevel& cells, const EquilibriumBlockOptions& options,
+                                        uint32_t k, bool fresh) {
+            const size_t count = cells.x.size();
+            if (fresh || state.rhs.size() != count * k || state.diagonals.size() != count)
+                return std::vector<uint8_t>(count, 1);
+
+            std::vector<uint8_t> seeds(count, 0);
+            for (size_t i = 0; i < count; ++i) {
+                bool changed = state.diagonals[i] != cells.diagonals[i];
+                for (uint32_t c = 0; c < k; ++c)
+                    changed = changed || FxAbsU64(rhs[i * k + c] - state.rhs[i * k + c]) > options.seedTolerance;
+
+                seeds[i] = changed ? 1 : 0;
+            }
+
+            for (const uint32_t seed : options.extraSeeds)
+                seeds[seed] = 1;
+
+            if (options.residualSeed != 0 && state.residuals.size() == count) {
+                for (size_t i = 0; i < count; ++i) {
+                    if (state.residuals[i] > options.residualSeed)
+                        seeds[i] = 1;
+                }
+            }
+
+            return seeds;
+        }
+
+        // 未知数の節だけの系(番号は unknowns の順)。外への面 = 外の値を固定した k × k の面: 自分の側のブロックを値 0 の固定した面
+        // (対角へ)に、相手の側の項 −B × 外の値 ÷ 2^shift を右辺の項に(外の値は前の答え。B は自分の行・外の列)
+        EquilibriumBlockSystem LocalBlockSystem(const EquilibriumBlockSystem& system,
+                                                const std::vector<uint32_t>& unknowns,
+                                                const std::vector<int64_t>& values) {
+            const uint32_t k = system.components;
+            std::vector<uint32_t> local(system.nodes.size(), UINT32_MAX);
+            for (uint32_t i = 0; i < unknowns.size(); ++i)
+                local[unknowns[i]] = i;
+
+            EquilibriumBlockSystem result;
+            result.components = k;
+            result.coefficientShift = system.coefficientShift;
+            result.prolongation = system.prolongation;
+            for (const uint32_t node : unknowns)
+                result.nodes.push_back(system.nodes[node]);
+
+            for (const EquilibriumBlockFace& face : system.faces) {
+                const uint32_t low = local[face.low];
+                const uint32_t high = local[face.high];
+                if (low != UINT32_MAX && high != UINT32_MAX) {
+                    EquilibriumBlockFace inside = face;
+                    inside.low = low;
+                    inside.high = high;
+                    result.faces.push_back(inside);
+                    continue;
+                }
+
+                if (low == UINT32_MAX && high == UINT32_MAX)
+                    continue;
+
+                const bool lowInside = low != UINT32_MAX;
+                const uint32_t node = lowInside ? low : high;
+                const uint32_t outside = lowInside ? face.high : face.low;
+                const EquilibriumBlock coupling = lowInside ? face.lowHigh : Transposed(face.lowHigh, k);
+                result.fixedFaces.push_back({.node = node, .block = lowInside ? face.lowLow : face.highHigh});
+                const EquilibriumVector pushed = EqbNarrow(
+                    EqbAddProduct(EqbZeroWideVector(), coupling, NodeValues(values, outside, k), k), k,
+                    system.coefficientShift);
+                for (uint32_t c = 0; c < k; ++c)
+                    result.sources.push_back({.node = node, .component = c, .value = -pushed[c]});
+            }
+
+            for (const EquilibriumBlockFixed& fixed : system.fixedFaces) {
+                if (local[fixed.node] == UINT32_MAX)
+                    continue;
+
+                EquilibriumBlockFixed inside = fixed;
+                inside.node = local[fixed.node];
+                result.fixedFaces.push_back(inside);
+            }
+
+            for (const EquilibriumBlockSource& source : system.sources) {
+                if (local[source.node] == UINT32_MAX)
+                    continue;
+
+                EquilibriumBlockSource inside = source;
+                inside.node = local[source.node];
+                result.sources.push_back(inside);
+            }
+
+            return result;
+        }
+
+        // 節 × k の並びから未知数の所だけ / 未知数の所だけを全部の並びへ(外は fill)
+        std::vector<int64_t> Gather(const std::vector<int64_t>& values, const std::vector<uint32_t>& unknowns,
+                                    uint32_t k) {
+            std::vector<int64_t> result(unknowns.size() * k);
+            for (size_t i = 0; i < unknowns.size(); ++i) {
+                for (uint32_t c = 0; c < k; ++c)
+                    result[i * k + c] = values[unknowns[i] * k + c];
+            }
+
+            return result;
+        }
+
+        void Scatter(const std::vector<int64_t>& local, const std::vector<uint32_t>& unknowns, uint32_t k,
+                     std::vector<int64_t>& values) {
+            for (size_t i = 0; i < unknowns.size(); ++i) {
+                for (uint32_t c = 0; c < k; ++c)
+                    values[unknowns[i] * k + c] = local[i * k + c];
+            }
+        }
+
+        // 閉じた領域で解く(未知数が全部でない時)。向きと残差は未知数の所だけ読み、外は 0 で持つ(捨てる)
+        void SolveClosed(const EquilibriumBlockSystem& system, const EquilibriumBlockOptions& options,
+                         const std::vector<uint32_t>& unknowns, ConjugateMemory& memory, EquilibriumBlockState& state,
+                         EquilibriumBlockResult& result) {
+            const uint32_t k = system.components;
+            const EquilibriumBlockSystem local = LocalBlockSystem(system, unknowns, state.values);
+            const EquilibriumBlockGrid grid = BuildEquilibriumBlockGrid(local);
+            const std::vector<int64_t> rhs = BlockRhs(local);
+            std::vector<int64_t> values = Gather(state.values, unknowns, k);
+
+            ConjugateMemory localMemory;
+            if (memory.valid) {
+                localMemory.direction = Gather(memory.direction, unknowns, k);
+                localMemory.residual = Gather(memory.residual, unknowns, k);
+                localMemory.zr = Dot(localMemory.direction, localMemory.residual);
+                localMemory.valid = !SignedNegative(localMemory.zr) && EqbWideBitLength(localMemory.zr) != 0;
+            }
+
+            RunCycles(grid, options, rhs, values, localMemory, result.nodeUpdates);
+            Scatter(values, unknowns, k, state.values);
+
+            memory = ConjugateMemory{};
+            if (localMemory.valid) {
+                memory.direction.assign(system.nodes.size() * k, 0);
+                memory.residual.assign(system.nodes.size() * k, 0);
+                Scatter(localMemory.direction, unknowns, k, memory.direction);
+                Scatter(localMemory.residual, unknowns, k, memory.residual);
+                memory.zr = localMemory.zr;
+                memory.valid = true;
+            }
+
+            const std::vector<uint64_t> maxima = NodeResidualMaxima(grid.levels[0], rhs, values, k,
+                                                                    system.coefficientShift);
+            state.residuals.resize(system.nodes.size(), 0);
+            for (size_t i = 0; i < unknowns.size(); ++i) {
+                state.residuals[unknowns[i]] = maxima[i];
+                result.worstResidual = std::max(result.worstResidual, maxima[i]);
+            }
+
+            result.gridLevels = (uint32_t)grid.levels.size();
+        }
+
     }  // namespace
 
     EquilibriumBlockGrid BuildEquilibriumBlockGrid(const EquilibriumBlockSystem& system) {
@@ -539,39 +748,52 @@ namespace bicameral::sim {
         const uint32_t k = system.components;
         const size_t count = system.nodes.size();
         EquilibriumBlockResult result;
+        const bool fresh = options.warmStart.nest == nullptr && state.values.size() != count * k;
         if (options.warmStart.nest != nullptr)
             state.values = LoadWarmStart(options.warmStart, system.nodes, k);  // 前の答えは欄から(T-0922)
-        else if (state.values.size() != count * k)
+        else if (fresh)
             state.values.assign(count * k, 0);
 
-        // --- 右辺 = 右辺の項 + 固定した面の block × value ---
-        std::vector<int64_t> rhs(count * k, 0);
-        for (const EquilibriumBlockSource& source : system.sources)
-            rhs[source.node * k + source.component] += source.value;
-
-        for (const EquilibriumBlockFixed& fixed : system.fixedFaces) {
-            const EquilibriumVector added = EqbNarrow(EqbAddProduct(EqbZeroWideVector(), fixed.block, fixed.value, k),
-                                                      k, system.coefficientShift);
-            for (uint32_t row = 0; row < k; ++row)
-                rhs[fixed.node * k + row] += added[row];
-        }
-
+        const std::vector<int64_t> rhs = BlockRhs(system);
         if (count == 0)
             return result;
 
         const bool across = options.lineSearch && options.conjugateAcrossTicks;
         ConjugateMemory memory = across ? LoadConjugate(system, options, state) : ConjugateMemory{};
+        const EquilibriumBlockLevel& cells = grid.levels[0];
 
-        for (uint32_t cycle = 0; cycle < options.cycles; ++cycle) {
-            if (!options.lineSearch) {
-                VCycle(grid, 0, rhs, state.values, options, result.nodeUpdates);
-                continue;
+        // --- 閉じた領域(T-1087): 未知数が全部でなければ未知数だけの系で ---
+        std::vector<uint32_t> unknowns;
+        if (options.closeLengthMm != 0) {
+            const std::vector<uint8_t> seeds = BlockSeeds(state, rhs, cells, options, k, fresh);
+            const std::vector<uint8_t> inside = EquilibriumCloseRegion(system.nodes, seeds, options.closeLengthMm);
+            for (uint32_t i = 0; i < count; ++i) {
+                if (inside[i] != 0)
+                    unknowns.push_back(i);
             }
 
-            // V の直しを前処理とする共役勾配の 1 歩(T-1068)
-            const std::vector<int64_t> before = state.values;
-            VCycle(grid, 0, rhs, state.values, options, result.nodeUpdates);
-            ConjugateStep(grid.levels[0], rhs, before, state.values, k, system.coefficientShift, across, memory);
+            result.seeds = (uint32_t)rng::count(seeds, (uint8_t)1);
+            state.rhs = rhs;
+            state.diagonals = cells.diagonals;
+        }
+
+        const bool closed = options.closeLengthMm != 0 && unknowns.size() != count;
+        result.unknowns = closed ? (uint32_t)unknowns.size() : (uint32_t)count;
+        if (closed && !unknowns.empty()) {
+            SolveClosed(system, options, unknowns, memory, state, result);
+        } else if (closed) {
+            memory = ConjugateMemory{};  // 何も解かない刻み: 向きは全部捨てる
+        } else {
+            RunCycles(grid, options, rhs, state.values, memory, result.nodeUpdates);
+            const std::vector<uint64_t> maxima = NodeResidualMaxima(cells, rhs, state.values, k,
+                                                                    system.coefficientShift);
+            for (const uint64_t maximum : maxima)
+                result.worstResidual = std::max(result.worstResidual, maximum);
+
+            if (options.closeLengthMm != 0)
+                state.residuals = maxima;
+
+            result.gridLevels = (uint32_t)grid.levels.size();
         }
 
         if (across)
@@ -579,16 +801,6 @@ namespace bicameral::sim {
 
         if (options.warmStart.nest != nullptr)
             (void)StoreWarmStart(options.warmStart, system.nodes, state.values, k);
-
-        // --- 残差の計器 ---
-        const EquilibriumBlockLevel& cells = grid.levels[0];
-        for (size_t i = 0; i < count; ++i) {
-            const EquilibriumVector residual = NodeResidual(cells, rhs, state.values, i, k, system.coefficientShift);
-            for (uint32_t c = 0; c < k; ++c)
-                result.worstResidual = std::max(result.worstResidual, FxAbsU64(residual[c]));
-        }
-
-        result.gridLevels = (uint32_t)grid.levels.size();
 
         return result;
     }
