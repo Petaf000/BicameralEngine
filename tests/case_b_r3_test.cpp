@@ -451,6 +451,7 @@ namespace {
     bool restsOnLayerOverride = false;  // 2 本目の見直し 1(T-1137)。引数 keeplayer2
     bool keepLayerOverride = false;     // 層は落ちても層のまま(T-1137 の 2 本目)。引数 keeplayer(twostate も入る)
     bool twoStatesOverride = false;     // 粒を層と舞う粒の 2 つの状態で持つ(T-1136・D-659 の研究)。引数 twostate
+    bool spillOverride = false;         // 横へ動く層は下に層があれば層のまま(T-1138 の見直し)。引数 spill
     bool splitOverride =
         false;  // 層と舞う粒に別々の運動量の置き場(T-1138・D-668。④ の場面を GrainTwoState に)。引数 split(twostate も入る)
     bool restLayerOverride = false;        // 積もった層を解く間は障害物に(T-1043 の 2 回目。打ち切り)。引数 layer
@@ -533,6 +534,7 @@ namespace {
         flowOptions.grainLayerSideDrag = sideDragOverride;
         flowOptions.grainLayerKeepsFalling = keepLayerOverride;
         flowOptions.grainLayerRestsOnLayer = restsOnLayerOverride;
+        flowOptions.grainLayerSpillsOnLayer = spillOverride;
 
         const FlowStages flow = MakeFlowStages(flowOptions);
         currentStats = flow.stats;
@@ -572,8 +574,11 @@ namespace {
             (unsigned long long)run.stats.restLockedGrainFaces, (unsigned long long)run.stats.heldGrainFaces,
             (unsigned long long)run.stats.releasedGrainFaces, (unsigned long long)run.stats.surfaceLayerGrainFaces);
         if (twoStatesOverride)
-            std::printf("    2 つの状態(T-1136): 舞う粒 → 層 %llu mg・層 → 舞う粒 %llu mg(累計)\n",
-                        (unsigned long long)run.stats.settledGrainMg, (unsigned long long)run.stats.liftedGrainMg);
+            std::printf(
+                "    2 つの状態(T-1136): 舞う粒 → 層 %llu mg・層 → 舞う粒 %llu mg・運ぶ段で層 → 舞う粒 %llu mg・"
+                "舞う粒の面 %llu(累計)\n",
+                (unsigned long long)run.stats.settledGrainMg, (unsigned long long)run.stats.liftedGrainMg,
+                (unsigned long long)run.stats.convertedGrainMg, (unsigned long long)run.stats.suspendedFaces);
     }
 
     // 1 mm/s 以上で動く粒の質量の割合(‰。面の粒の質量で重み)
@@ -1469,6 +1474,8 @@ int main(int argc, char** argv) {
             twoStatesOverride = keepLayerOverride = true;
         else if (word == "split")
             twoStatesOverride = splitOverride = true;
+        else if (word == "spill")
+            spillOverride = true;
         else if (word == "probe")
             probeOverride = true;
         else if (word == "sidedrag")

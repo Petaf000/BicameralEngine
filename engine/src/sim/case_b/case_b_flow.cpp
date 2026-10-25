@@ -137,6 +137,8 @@ namespace bicameral::sim::case_b {
             bool splitGrain = false;         // 層と舞う粒が別の運動量の置き場(箱が GrainTwoState で 2 つの状態。T-1138)
             std::vector<uint8_t>
                 grainFloorSupported;  // セルの床が支えられている(層が積もれる。刻みの初めの受け渡しで数える)
+            std::vector<uint8_t> grainFloorOnLayer;  // 下のセルに層がある(床・据わる物を含む。T-1138 の見直し)
+            bool layerSpillsOnLayer = false;         // grainLayerSpillsOnLayer(MeasureGrains が写す。T-1138)
 
             // --- 置き場 ①(T-0963)---
             std::vector<uint8_t> surfaceCells;  // 層に分かれたセル(気体と液体があり、下が液体か閉じている = 水面)
@@ -154,6 +156,14 @@ namespace bicameral::sim::case_b {
             std::vector<int64_t>
                 grainImpact;  // 詰まった粒が受け止めた縦の運動量(面ごと。T-1046。陰の圧力の段で書き、降伏の段で向け直す)
         };
+
+        // 横へ動いた層が、向かうセルで層のままか(床が支えられている。見直しの時は下のセルに層があれば。T-1138)
+        bool FloorTakesLayer(const FlowScratch& scratch, uint32_t cell) {
+            if (scratch.grainFloorSupported[cell] != 0)
+                return true;
+
+            return scratch.layerSpillsOnLayer && scratch.grainFloorOnLayer[cell] != 0;
+        }
 
         // 粒の置き場(分けた時は層)が運ぶ粒の質量: 分けた時は層だけ・分けない時はセルの粒の全部(T-1138)
         int64_t LayerArmMassMg(const FlowScratch& scratch, uint32_t cell) {
@@ -688,6 +698,7 @@ namespace bicameral::sim::case_b {
             scratch.layerRestsOnLayer = runtime.options.grainLayerKeepsFalling &&
                                         runtime.options.grainLayerRestsOnLayer;
             scratch.splitGrain = runtime.options.grainTwoStates && box.config.layout == MomentumLayout::GrainTwoState;
+            scratch.layerSpillsOnLayer = runtime.options.grainLayerSpillsOnLayer;
             for (uint32_t cell = 0; cell < count; ++cell) {
                 GrainCell& grain = scratch.grains[cell];
                 uint64_t grainSum = 0;
@@ -1877,6 +1888,7 @@ namespace bicameral::sim::case_b {
             const std::array<uint32_t, 3> size = {box.config.sizeX, box.config.sizeY, box.config.sizeZ};
             const uint32_t axis = view.gravityAxis;
             scratch.grainFloorSupported.assign(CellCount(box), 0);
+            scratch.grainFloorOnLayer.assign(CellCount(box), 0);
             for (uint32_t cell = 0; cell < CellCount(box); ++cell) {
                 std::array<uint32_t, 3> at = CellCoordinates(box, cell);
                 if (at[axis] != 0)
@@ -1884,10 +1896,12 @@ namespace bicameral::sim::case_b {
 
                 bool supported = true;  // 床(箱の端)
                 bool landing = true;    // 舞う粒が沈める床(見直し 1 の時だけ支えと違う)
+                bool onLayer = true;    // 下のセルに層がある(T-1138 の見直し。横へ動く層の行き先だけ)
                 for (uint32_t step = 0; step < size[axis]; ++step) {
                     at[axis] = view.gravityDown ? step : size[axis] - 1 - step;
                     const uint32_t index = CellIndex(box, at[0], at[1], at[2]);
                     scratch.grainFloorSupported[index] = supported ? 1 : 0;
+                    scratch.grainFloorOnLayer[index] = onLayer ? 1 : 0;
                     const int64_t layerPacked = SettleGrainCell(runtime, box, view, index, supported, lift,
                                                                 restsOnLayer ? landing : supported);
                     const CellView& cellView = view.cells[index];
@@ -1895,6 +1909,7 @@ namespace bicameral::sim::case_b {
                     const bool layerFull = layerPacked + marginNl >= cellNl;
                     const bool carries = keepsFalling && !restsOnLayer ? layerFull : layerPacked > 0;
                     landing = solid || (landing && layerFull);
+                    onLayer = solid || layerPacked > 0;
                     supported = solid || (supported && carries);
                 }
             }
@@ -2126,7 +2141,7 @@ namespace bicameral::sim::case_b {
             // 割合の丸めで、出した後の層がセルに残る質量を超えないように(層は質量の内訳)
             box.grainLayerMg[source] = std::min(box.grainLayerMg[source] - moved, CellMass(box, from, material));
             const bool staysLayer = scratch.layerKeepsFalling && vertical != 0 ? vertical < 0
-                                                                               : scratch.grainFloorSupported[to] != 0;
+                                                                               : FloorTakesLayer(scratch, to);
             if (staysLayer)
                 box.grainLayerMg[target] += moved;
         }
@@ -2249,7 +2264,7 @@ namespace bicameral::sim::case_b {
                 return 0;
 
             const bool staysLayer = scratch.layerKeepsFalling && vertical != 0 ? vertical < 0
-                                                                               : scratch.grainFloorSupported[to] != 0;
+                                                                               : FloorTakesLayer(scratch, to);
             int64_t left = massMg;
             uint64_t heatCapacity = 0;
             for (uint32_t material = 0; material < materials && left > 0; ++material) {
