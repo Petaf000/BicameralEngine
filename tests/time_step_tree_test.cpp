@@ -51,6 +51,7 @@
 #include "sim/multires_nest.h"
 #include "sim/multires_state.h"
 #include "sim/time_step_tree.h"
+#include "time_step_choose_file.h"
 #include "time_step_span_file.h"
 
 using namespace bicameral;
@@ -1475,19 +1476,102 @@ namespace {
         const MultiresSaveState save = SaveNestState(world.nest);
         const TimeTreeSteps savedSteps = world.steps;
         const TimeTreeRecordBytes bytes = MeasureTimeTreeRecords(world);
+        const std::vector<uint16_t> packed = PackTimeTreeUnits(world);  // 単位の見出しは詰めた 2 B から戻す(T-1112)
         StepTimeTree(setup, world, ticks - saveTick);
 
         TimeTreeWorld loaded = start;
         const bool restored = RestoreNestState(loaded.nest, save);
         loaded.steps = savedSteps;
+        for (const uint32_t unit : loaded.layout.units) {
+            loaded.steps.exponent[unit] = -1;
+            loaded.steps.desired[unit] = -1;
+            loaded.steps.open[unit] = 7;
+            loaded.steps.touched[unit] = 7;
+            loaded.steps.start[unit] = ~0ull;
+            loaded.steps.end[unit] = ~0ull;
+        }
+
+        const bool unpacked = !packed.empty() && UnpackTimeTreeUnits(loaded, packed);
         StepTimeTree(setup, loaded, ticks - saveTick);
         Expect(restored && midStep > 0, "セーブ: 歩の途中の枠がある刻みで写せる");
+        Expect(unpacked, "セーブ: 単位の見出しを 2 B に詰めた記録から戻せる");
         Expect(HashTimeTree(world) == HashTimeTree(loaded), "セーブ: 歩の記録ごと戻すと続けたのとビット一致");
         Log(Channel::Sim, Level::Info,
-            "セーブ(刻み {}・歩の途中の枠 {}): 歩の記録 最小 {} B({:.2f} B/セル)・歩の変化も持つと {} B({:.2f} "
-            "B/セル)・{} セル",
-            saveTick, midStep, bytes.minimal, static_cast<double>(bytes.minimal) / bytes.cells, bytes.held,
-            static_cast<double>(bytes.held) / bytes.cells, bytes.cells);
+            "セーブ(刻み {}・歩の途中の枠 {}): 歩の記録 最小 {} B({:.2f} B/セル)・見出しを詰めると {} B({:.2f} "
+            "B/セル)・歩の変化も持つと {} B({:.2f} B/セル)・{} セル・{} 単位",
+            saveTick, midStep, bytes.minimal, static_cast<double>(bytes.minimal) / bytes.cells, bytes.packed,
+            static_cast<double>(bytes.packed) / bytes.cells, bytes.held, static_cast<double>(bytes.held) / bytes.cells,
+            bytes.cells, bytes.units);
+    }
+
+    // --- T-1112: 刻みを選ぶ段(窓・隣の差 1 段)の入力と CPU の答えを書く(gpu_time_step_choose_test が GPU で選び直す)・
+    //     詰めた歩の記録が 1 刻みずつと一気にでビット一致 ---
+    struct ChooseTrace {
+        test::TimeStepChooseFile file;
+        uint64_t events = 0;
+        uint64_t packFailures = 0;
+        uint64_t truncated = 0;  // 選ぶ段で打ち切った単位(歩の途中で次の e が決まった)
+        uint64_t hash = 0;       // 出来事ごとの (刻み・後の詰めた記録) の要約
+    };
+
+    ChooseTrace TraceChoose(TimeTreeSetup setup, const Material& material, const TimeTreeWorld& world, uint64_t ticks,
+                            uint64_t chunk, const Ignition& ignition, uint32_t every) {
+        ChooseTrace trace;
+        const TimeTreeChooseObserver observer = [&](const TimeTreeChooseView& view) {
+            const bool packed = !view.before.empty() && !view.after.empty();
+            trace.packFailures += packed ? 0 : 1;
+            trace.hash = fx::FxHash64(trace.hash, view.tick, view.after.size(), 0);
+            for (const uint16_t record : view.after)
+                trace.hash = fx::FxHashCombine(trace.hash, record);
+
+            for (size_t u = 0; u < view.next.size() && packed; ++u)
+                trace.truncated += view.next[u] >= 0 && (view.before[u] & TIME_TREE_RECORD_OPEN) != 0 ? 1 : 0;
+
+            if (every != 0 && trace.events % every == 0 && packed) {
+                test::TimeStepChooseEvent event{.tick = view.tick,
+                                                .cap = view.cap,
+                                                .before = {view.before.begin(), view.before.end()},
+                                                .windowCaps = {view.windowCaps.begin(), view.windowCaps.end()},
+                                                .after = {view.after.begin(), view.after.end()}};
+                for (const int32_t next : view.next)
+                    event.next.push_back(static_cast<int8_t>(next));
+
+                trace.file.events.push_back(std::move(event));
+            }
+
+            ++trace.events;
+        };
+
+        setup.chooseObserver = &observer;
+        (void)Run(setup, material, world, ticks, chunk, ignition);
+
+        return trace;
+    }
+
+    void CheckChooseDump(const Material& material, const Ignition& ignition) {
+        TimeTreeSetup setup = MakeSetup(material, TimeStepRule::Change);
+        setup.groupShift = groupShift;
+        const TimeTreeWorld world = MakeWorld(setup, material, sceneShape, Ambient(material.groundKelvin));
+        const uint64_t ticks = sceneTicks != 0 ? sceneTicks : ignition.tick + 4096;
+        const uint32_t every = mergeDumpEvery != 0 ? mergeDumpEvery : 16;
+        ChooseTrace bulk = TraceChoose(setup, material, world, ticks, ticks, ignition, every);
+        bulk.file.tables = MakeTimeTreeChooseTables(setup, world.layout);
+        Expect(bulk.file.tables.supported, "刻みを選ぶ段: GPU 版の範囲の設定(窓・隣の差 1 段)");
+        Expect(bulk.packFailures == 0, "刻みを選ぶ段: どの出来事も歩の記録を 2 B に詰められる");
+        if (mergeCheck) {
+            const ChooseTrace single = TraceChoose(setup, material, world, ticks, 1, ignition, 0);
+            Expect(single.events == bulk.events && single.hash == bulk.hash,
+                   "刻みを選ぶ段: 詰めた歩の記録が 1 刻みずつと一気にでビット一致(出来事ごと)");
+        }
+
+        Log(Channel::Sim, Level::Info,
+            "刻みを選ぶ段({}・{}): 刻み {}・出来事 {}・書いた出来事 {}・単位 {}・窓の格子 {}×{}×{}・半径 {}・隣 {}・"
+            "打ち切り {}・要約 {:016x}",
+            shapeName, TrialName(), ticks, bulk.events, bulk.file.events.size(), bulk.file.tables.units,
+            bulk.file.tables.gridSize[0], bulk.file.tables.gridSize[1], bulk.file.tables.gridSize[2],
+            bulk.file.tables.radius, bulk.file.tables.neighbors.size(), bulk.truncated, bulk.hash);
+        if (!dumpPath.empty())
+            Expect(test::WriteTimeStepChoose(dumpPath, bulk.file), "刻みを選ぶ段: ファイルに書けた");
     }
 
     int Run(int argc, char** argv) {
@@ -1600,6 +1684,9 @@ namespace {
 
         if (part == "span-dump")
             CheckSpanDump(fire, fireIgnition);
+
+        if (part == "choose-dump")
+            CheckChooseDump(fire, fireIgnition);
 
         if (part == "forward-estimate")
             CheckForwardEstimate(fire, fireIgnition);
