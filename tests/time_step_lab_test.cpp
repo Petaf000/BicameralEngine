@@ -15,6 +15,7 @@
 //         引数なしは今までの全部)
 // T-1170: flow [flowarrival=印](これから来る変化の形を比べる。既定 4 = 境のセルに積もる分を見る)・[flowtrace=刻み](枠ごとの差)
 // T-1173: place / placetime(しきい値の場面を置く場所・始める刻みでずらす。placeblock= で単位のセルの数)
+// T-1174: grain(単位の形を 0.5 m・1 m・2 m のセルで比べる。D-640)・window= / slope=(滑る窓の半径・窓の外の坂。m)
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -75,6 +76,19 @@ namespace {
         setup.fixedExponent = 0;
         setup.maxExponent = MAX_EXPONENT;
         setup.budget = BUDGET;
+
+        return setup;
+    }
+
+    double windowMeters = 0.0;  // window=: 滑る窓の半径(m。T-1174。0 = 外す)
+    double slopeMeters = 0.0;   // slope=: 窓の外の坂(1 段あたりの長さ m。0 = 枠ごとに 1 段 = 今)
+    double pileMeters = 0.0;    // pilemeters=: 面で積もる分を広げて見る長さ(m。0 = 境のセル 1 つ = 今)
+
+    TimeStepLabSetup WithWindow(TimeStepLabSetup setup, double cellMeters) {
+        const double blockMeters = cellMeters * setup.blockCells;
+        setup.windowBlocks = static_cast<uint32_t>(std::llround(windowMeters / blockMeters));
+        setup.slopeBlocks = std::max<uint32_t>(1, static_cast<uint32_t>(std::llround(slopeMeters / blockMeters)));
+        setup.pileCells = std::max<uint32_t>(1, static_cast<uint32_t>(std::llround(pileMeters / cellMeters)));
 
         return setup;
     }
@@ -589,6 +603,7 @@ namespace {
         trial.budget = flowBudget;
         trial.rateLook = flowLook;
         trial.arrivalLook = flowArrival;
+        trial = WithWindow(trial, FLOW_CELL_METERS);
         const FlowRun fixed = RunFlow(reference, FilledFlow(scene, reference));
         const FlowRun chosen = RunFlow(trial, FilledFlow(scene, trial));
         Difference worst;
@@ -627,11 +642,12 @@ namespace {
             "{} 予算 {}: 一晩の早送りの GPU の待ち(見積もり・4 m × 4 m の流れ){:.3f} 秒・毎刻みなら {:.3f} 秒",
             scene.name, flowBudget, FlowGpuSeconds(chosen.run.state), FlowGpuSeconds(fixed.run.state));
         Log(Channel::Sim, Level::Info,
-            "FLOW scene=\"{}\" block={} look={} arrival={} budget={} solves={:.6f} events={} fixedEvents={} gpu={:.4f} "
+            "FLOW scene=\"{}\" block={} window={} slope={} look={} arrival={} budget={} solves={:.6f} events={} "
+            "fixedEvents={} gpu={:.4f} "
             "fixedGpu={:.4f} "
             "tempMk={:.3f} "
             "ppm={:.3f} carriedMk={:.3f} meanE={}",
-            scene.name, flowBlockMeters, flowLook ? 1 : 0, flowArrival, flowBudget,
+            scene.name, flowBlockMeters, windowMeters, slopeMeters, flowLook ? 1 : 0, flowArrival, flowBudget,
             static_cast<double>(chosen.run.state.cellSteps) / (static_cast<double>(trial.cellCount) * NIGHT_TICKS),
             chosen.run.state.events, fixed.run.state.events, FlowGpuSeconds(chosen.run.state),
             FlowGpuSeconds(fixed.run.state), worst.temperatureMk, worst.dissolvedPpm, worst.carriedMk, exponents);
@@ -720,6 +736,8 @@ namespace {
         setup = WithTrial(setup, fixed ? REFERENCE : TRIALS[0]);
         setup.budget = 100;
         setup.arrivalLook = fixed ? 0 : placeArrival;
+        if (!fixed)
+            setup = WithWindow(setup, fire.cellMeters);
 
         return setup;
     }
@@ -759,11 +777,12 @@ namespace {
 
     void LogPlace(std::string_view label, const PlaceResult& fixed, const PlaceResult& chosen) {
         Log(Channel::Sim, Level::Info,
-            "PLACE {} block={} arrival={} heaterK={:.3f} fixedPeakMk={:.4f} diffMk={:.4f} fixedReach={} reach={} "
+            "PLACE {} block={} window={} slope={} arrival={} heaterK={:.3f} fixedPeakMk={:.4f} diffMk={:.4f} "
+            "fixedReach={} reach={} "
             "events={} fixedEvents={} solves={:.4f} fixedPeakValue={} peakValue={}",
-            label, placeBlockCells, placeArrival, placeHeaterKelvin, fixed.peakMk, chosen.peakMk - fixed.peakMk,
-            fixed.reachTick, chosen.reachTick, chosen.events, fixed.events, chosen.solves, fixed.peakValue,
-            chosen.peakValue);
+            label, placeBlockCells, windowMeters, slopeMeters, placeArrival, placeHeaterKelvin, fixed.peakMk,
+            chosen.peakMk - fixed.peakMk, fixed.reachTick, chosen.reachTick, chosen.events, fixed.events, chosen.solves,
+            fixed.peakValue, chosen.peakValue);
     }
 
     void CheckPlace(bool shiftTime) {
@@ -789,10 +808,170 @@ namespace {
         }
 
         Log(Channel::Sim, Level::Info,
-            "PLACEBAND {} block={} arrival={} band(長い刻み − 毎刻み の幅)={:.4f} mK({:.4f}〜{:.4f})・毎刻みの山の幅 "
+            "PLACEBAND {} block={} window={} slope={} arrival={} band(長い刻み − 毎刻み の幅)={:.4f} "
+            "mK({:.4f}〜{:.4f})・毎刻みの山の幅 "
             "{:.6f} mK",
-            shiftTime ? "time" : "space", placeBlockCells, placeArrival, highest - lowest, lowest, highest,
-            fixedHighest - fixedLowest);
+            shiftTime ? "time" : "space", placeBlockCells, windowMeters, slopeMeters, placeArrival, highest - lowest,
+            lowest, highest, fixedHighest - fixedLowest);
+    }
+
+    // --- T-1174: 刻みを選ぶ単位の形を 0.5 m・1 m・2 m のセルで比べる(D-640「0.5 m と 1 m の細かさで刻みが揃う」)---
+    // 川(一晩)と火事(18 分)を、同じ単位の形(grainunit= m の格子。0 = 1 セル。window=・slope= で滑る窓)で各細かさで走らせ、
+    // 0.5 m ごとの場所で選ばれた e を 1,024 刻みごとに比べる(0.5 m のセルと、1 m・2 m のセル)。毎刻みとの差(同じ細かさ)も。
+    // 引数: grain [grainunit=m(既定 4)] [grainbudget=n(既定 100 = 0.1 K)] [grainscene=0 川・1 火(既定 両方)] [window=m] [slope=m]
+    double grainUnitMeters = 4.0;
+    uint64_t grainBudget = 100;
+    int grainScene = -1;
+    constexpr double GRAIN_SAMPLE_METERS = 0.5;
+    constexpr uint64_t GRAIN_SAMPLE_EVERY = 1024;
+    constexpr double GRAIN_CELL_METERS[] = {0.5, 1.0, 2.0};
+
+    struct GrainRun {
+        std::vector<std::vector<int32_t>> exponents;  // [標本][0.5 m ごとの場所]
+        Difference worst;                             // 毎刻み(同じ細かさ)との差
+        RunResult run;
+    };
+
+    std::vector<int32_t> SampleExponents(const TimeStepLabSetup& setup, const TimeStepLabState& state,
+                                         double cellMeters) {
+        const uint32_t places = static_cast<uint32_t>(std::llround(setup.cellCount * cellMeters / GRAIN_SAMPLE_METERS));
+        std::vector<int32_t> sampled(places);
+        for (uint32_t p = 0; p < places; ++p) {
+            const uint32_t cell = static_cast<uint32_t>((p + 0.5) * GRAIN_SAMPLE_METERS / cellMeters);
+            sampled[p] = state.exponent[cell / setup.blockCells];
+        }
+
+        return sampled;
+    }
+
+    GrainRun RunGrain(const TimeStepLabSetup& setup, TimeStepLabState state, double cellMeters, uint64_t ticks,
+                      const Ignition& ignition, const RunResult& reference) {
+        GrainRun grain;
+        const TimeStepLabTotals first = ConservedTimeStepLab(setup, state);
+        const auto begin = std::chrono::steady_clock::now();
+        for (uint64_t done = 0; done < ticks;) {
+            uint64_t size = GRAIN_SAMPLE_EVERY - done % GRAIN_SAMPLE_EVERY;
+            if (ignition.tick > done && ignition.tick < done + size)
+                size = ignition.tick - done;
+
+            StepTimeStepLab(setup, state, size);
+            done += size;
+            if (ignition.tick != 0 && done == ignition.tick) {
+                for (uint32_t cell = 0; cell < ignition.cells; ++cell)
+                    InjectTimeStepLabHeat(setup, state, cell, ignition.heat);
+            }
+
+            if (done % GRAIN_SAMPLE_EVERY == 0)
+                grain.exponents.push_back(SampleExponents(setup, state, cellMeters));
+
+            if (done % COMPARE_EVERY == 0) {
+                const Snapshot& expected = reference.snapshots[done / COMPARE_EVERY - 1];
+                grain.worst = Worst(grain.worst, Compare(setup, TakeSnapshot(setup, state), expected, done));
+            }
+
+            grain.run.conserved = grain.run.conserved && SameTotals(first, ConservedTimeStepLab(setup, state));
+        }
+
+        grain.run.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
+        grain.run.state = std::move(state);
+
+        return grain;
+    }
+
+    TimeStepLabSetup GrainTrial(TimeStepLabSetup setup, double cellMeters) {
+        setup.blockCells = grainUnitMeters <= 0.0 ? 1 : CellCount(grainUnitMeters, cellMeters);
+        setup = WithTrial(setup, TRIALS[0]);
+        setup.budget = grainBudget;
+
+        return WithWindow(setup, cellMeters);
+    }
+
+    void CheckGrainScene(bool fire) {
+        const std::string_view name = fire ? "火事" : "川";
+        const uint64_t ticks = fire ? FIRE_TICKS : NIGHT_TICKS;
+        std::vector<GrainRun> runs;
+        for (const double dx : GRAIN_CELL_METERS) {
+            FireParameters fireScene;
+            fireScene.cellMeters = dx;
+            const RiverParameters river = RiverAt(dx);
+            const TimeStepLabSetup base = fire ? MakeFireSetup(fireScene) : MakeRiverSetup(river);
+            const auto filled = [&](const TimeStepLabSetup& setup) {
+                return fire ? FilledFire(fireScene, setup) : FilledRiver(river, setup);
+            };
+            const Ignition ignition = fire ? FireIgnition(fireScene) : Ignition{};
+            const TimeStepLabSetup referenceSetup = WithTrial(base, REFERENCE);
+            const RunResult reference = Run(referenceSetup, filled(referenceSetup), ticks, ticks, ignition, true);
+            const TimeStepLabSetup setup = GrainTrial(base, dx);
+            runs.push_back(RunGrain(setup, filled(setup), dx, ticks, ignition, reference));
+            const GrainRun& grain = runs.back();
+            double meanExponent = 0.0;
+            size_t samples = 0;
+            for (const std::vector<int32_t>& row : grain.exponents) {
+                for (const int32_t e : row) {
+                    meanExponent += e;
+                    ++samples;
+                }
+            }
+
+            const double solves = static_cast<double>(grain.run.state.cellSteps) /
+                                  (static_cast<double>(setup.cellCount) * static_cast<double>(ticks));
+            Log(Channel::Sim, Level::Info,
+                "GRAIN scene={} unit={} window={} slope={} budget={} cell={} tempMk={:.3f} ppm={:.3f} carriedMk={:.3f} "
+                "reacted={:.3f} solves={:.5f} events={} truncations={} gap={} conserved={} meanE={:.3f} seconds={:.2f}",
+                name, grainUnitMeters, windowMeters, slopeMeters, grainBudget, dx, grain.worst.temperatureMk,
+                grain.worst.dissolvedPpm, grain.worst.carriedMk, grain.worst.reactedMillionth, solves,
+                grain.run.state.events, grain.run.state.truncations, grain.run.state.widestNeighborGap,
+                grain.run.conserved ? 1 : 0, meanExponent / std::max<size_t>(samples, 1), grain.run.seconds);
+            Expect(grain.run.conserved, "細かさ(T-1174): 保存");
+            Expect(grain.run.state.widestNeighborGap <= 1, "細かさ(T-1174): 隣どうしの e の差は 1 段まで");
+        }
+
+        // --- 0.5 m のセルと、1 m・2 m のセルで同じ場所の e ---
+        for (size_t other = 1; other < runs.size(); ++other) {
+            double meanGap = 0.0;
+            uint64_t withinOne = 0;
+            uint64_t samples = 0;
+            int32_t widest = 0;
+            for (size_t i = 0; i < runs[0].exponents.size(); ++i) {
+                for (size_t p = 0; p < runs[0].exponents[i].size(); ++p) {
+                    const int32_t gap = std::abs(runs[0].exponents[i][p] - runs[other].exponents[i][p]);
+                    meanGap += gap;
+                    withinOne += gap <= 1 ? 1u : 0u;
+                    widest = std::max(widest, gap);
+                    ++samples;
+                }
+            }
+
+            // 時間で均した e の場所ごとの形(歩の始まりのずれを均す)の差
+            const size_t places = runs[0].exponents.empty() ? 0 : runs[0].exponents[0].size();
+            double profileGap = 0.0;
+            for (size_t p = 0; p < places; ++p) {
+                double fineSum = 0.0;
+                double coarseSum = 0.0;
+                for (size_t i = 0; i < runs[0].exponents.size(); ++i) {
+                    fineSum += runs[0].exponents[i][p];
+                    coarseSum += runs[other].exponents[i][p];
+                }
+
+                profileGap += std::abs(fineSum - coarseSum) / static_cast<double>(runs[0].exponents.size());
+            }
+
+            Log(Channel::Sim, Level::Info,
+                "GRAINPAIR scene={} unit={} window={} slope={} pile={} budget={} arrival={} cells=0.5-{} "
+                "meanGap={:.3f} "
+                "withinOne={:.1f} widest={} profileGap={:.3f}",
+                name, grainUnitMeters, windowMeters, slopeMeters, pileMeters, grainBudget, trialArrival,
+                GRAIN_CELL_METERS[other], meanGap / static_cast<double>(samples),
+                100.0 * static_cast<double>(withinOne) / samples, widest,
+                profileGap / static_cast<double>(std::max<size_t>(places, 1)));
+        }
+    }
+
+    void CheckGrain() {
+        for (int scene = 0; scene < 2; ++scene) {
+            if (grainScene < 0 || grainScene == scene)
+                CheckGrainScene(scene == 1);
+        }
     }
 
     // --- 3. 早送り = 待った(ビット一致)---
@@ -801,7 +980,13 @@ namespace {
         FireParameters fire;
         fire.burningMeters = 24.0;
         for (const Trial& trial : TRIALS) {
-            const TimeStepLabSetup setup = WithTrial(MakeFireSetup(fire), trial);
+            TimeStepLabSetup setup = WithTrial(MakeFireSetup(fire), trial);
+            if (windowMeters > 0.0 || slopeMeters > 0.0) {
+                // ff window=・slope=: 滑る窓(1 セルの単位)でも早送りがビット一致か(T-1174)
+                setup.blockCells = 1;
+                setup = WithWindow(setup, fire.cellMeters);
+            }
+
             const uint64_t ticks = 2 * COMPARE_EVERY + 777;
             const Ignition ignition = FireIgnition(fire);
             const RunResult waited = Run(setup, FilledFire(fire, setup), ticks, 1, ignition);
@@ -849,6 +1034,18 @@ namespace {
                 placeStartTick = static_cast<uint64_t>(std::atoll(value.c_str()));
             else if (key == "placeticks")
                 placeTicks = static_cast<uint64_t>(std::atoll(value.c_str()));
+            else if (key == "window")
+                windowMeters = std::atof(value.c_str());
+            else if (key == "slope")
+                slopeMeters = std::atof(value.c_str());
+            else if (key == "pilemeters")
+                pileMeters = std::atof(value.c_str());
+            else if (key == "grainunit")
+                grainUnitMeters = std::atof(value.c_str());
+            else if (key == "grainbudget")
+                grainBudget = static_cast<uint64_t>(std::atoll(value.c_str()));
+            else if (key == "grainscene")
+                grainScene = std::atoi(value.c_str());
         }
 
         if (part == "flow" && flowTrace != 0) {
@@ -859,6 +1056,18 @@ namespace {
 
         if (part == "flow") {
             CheckFlow();
+
+            return failureCount == 0 ? 0 : 1;
+        }
+
+        if (part == "ff") {
+            CheckFastForward();
+
+            return failureCount == 0 ? 0 : 1;
+        }
+
+        if (part == "grain") {
+            CheckGrain();
 
             return failureCount == 0 ? 0 : 1;
         }

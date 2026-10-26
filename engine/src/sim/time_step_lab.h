@@ -90,6 +90,15 @@ namespace bicameral::sim {
         // 既定は 4(仮・T-1170: 遅い川の毎刻みとの差 598 → 8.6 mK・今までの試験は通る。8 は 20 mK で費用もほぼ同じだが、
         // 0.5 m と 2 m のセルで選ぶ e が揃わなくなった〔細かさの試験が落ちる〕。1・2 は遅い川に効かなかった)
         uint32_t arrivalLook = 4;
+        // 滑る窓(T-1174。windowBlocks = 0 かつ slopeBlocks = 1 で外す = 今の形): 歩を始める枠の e を、まわり windowBlocks 枠の内の
+        // どの枠の望み(局所の上限まで。歩の途中の枠は歩を始めた時の望み)より長くしない。窓の外は slopeBlocks 枠ごとに 1 段ずつ
+        // 伸ばしてよい(e ≤ 望み + ⌈(距離 − 窓) ÷ slopeBlocks⌉)。歩の途中の枠がこの上限より長ければ打ち切る。
+        // 格子の境を持たないので置く場所に依らず、窓と坂を長さ(m)で決めれば細かさにも依らない見込み(T-1174)
+        uint32_t windowBlocks = 0;
+        uint32_t slopeBlocks = 1;
+        // 面で積もる分(arrivalLook 4)を何セルに広げて予算と比べるか(T-1174。既定 1 = 境のセル 1 つ = T-1170)。
+        // 積もる量 ÷ (容量 × pileCells)。決まった長さ ÷ セルの長さにすると、積もる分を細かさによらない長さの平均で見る
+        uint32_t pileCells = 1;
     };
 
     // 世界の帳簿(外との出入り・反応。符号は世界の中へ入るのが正)
@@ -139,7 +148,8 @@ namespace bicameral::sim {
         std::vector<uint64_t> lastMeasure;  // 今の歩の誤差の見積もり(規則 B。精度の単位 × 2^16)
         std::vector<uint64_t> lastRate;     // 前の歩の 1 刻みの変化(精度の単位 × 2^16。arrivalLook)
         std::vector<int64_t>
-            lastEdgeRate;  // [(枠 × 2 + 端) × 量]: 両端のセルの前の歩の 1 刻みの変化(符号付き。ARRIVAL_PILE)
+            lastEdgeRate;           // [(枠 × 2 + 端) × 量]: 両端のセルの前の歩の 1 刻みの変化(符号付き。ARRIVAL_PILE)
+        std::vector<int32_t> wish;  // 今の歩を始めた時の窓の前の望み(滑る窓の時だけ。T-1174)
 
         TimeStepLabLedger ledger;
 

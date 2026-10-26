@@ -703,7 +703,7 @@ namespace bicameral::sim {
                     if (coefficient == 0)
                         continue;
 
-                    const FxU128 numerator = FxMulU64Full(2 * budget, law.capacityQ16[cell]);
+                    const FxU128 numerator = FxMulU64Full(2 * budget * setup.pileCells, law.capacityQ16[cell]);
                     if (numerator.hi >= coefficient)
                         continue;
 
@@ -765,6 +765,69 @@ namespace bicameral::sim {
             }
         }
 
+        // --- 滑る窓(T-1174。time_step_lab.h の windowBlocks)---
+        // 単位の格子の境を持たず、各枠がまわりの決まった長さの中の最も短い望みに合わせる。置く場所で分け方が変わらない(T-1173 の
+        // 帯の根)まま、窓と坂を長さで決めれば細かさにも依らない見込み。局所の状態(まわりの望み)だけを読む(N1)
+
+        bool UsesWindow(const TimeStepLabSetup& setup) {
+            return setup.windowBlocks != 0 || setup.slopeBlocks > 1;
+        }
+
+        // 枠 block の上限 = min(まわりの枠の望み + 窓の外の坂)。wishes: 始める枠は窓の前の値・歩の途中の枠は歩を始めた時の望み
+        int32_t WindowBound(const TimeStepLabSetup& setup, const std::vector<int32_t>& wishes, uint32_t block) {
+            const int64_t window = setup.windowBlocks;
+            const int64_t slope = std::max<uint32_t>(setup.slopeBlocks, 1);
+            const int64_t reach = window + slope * (TS_MAX_EXPONENT + 1);
+            const int64_t self = block;
+            const int64_t from = std::max<int64_t>(0, self - reach);
+            const int64_t to = std::min<int64_t>(static_cast<int64_t>(wishes.size()) - 1, self + reach);
+
+            int64_t bound = TS_MAX_EXPONENT;
+            for (int64_t other = from; other <= to; ++other) {
+                const int64_t beyond = std::max<int64_t>(0, std::abs(other - self) - window);
+                const int64_t rise = (beyond + slope - 1) / slope;
+                bound = std::min(bound, wishes[static_cast<size_t>(other)] + rise);
+            }
+
+            return static_cast<int32_t>(bound);
+        }
+
+        // 始める枠の e を窓の上限まで縮める。歩の途中の枠が上限より長ければ打ち切って始め直す(上限が変わらなくなるまで)。
+        // 望み(free)は局所の状態の上限(面で積もる分など)までで、世界の時計にそろえる上限(cap)は入れない: 入れると、奇数の刻みに
+        // 打ち切った枠の望みが 0 になり、窓の中の枠を次々と打ち切って全体が毎刻みに張り付く(T-1174 の 1 回目の測り)。
+        // 返すのは窓の前の望み(隣の差の打ち切りでも使う)
+        std::vector<int32_t> ApplyWindow(const TimeStepLabSetup& setup, TimeStepLabState& state, uint64_t tick,
+                                         int32_t cap, const std::vector<int32_t>& free, std::vector<int32_t>& next) {
+            const uint32_t blocks = BlockCount(setup);
+            std::vector<int32_t> local(blocks);
+            for (uint32_t b = 0; b < blocks; ++b)
+                local[b] = next[b] >= 0 ? free[b] : state.wish[b];
+
+            bool changed = true;
+            while (changed) {
+                changed = false;
+                for (uint32_t b = 0; b < blocks; ++b) {
+                    if (next[b] >= 0 || state.exponent[b] <= WindowBound(setup, local, b))
+                        continue;
+
+                    TruncateBlock(setup, state, b, tick);
+                    local[b] = std::clamp(state.desired[b], 0, setup.maxExponent);
+                    next[b] = std::clamp(state.desired[b], 0, cap);
+                    changed = true;
+                }
+            }
+
+            for (uint32_t b = 0; b < blocks; ++b) {
+                if (next[b] < 0)
+                    continue;
+
+                state.wish[b] = local[b];
+                next[b] = std::min(next[b], WindowBound(setup, local, b));
+            }
+
+            return local;
+        }
+
         // --- 出来事(刻み tick): 終えた歩を閉じる → e を選ぶ(隣の差 1 段・長すぎる隣は打ち切る)→ 列ごとに歩を始める ---
 
         std::vector<int32_t> ChooseExponents(const TimeStepLabSetup& setup, TimeStepLabState& state, uint64_t tick) {
@@ -778,6 +841,20 @@ namespace bicameral::sim {
 
             if (setup.arrivalLook != 0 && setup.rule == TimeStepRule::Change)
                 CapByArrival(setup, state, next);
+
+            std::vector<int32_t> local;
+            if (UsesWindow(setup)) {
+                std::vector<int32_t> free(blocks, -1);
+                for (uint32_t b = 0; b < blocks; ++b) {
+                    if (state.open[b] == 0)
+                        free[b] = std::clamp(state.desired[b], 0, setup.maxExponent);
+                }
+
+                if (setup.arrivalLook != 0 && setup.rule == TimeStepRule::Change)
+                    CapByArrival(setup, state, free);
+
+                local = ApplyWindow(setup, state, tick, cap, free, next);
+            }
 
             const auto current = [&](uint32_t b) {
                 return next[b] >= 0 ? next[b] : state.exponent[b];
@@ -799,6 +876,11 @@ namespace bicameral::sim {
                         if (next[b] < 0) {
                             TruncateBlock(setup, state, b, tick);
                             next[b] = std::clamp(state.desired[b], 0, cap);
+                            if (!local.empty()) {
+                                local[b] = std::clamp(state.desired[b], 0, setup.maxExponent);
+                                state.wish[b] = local[b];
+                                next[b] = std::min(next[b], WindowBound(setup, local, b));
+                            }
                         }
 
                         next[b] = std::min(next[b], current(neighbor) + 1);
@@ -892,6 +974,8 @@ namespace bicameral::sim {
         state.lastMeasure.assign(blocks, 0);
         state.lastRate.assign(blocks, 0);
         state.lastEdgeRate.assign(static_cast<size_t>(blocks) * 2 * CARRIED, 0);
+        if (UsesWindow(setup))
+            state.wish.assign(blocks, first);
 
         return state;
     }
@@ -955,6 +1039,9 @@ namespace bicameral::sim {
             for (uint32_t i = 0; i < 2 * CARRIED; ++i)
                 mix(state.lastEdgeRate[b * 2 * CARRIED + i]);
         }
+
+        for (const int32_t wish : state.wish)
+            mix(wish);
 
         for (const TimeStepLabFaceRecord& record : state.faceRecords) {
             mix(static_cast<int64_t>(record.start));
