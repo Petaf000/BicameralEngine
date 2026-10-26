@@ -1029,8 +1029,7 @@ namespace bicameral::sim {
         m_cascade->RecordTick(list, m_debugRing.GpuAddress(), tick, stamps,
                               static_cast<uint8_t>(ProbeRadiationStage::PositiveFirst));
         if (m_cascadeNegative)
-            m_cascadeNegative->RecordTick(list, m_debugRing.GpuAddress(), tick, stamps,
-                                          static_cast<uint8_t>(ProbeRadiationStage::NegativeFirst));
+            RecordRadiationNegative(list, tick, stamps);
 
         BindRootArguments(list, input);
         SetUnitConstants(list, tick, m_speciesCount);
@@ -1040,6 +1039,21 @@ namespace bicameral::sim {
         list->ResourceBarrier(1, &allUavs);
         MarkRadiation(list, ProbeRadiationStage::Apply);
         BindRootViews(list, input);
+    }
+
+    // 負の側の 1 刻み。負の側が空の刻み(放つセルが無く、前に流した刻みが何も放たず受けず、入る持ち越しも空)は
+    // GPU が起動の予告で全部の段を飛ばす(T-1229。CPU は読み戻さない。飛ばしても結果は流した時と同じ)
+    void ProbeSim::RecordRadiationNegative(ID3D12GraphicsCommandList10* list, uint64_t tick, gpu::StageStamps* stamps) {
+        const auto first = static_cast<uint8_t>(ProbeRadiationStage::NegativeFirst);
+        if (!m_options.radiationSkipIdle) {
+            m_cascadeNegative->RecordTick(list, m_debugRing.GpuAddress(), tick, stamps, first);
+            return;
+        }
+
+        m_cascadeNegative->RecordPlan(list, m_debugRing.GpuAddress(), tick, stamps, first);
+        m_cascadeNegative->BeginSkipIfIdle(list);
+        m_cascadeNegative->RecordTick(list, m_debugRing.GpuAddress(), tick, stamps, first);
+        m_cascadeNegative->EndSkipIfIdle(list);
     }
 
     // 段ごとの GPU 時間の印(測りの時だけ)
@@ -1060,7 +1074,15 @@ namespace bicameral::sim {
                 continue;
 
             BindRadiationViews(list, (*side)->Work(), (*side)->State(), m_radiationLights.Get());
+            // 負の側が空の刻みは持ち越しの表も空(寄与 0)なので、同じ刻みの予告で飛ばす(T-1229)
+            const bool skippable = side == &m_cascadeNegative && m_options.radiationSkipIdle;
+            if (skippable)
+                (*side)->BeginSkipIfIdle(list);
+
             list->Dispatch(HASH_GROUPS, 1, 1);
+            if (skippable)
+                (*side)->EndSkipIfIdle(list);
+
             // 測りの時だけ側ごとに待つ(ハッシュは atomic の和なので順は結果に入らない)
             if (!m_radiationStamps)
                 continue;
@@ -1410,6 +1432,7 @@ namespace bicameral::sim {
                                              static_cast<uint32_t>(header[reaction::RC_GPU_FACE_COUNT]));
             result.radiationBagPeak = std::max(result.radiationBagPeak,
                                                static_cast<uint32_t>(header[reaction::RC_GPU_BAG_PEAK]));
+            result.radiationSkippedTicks += header[reaction::RC_GPU_SKIPPED];
             for (uint32_t level = 0; level < reaction::RC_GPU_STEPS - reaction::RC_GPU_RAYS; ++level)
                 result.radiationRays += header[reaction::RC_GPU_RAYS + level];
         }

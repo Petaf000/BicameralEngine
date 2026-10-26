@@ -65,6 +65,17 @@ namespace {
         return scenes;
     }
 
+    // 飛ばす段の出入りを見る場面(T-1229): 負の側がずっと空(外 = 世界の温度)・火で時々要る・ずっと要る(外が世界より暖かい)
+    std::vector<Scene> SkipScenes() {
+        return {
+            {.name = "何もしない・外 300 K(負の側がずっと空)", .cascade = FixedReference(REFERENCE_300_K)},
+            {.name = "火・外 300 K(負の側が時々)", .cascade = FixedReference(REFERENCE_300_K), .fire = true},
+            {.name = "火・外 301 K(負の側がずっと要る)",
+             .cascade = FixedReference(REFERENCE_300_K + 1000),
+             .fire = true},
+        };
+    }
+
     struct Run {
         std::vector<uint64_t> hashes;
         std::vector<uint64_t> stageTicks;
@@ -74,15 +85,17 @@ namespace {
         uint64_t raySum = 0;
         uint64_t samples = 0;
         uint64_t dropped = 0;
+        uint64_t skipped = 0;  // 負の側が空で飛ばした刻みの数(T-1229)
         uint32_t overflow = 0;
         uint32_t asserts = 0;
         bool ok = false;
     };
 
     std::optional<Run> RunScene(ID3D12Device5* device, gpu::Queue& queue, const BakedReactionTable& table,
-                                const Scene& scene, uint64_t ticks, bool timing) {
-        auto created = ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, table,
-                                        {.cascadeRadiation = scene.cascade, .radiationStageTiming = timing});
+                                const Scene& scene, uint64_t ticks, bool timing, bool skipIdle = true) {
+        auto created = ProbeSim::Create(
+            device, D3D12_COMMAND_LIST_TYPE_COMPUTE, table,
+            {.cascadeRadiation = scene.cascade, .radiationStageTiming = timing, .radiationSkipIdle = skipIdle});
         if (!created) {
             Log(Channel::Sim, Level::Error, "{}", created.error());
             return std::nullopt;
@@ -115,6 +128,7 @@ namespace {
 
             run.faceSum += readback.radiationFaces;
             run.raySum += readback.radiationRays;
+            run.skipped = readback.radiationSkippedTicks;
             ++run.samples;
             run.overflow |= readback.radiationOverflow;
             run.asserts += readback.debugAssertCount;
@@ -162,8 +176,9 @@ namespace {
 
         Log(Channel::Sim, Level::Info,
             "放射の費用 [{}]: 1 刻み {:.1f} µs(放射の段の印の和 {:.1f} µs)・放つ面 {}・光線 "
-            "{}(フレームの最後の刻みの平均)",
-            scene.name, perTick(run.unitTicks), perTick(radiation), run.faceSum / samples, run.raySum / samples);
+            "{}(フレームの最後の刻みの平均)・負の側を飛ばした刻み {}/{}",
+            scene.name, perTick(run.unitTicks), perTick(radiation), run.faceSum / samples, run.raySum / samples,
+            run.skipped, ticks);
         if (!stages.empty())
             Log(Channel::Sim, Level::Info, "  段ごとの µs/刻み:{}", stages);
     }
@@ -194,6 +209,22 @@ namespace {
         const std::vector<Scene> scenes = Scenes(measureAll);
         const std::optional<Run> plain = RunScene(device, *queue, table, scenes.front(), ticks, false);
         failures.Check(plain && plain->ok, "印なしで流せた");
+
+        // --- 負の側が空の刻みを飛ばしても結果が同じ(T-1229。飛ばさない時と刻みごとのハッシュが全部一致)---
+        for (const Scene& scene : SkipScenes()) {
+            const std::optional<Run> skipping = RunScene(device, *queue, table, scene, ticks, false, true);
+            const std::optional<Run> running = RunScene(device, *queue, table, scene, ticks, false, false);
+            failures.Check(skipping && skipping->ok && running && running->ok, std::format("流せた: {}", scene.name));
+            if (!skipping || !running)
+                continue;
+
+            Log(Channel::Sim, Level::Info, "負の側を飛ばした刻み [{}]: {}/{}", scene.name, skipping->skipped, ticks);
+            failures.Check(skipping->hashes == running->hashes,
+                           std::format("飛ばしても刻みごとの世界のハッシュが全部同じ: {}", scene.name));
+            failures.Check(running->skipped == 0, std::format("飛ばさない時は 0 刻み: {}", scene.name));
+            failures.Check(skipping->asserts == 0 && skipping->overflow == 0,
+                           std::format("飛ばした時も assert・溢れが 0: {}", scene.name));
+        }
 
         for (const Scene& scene : scenes) {
             const std::optional<Run> run = RunScene(device, *queue, table, scene, ticks, true);
