@@ -76,7 +76,16 @@ FX_CONST uint32_t SF_FLAG_PLACE_OPEN = 32u;
 // 眠る時に捨てる(T-1159。ADR-0469 の 2-3・20 §10.3): 導かれる値だけ。眠る(頁を畳む)時に一様の値の枠へ平均ではなく 0 を残す。
 // 起きた時に使わない温めた始まり(支えの刻みをまたぐ共役勾配の向きと残差。D-649・wt2 T-1086)に付ける(保存点の無駄を省く)
 FX_CONST uint32_t SF_FLAG_SLEEP_DISCARD = 64u;
-FX_CONST uint32_t SF_FLAG_MASK = 127u;
+// 内訳(T-1177。ADR-0469 の 2-2・D-659): 1 つの保存量の欄(親。SfFieldDesc::parent)の値のうち「止まれる側の状態」の量。
+// 例: 粒の量のうち積もった層の量(残り = 親 − 内訳 が舞う粒)。物質・保存量は親 1 つのまま(作り手の書く値は増えない)。
+//   - 真実の欄・SAME・ハッシュに入る(保存点にも入る)。保存量の列は親だけ(内訳は列を持たない)。0 ≤ 内訳 ≤ 親(SfBreakdownFits)
+//   - 細かくする: 内訳は自分の置かれ方の印で、残り(親 − 内訳)は親の置かれ方の印で配り、子の親 = 子の内訳 + 子の残り(SfBreakdownChildren)
+//   - 粗くする: 内訳は和 ÷ 8 の切り捨て・親は和 ÷ 8 + 端数(帳簿)。切り捨て ≤ 切り捨てなので 0 ≤ 内訳 ≤ 親 のまま
+//   - 眠る: 残りが 0 でないセル(舞う粒がある)のある頁は畳まない(SfBreakdownKeepsAwake。止まった層だけなら畳める)
+FX_CONST uint32_t SF_FLAG_BREAKDOWN = 128u;
+FX_CONST uint32_t SF_FLAG_MASK = 255u;
+
+FX_CONST uint32_t SF_NO_PARENT = 0xFFFFFFFFu;  // 内訳でない欄の親(SfFieldDesc::parent)
 
 // --- 細かくする時の配り方(印から決まる。SfRefinePlacement)---
 FX_CONST uint32_t SF_REFINE_SAME = 0;
@@ -106,6 +115,7 @@ struct SfFieldDesc {
     uint32_t scale;
     uint32_t flags;
     uint32_t components;  // セル・ブロック・世界: 1〜3。面: 3(+ 側の 3 面)
+    uint32_t parent;      // 内訳の欄の親の欄の番号(登録の順。親が先)。内訳でなければ SF_NO_PARENT(T-1177)
 };
 
 FX_FN SfFieldDesc SfMakeFieldDesc(uint32_t place, uint32_t type, uint32_t phase, uint32_t scale, uint32_t flags,
@@ -117,13 +127,24 @@ FX_FN SfFieldDesc SfMakeFieldDesc(uint32_t place, uint32_t type, uint32_t phase,
     desc.scale = scale;
     desc.flags = flags;
     desc.components = place == SF_PLACE_FACE ? 3u : components;
+    desc.parent = SF_NO_PARENT;
+
+    return desc;
+}
+
+// 内訳の欄の登録 1 行(T-1177): 真実・SAME・ハッシュに入る。flags には置かれ方の印(内訳そのものの配り方)を足せる
+FX_FN SfFieldDesc SfMakeBreakdownDesc(uint32_t place, uint32_t type, uint32_t phase, uint32_t flags,
+                                      uint32_t components, uint32_t parent) {
+    SfFieldDesc desc = SfMakeFieldDesc(place, type, phase, SF_SCALE_SAME, flags | SF_FLAG_BREAKDOWN | SF_FLAG_HASHED,
+                                       components);
+    desc.parent = parent;
 
     return desc;
 }
 
 FX_FN bool SfSameDesc(SfFieldDesc a, SfFieldDesc b) {
     return a.place == b.place && a.type == b.type && a.phase == b.phase && a.scale == b.scale && a.flags == b.flags &&
-           a.components == b.components;
+           a.components == b.components && a.parent == b.parent;
 }
 
 FX_FN bool SfDescValid(SfFieldDesc desc) {
@@ -160,6 +181,15 @@ FX_FN bool SfDescValid(SfFieldDesc desc) {
     const uint32_t placeFlags = desc.flags & (SF_FLAG_PLACE_CONDENSED | SF_FLAG_PLACE_OPEN);
     if (placeFlags != 0u && (placeFlags == (SF_FLAG_PLACE_CONDENSED | SF_FLAG_PLACE_OPEN) || derived ||
                              (desc.place != SF_PLACE_CELL && desc.place != SF_PLACE_FACE)))
+        return false;
+
+    // 内訳(T-1177): 真実のセル・面の欄・SAME(保存量の列は親だけ)・ハッシュに入る・親を持つ。内訳でない欄は親を持たない
+    const bool breakdown = (desc.flags & SF_FLAG_BREAKDOWN) != 0u;
+    if (breakdown != (desc.parent != SF_NO_PARENT))
+        return false;
+
+    if (breakdown && (derived || desc.scale != SF_SCALE_SAME || (desc.flags & SF_FLAG_HASHED) == 0u ||
+                      (desc.place != SF_PLACE_CELL && desc.place != SF_PLACE_FACE)))
         return false;
 
     // ブロック・世界の欄は細かく/粗くで和を取らない
@@ -235,6 +265,27 @@ FX_FN bool SfValueFits(SfFieldDesc desc, int64_t value) {
         return value >= 0 && value <= (int64_t)0xFFFFFFFFu;
 
     return true;
+}
+
+// --- 内訳(T-1177。SF_FLAG_BREAKDOWN)---
+FX_FN bool SfBreakdown(SfFieldDesc desc) {
+    return (desc.flags & SF_FLAG_BREAKDOWN) != 0u;
+}
+
+// 内訳と親の組が正しいか(登録の時): 親は保存量の欄・内訳でない・置き場と値の数が同じ
+FX_FN bool SfBreakdownPairValid(SfFieldDesc desc, SfFieldDesc parentDesc) {
+    return SfBreakdown(desc) && SfConserved(parentDesc) && !SfBreakdown(parentDesc) && parentDesc.place == desc.place &&
+           parentDesc.components == desc.components;
+}
+
+// 状態の検査: 0 ≤ 内訳 ≤ 親(引き算をしない。64bit の引き算と比べを並べない約束。T-1078)
+FX_FN bool SfBreakdownFits(int64_t parentValue, int64_t value) {
+    return value >= 0 && value <= parentValue;
+}
+
+// 眠る判定: 残り(親 − 内訳。舞う粒)があるセルは起きている
+FX_FN bool SfBreakdownKeepsAwake(int64_t parentValue, int64_t value) {
+    return value != parentValue;
 }
 
 // --- 細かくする: 子は親と同じ数 ------------------------------------------------------------------

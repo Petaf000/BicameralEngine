@@ -469,6 +469,8 @@ namespace {
         uint32_t plain = MULTIRES_NO_FIELD;      // 無印(SAME)
         uint32_t condensed = MULTIRES_NO_FIELD;  // 凝縮相に乗る(セル)
         uint32_t open = MULTIRES_NO_FIELD;       // 空きに乗る(面 ×3)
+        uint32_t amount = MULTIRES_NO_FIELD;     // 内訳の親(保存量・残りは空きに乗る。T-1177)
+        uint32_t layer = MULTIRES_NO_FIELD;      // 内訳(凝縮相に乗る。T-1177)
     };
 
     enum class Provider { None, Equal, Tilted };
@@ -486,6 +488,12 @@ namespace {
         world.open = RegisterNestField(nest, "truth.open",
                                        SfMakeFieldDesc(SF_PLACE_FACE, SF_TYPE_I64, SF_PHASE_NONE, SF_SCALE_VOLUME,
                                                        CONSERVED | SF_FLAG_PLACE_OPEN, 3));
+        world.amount = RegisterNestField(nest, "truth.amount",
+                                         SfMakeFieldDesc(SF_PLACE_CELL, SF_TYPE_I64, SF_PHASE_NONE, SF_SCALE_VOLUME,
+                                                         CONSERVED | SF_FLAG_PLACE_OPEN, 1));
+        world.layer = RegisterNestField(
+            nest, "truth.amount_layer",
+            SfMakeBreakdownDesc(SF_PLACE_CELL, SF_TYPE_I64, SF_PHASE_NONE, SF_FLAG_PLACE_CONDENSED, 1, world.amount));
 
         const std::vector<RxCell> air(MR_BLOCK_CELLS, test::MakeAirCell(table));
         const uint32_t slot = PlaceRootBlock(nest, 0, 0, 0, air);
@@ -494,6 +502,8 @@ namespace {
         for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
             StoreNestField(nest, world.plain, slot, index, 0, (int64_t)(index * 7) - 300);
             StoreNestField(nest, world.condensed, slot, index, 0, (int64_t)(index * 13) + 5);
+            StoreNestField(nest, world.amount, slot, index, 0, (int64_t)(index * 17) + 40);
+            StoreNestField(nest, world.layer, slot, index, 0, (int64_t)(index * 5));
             for (uint32_t c = 0; c < 3; ++c)
                 StoreNestField(nest, world.open, slot, index, c, (int64_t)(index * 3) - (int64_t)(c * 400));
         }
@@ -597,6 +607,118 @@ namespace {
                "登録: 置かれ方の印は真実のセル・面の欄に 1 つだけ");
     }
 
+    // --- 5. 内訳(T-1177。ADR-0469 の 2-2): 内訳は自分の印で・残りは親の印で配り、子の親 = 内訳 + 残り ---
+    void TestBreakdown(const BakedReactionTable& table) {
+        const FieldWorld none = MakeFieldWorld(table, Provider::None);
+        const FieldWorld tilted = MakeFieldWorld(table, Provider::Tilted);
+        const uint32_t child = FindChild(tilted.nest);
+        Expect(tilted.amount != MULTIRES_NO_FIELD && tilted.layer != MULTIRES_NO_FIELD, "内訳: 登録できる");
+        if (child == UINT32_MAX || tilted.layer == MULTIRES_NO_FIELD)
+            return;
+
+        bool sums = true;
+        bool fits = true;
+        bool lowOnly = true;
+        bool restOpen = true;
+        bool same = true;
+        for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
+            const uint32_t parentCell = MrOctantCell(0, local);
+            const int64_t amount = (int64_t)(parentCell * 17) + 40;
+            const int64_t layer = (int64_t)(parentCell * 5);
+            int64_t amountSum = 0;
+            int64_t layerSum = 0;
+            for (uint32_t j = 0; j < 8; ++j) {
+                const uint32_t index = MrChildCell(local, j);
+                const int64_t childAmount = LoadNestField(tilted.nest, tilted.amount, child, index, 0);
+                const int64_t childLayer = LoadNestField(tilted.nest, tilted.layer, child, index, 0);
+                amountSum += childAmount;
+                layerSum += childLayer;
+                fits &= SfBreakdownFits(childAmount, childLayer);
+                same &= LoadNestField(none.nest, none.amount, child, index, 0) == amount &&
+                        LoadNestField(none.nest, none.layer, child, index, 0) == layer;
+                const bool high = ((j >> 1) & 1u) != 0;
+                if (high && parentCell != 0)
+                    lowOnly &= childLayer == 0;
+
+                // 残り(親 − 内訳)は空きの重み(下 1・上 5)で配る: 上の子の残りは下の子の残りより多い
+                if (high && parentCell != 0)
+                    restOpen &= childAmount - childLayer >
+                                LoadNestField(tilted.nest, tilted.amount, child, MrChildCell(local, j & ~2u), 0) -
+                                    LoadNestField(tilted.nest, tilted.layer, child, MrChildCell(local, j & ~2u), 0);
+            }
+
+            sums &= amountSum == 8 * amount && layerSum == 8 * layer;
+        }
+
+        Expect(sums, "内訳: 子の親の和 = 8 × 親・子の内訳の和 = 8 × 内訳");
+        Expect(fits, "内訳: 子でも 0 ≤ 内訳 ≤ 親");
+        Expect(lowOnly, "内訳: 凝縮相に乗る内訳は凝縮相の無い子に入らない");
+        Expect(restOpen, "内訳: 残りは親の印(空き)で配る");
+        Expect(same, "内訳: 口の無い世界は子は親と同じ数");
+        Expect(CountBreakdownMisfits(tilted.nest) == 0, "内訳: 細かくした後の検査が 0");
+
+        // --- 状態の検査・ハッシュ ---
+        FieldWorld broken = MakeFieldWorld(table, Provider::None);
+        const uint64_t before = HashWholeNest(broken.nest);
+        StoreNestField(broken.nest, broken.layer, child, 3, 0,
+                       LoadNestField(broken.nest, broken.amount, child, 3, 0) + 1);
+        Expect(CountBreakdownMisfits(broken.nest) == 1, "内訳: 親を超えた値を検査が数える");
+        Expect(HashWholeNest(broken.nest) != before, "内訳: ハッシュに入る");
+        StoreNestField(broken.nest, broken.layer, child, 3, 0, -1);
+        Expect(CountBreakdownMisfits(broken.nest) == 1, "内訳: 負の値を検査が数える");
+
+        // --- 登録の検査 ---
+        const SfFieldDesc noParent = SfMakeFieldDesc(SF_PLACE_CELL, SF_TYPE_I64, SF_PHASE_NONE, SF_SCALE_SAME,
+                                                     SF_FLAG_BREAKDOWN | SF_FLAG_HASHED, 1);
+        SfFieldDesc volume = SfMakeBreakdownDesc(SF_PLACE_CELL, SF_TYPE_I64, SF_PHASE_NONE, 0, 1, 0);
+        volume.scale = SF_SCALE_VOLUME;
+        volume.flags |= SF_FLAG_CONSERVED;
+        SfFieldDesc stray = SfMakeFieldDesc(SF_PLACE_CELL, SF_TYPE_I64, SF_PHASE_NONE, SF_SCALE_SAME, SF_FLAG_HASHED,
+                                            1);
+        stray.parent = 0;
+        const SfFieldDesc block = SfMakeBreakdownDesc(SF_PLACE_BLOCK, SF_TYPE_I64, SF_PHASE_NONE, 0, 1, 0);
+        Expect(!SfDescValid(noParent) && !SfDescValid(volume) && !SfDescValid(stray) && !SfDescValid(block) &&
+                   SfDescValid(SfMakeBreakdownDesc(SF_PLACE_FACE, SF_TYPE_I64, SF_PHASE_NONE, 0, 3, 0)),
+               "内訳: 真実のセル・面の SAME の欄で親を持つ・内訳でない欄は親を持たない");
+
+        MultiresNest nest = MakeMultiresNest(test::MakeMultiresCapacity(table, 16, 0, 16));
+        constexpr uint32_t CONSERVED = SF_FLAG_CONSERVED | SF_FLAG_HASHED;
+        const uint32_t plain = RegisterNestField(
+            nest, "plain",
+            SfMakeFieldDesc(SF_PLACE_CELL, SF_TYPE_I64, SF_PHASE_NONE, SF_SCALE_SAME, SF_FLAG_HASHED, 1));
+        const uint32_t amount = RegisterNestField(
+            nest, "amount", SfMakeFieldDesc(SF_PLACE_CELL, SF_TYPE_I64, SF_PHASE_NONE, SF_SCALE_VOLUME, CONSERVED, 1));
+        const uint32_t faces = RegisterNestField(
+            nest, "faces", SfMakeFieldDesc(SF_PLACE_FACE, SF_TYPE_I64, SF_PHASE_NONE, SF_SCALE_VOLUME, CONSERVED, 3));
+        const auto make = [](uint32_t parent) {
+            return SfMakeBreakdownDesc(SF_PLACE_CELL, SF_TYPE_I64, SF_PHASE_NONE, 0, 1, parent);
+        };
+        Expect(RegisterNestField(nest, "of_plain", make(plain)) == MULTIRES_NO_FIELD &&
+                   RegisterNestField(nest, "of_faces", make(faces)) == MULTIRES_NO_FIELD &&
+                   RegisterNestField(nest, "of_later", make(9)) == MULTIRES_NO_FIELD,
+               "内訳: 親は先に登録した保存量の欄で、置き場と値の数が同じ");
+        const uint32_t layer = RegisterNestField(nest, "of_amount", make(amount));
+        Expect(layer != MULTIRES_NO_FIELD && RegisterNestField(nest, "of_amount_2", make(amount)) == MULTIRES_NO_FIELD,
+               "内訳: 親 1 つに内訳は 1 つ");
+        Expect(RegisterNestField(nest, "of_layer", make(layer)) == MULTIRES_NO_FIELD, "内訳: 内訳の内訳は無い");
+
+        // --- 眠る判定: 残り(舞う粒)があれば畳まない・止まれる側だけなら畳める ---
+        const std::vector<RxCell> air(MR_BLOCK_CELLS, test::MakeAirCell(table));
+        const uint32_t slot = PlaceRootBlock(nest, 0, 0, 0, air);
+        const bool expanded = ExpandNestPage(nest, slot);
+        Expect(expanded, "内訳: 根を頁に広げられる");
+        for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+            StoreNestField(nest, amount, slot, index, 0, 100);
+            StoreNestField(nest, layer, slot, index, 0, 60);
+        }
+
+        Expect(!nest_fields::PageFoldable(nest, slot), "内訳: 残りのある頁は畳まない");
+        for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
+            StoreNestField(nest, layer, slot, index, 0, 100);
+
+        Expect(nest_fields::PageFoldable(nest, slot), "内訳: 止まれる側だけの頁は畳める");
+    }
+
     int Run() {
         TestMatchesWt3(2, 11);
         TestMatchesWt3(4, 23);
@@ -610,6 +732,7 @@ namespace {
         }
 
         TestNestRefine(*table);
+        TestBreakdown(*table);
 
         if (failureCount != 0) {
             Log(Channel::Sim, Level::Error, "placement_refine_test: FAILED ({} 件)", failureCount);

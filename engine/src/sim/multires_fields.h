@@ -64,6 +64,9 @@ namespace bicameral::sim {
 
     [[nodiscard]] NestFieldMemory MeasureNestFields(const MultiresNest& nest);
 
+    // 内訳の欄(SF_FLAG_BREAKDOWN。T-1177)の状態の検査: 0 ≤ 内訳 ≤ 親 でない値の数(世界と観察の枠の全部。一様な枠は値 1 つで数える)
+    [[nodiscard]] uint64_t CountBreakdownMisfits(const MultiresNest& nest);
+
     // --- 木の操作が呼ぶ(multires_tree・multires_nest・multires_activity)---
     namespace nest_fields {
 
