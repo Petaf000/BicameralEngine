@@ -4,7 +4,10 @@
 // CPU リファレンスで追える短さに切った指標(fire_prefix: 600 K 以上のセルの数を上限まで測る)を測る。確かめること:
 //   1. 本物の世界を流しながら(同じキュー・本物のフレームの後ろ)測っても、本物のハッシュ列が本物だけで流した基準と全部一致(D-403)
 //   2. 同じ表をもう一度測ると、同じ値(刻み・量・読み戻した量の道のり)になる(決定性)
-//   3. 木の燃焼の速さを 10 倍にした表では sealed_fire_out の値が変わり、前の版との差が出る(ComparePlayMetrics)
+//   3. 固体の熱の伝導率を 10 倍にした表では fire_peak(同じ場面の 1 秒後の最高温度)の値が変わり、前の版との差が出る(ComparePlayMetrics)。
+//      (前は「木の燃焼の速さを 10 倍にした表で sealed_fire_out が変わる」だった。現実の伝導率〔T-1066〕では殻 1 セルの木箱の火は
+//       広がらず、火をつけたセルは熱分解して上限の 600 秒まで 1000 K を超えたままなので、燃焼の速さでは値が変わらない。T-1163。
+//       燃え広がりの場面は T-1156)
 //   4. fire_prefix の値・量の道のり・刻みごとのセルのハッシュが CPU リファレンス(MeasurePlayMetricReference)とビット一致。
 //      sealed_fire_out も CPU_FULL_LIMIT 刻み以内に止まれば CPU で測って同じ値か確かめる(長ければ飛ばしてログに書く)
 //   5. シェーダーの assert と debug layer のエラーが 0 件
@@ -44,6 +47,8 @@ namespace {
     constexpr std::array<uint32_t, 4> FRAME_UNITS = {5, 9, 3, 7};
     constexpr std::string_view FIRE_KEY = "sealed_fire_out";
     constexpr std::string_view PREFIX_KEY = "fire_prefix";
+    constexpr std::string_view PEAK_KEY = "fire_peak";
+    constexpr size_t METRIC_COUNT = 3;  // sealed_fire_out・fire_prefix・fire_peak
 
     struct Failures {
         int count = 0;
@@ -62,7 +67,8 @@ namespace {
         return {MakePokeCommand(0, 0, 35, 32, 32)};
     }
 
-    // 試験の表に、CPU で追える短い指標を足す(sealed_fire_out と同じ場面・同じ量。止めずに上限まで)
+    // 試験の表に、CPU で追える短い指標を足す(sealed_fire_out と同じ場面。止めずに上限まで):
+    // fire_prefix = 同じ量(1000 K 以上のセルの数)・fire_peak = 最高温度(表の物の値を変えると必ず変わる量)
     BakedReactionTable WithPrefixMetric(BakedReactionTable table) {
         const auto fire = rng::find(table.playMetrics, FIRE_KEY, &PlayMetric::key);
         if (fire == table.playMetrics.end())
@@ -76,17 +82,30 @@ namespace {
         prefix.stop = PlayMetricStop::AtLimit;
         table.playMetrics.push_back(prefix);
 
+        PlayMetric peak = prefix;
+        peak.key = PEAK_KEY;
+        peak.label = "火の 1 秒後の最高温度(試験)";
+        peak.quantity = PlayMetricQuantity::MaxTemperature;
+        table.playMetrics.push_back(peak);
+
         return table;
     }
 
-    // 木の燃焼の速さを 10 倍にした表(前の版との差が出るはず)
-    std::optional<BakedReactionTable> MakeFasterTable() {
+    // 固体の熱の伝導率を 10 倍にした表(火をつけたセルの冷め方が変わるので、前の版との差が出るはず)
+    std::optional<BakedReactionTable> MakeChangedTable() {
         ReactionTableDefinition definition = MakeCombustionTestTable();
-        const auto rule = rng::find(definition.rules, "cellulose_combustion", &RuleDefinition::name);
-        if (rule == definition.rules.end())
+        uint32_t solids = 0;
+        for (SpeciesDefinition& species : definition.species) {
+            if (species.phase != SpeciesPhase::Solid)
+                continue;
+
+            species.thermalConductivity *= 10;
+            ++solids;
+        }
+
+        if (solids == 0)
             return std::nullopt;
 
-        ++rule->rate.preExponentialExponent10;
         auto baked = BakeReactionTable(definition);
         if (!baked)
             return std::nullopt;
@@ -249,12 +268,13 @@ namespace {
                        "刻みごとのセルのハッシュが CPU リファレンスと一致");
     }
 
-    int RunTest(ID3D12Device5* device, const BakedReactionTable& table, const BakedReactionTable& faster) {
+    int RunTest(ID3D12Device5* device, const BakedReactionTable& table, const BakedReactionTable& changedTable) {
         Failures failures;
         auto queue = gpu::Queue::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, L"PlayMetricTest");
-        failures.Check(queue.has_value() && table.playMetrics.size() == 2 && faster.playMetrics.size() == 2,
-                       "キューと指標(sealed_fire_out・fire_prefix)がある");
-        if (!queue || table.playMetrics.size() != 2)
+        failures.Check(queue.has_value() && table.playMetrics.size() == METRIC_COUNT &&
+                           changedTable.playMetrics.size() == METRIC_COUNT,
+                       "キューと指標(sealed_fire_out・fire_prefix・fire_peak)がある");
+        if (!queue || table.playMetrics.size() != METRIC_COUNT)
             return failures.count;
 
         // --- 基準: 本物だけ ---
@@ -284,6 +304,7 @@ namespace {
         const PlayMetricValue* fire = Find(first->values, FIRE_KEY);
         LogValue("1 回目", fire);
         LogValue("1 回目", Find(first->values, PREFIX_KEY));
+        LogValue("1 回目", Find(first->values, PEAK_KEY));
         failures.Check(fire != nullptr && fire->measured, "sealed_fire_out を測れた");
 
         // --- 2. 同じ表をもう一度 ---
@@ -291,21 +312,22 @@ namespace {
         failures.Check(again && again->values == first->values && again->cellHashes == first->cellHashes,
                        "同じ表なら同じ値(刻み・量・道のり・セルのハッシュ)");
 
-        // --- 3. 速さを変えた表 ---
-        const std::optional<Measured> changed = MeasureAlone(device, *queue, faster);
-        failures.Check(changed && changed->ok, "速さを変えた表で測れた");
+        // --- 3. 物の値を変えた表 ---
+        const std::optional<Measured> changed = MeasureAlone(device, *queue, changedTable);
+        failures.Check(changed && changed->ok, "伝導率を変えた表で測れた");
         if (changed) {
-            const PlayMetricValue* changedFire = Find(changed->values, FIRE_KEY);
-            LogValue("速さを変えた表", changedFire);
+            LogValue("伝導率を変えた表", Find(changed->values, FIRE_KEY));
+            LogValue("伝導率を変えた表", Find(changed->values, PEAK_KEY));
             const std::vector<PlayMetricDiff> diffs = ComparePlayMetrics(changed->values, first->values);
             Log(Channel::Sim, Level::Info, "{}", FormatPlayMetricReport(diffs, 60));
-            const auto fireDiff = rng::find(diffs, FIRE_KEY, &PlayMetricDiff::key);
-            failures.Check(fireDiff != diffs.end() && fireDiff->changed && fireDiff->previous && fireDiff->current,
-                           "反応の速さを変えた表では sealed_fire_out の値が変わり、差が出る");
+            const auto peakDiff = rng::find(diffs, PEAK_KEY, &PlayMetricDiff::key);
+            failures.Check(peakDiff != diffs.end() && peakDiff->changed && peakDiff->previous && peakDiff->current,
+                           "伝導率を変えた表では fire_peak の値が変わり、差が出る");
         }
 
         // --- 4. CPU リファレンス ---
         CheckReference(failures, table, *first, PREFIX_KEY);
+        CheckReference(failures, table, *first, PEAK_KEY);
         if (fire != nullptr && fire->ticks <= CPU_FULL_LIMIT)
             CheckReference(failures, table, *first, FIRE_KEY);
         else if (fire != nullptr) {
@@ -332,8 +354,8 @@ int main(int argc, char** argv) {
     std::vector<char*> arguments(argv, argv + argc);
     const std::optional<test::GpuTestOptions> options = test::ParseGpuTestOptions(std::span(arguments));
     const auto table = BakeReactionTable(MakeCombustionTestTable());
-    const std::optional<BakedReactionTable> faster = MakeFasterTable();
-    if (!options || !table || !faster) {
+    const std::optional<BakedReactionTable> changedTable = MakeChangedTable();
+    if (!options || !table || !changedTable) {
         Log(Channel::Sim, Level::Error, "使い方: gpu_play_metric_test [--warp] [--no-gbv](試験の表が作れない時も)");
         bicameral::SingletonFinalizer::Finalize();
 
@@ -348,7 +370,7 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    const int failures = RunTest(device->Get(), WithPrefixMetric(*table), *faster);
+    const int failures = RunTest(device->Get(), WithPrefixMetric(*table), *changedTable);
     const bool passed = failures == 0 && test::PassesValidation(*device, "gpu_play_metric_test");
     bicameral::SingletonFinalizer::Finalize();
 

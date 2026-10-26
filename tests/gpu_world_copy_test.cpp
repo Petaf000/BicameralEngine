@@ -7,9 +7,11 @@
 //       1. 本物のハッシュ列が基準と S(1)〜S(TICKS) で全部一致(写しは本物を変えない。D-403)
 //       2. 写しに本物と同じコマンド(FORK_TICK 以降)を当てて TICKS まで → 写しのハッシュ列(セル + 物)が基準と全部一致
 //       3. 写しのセルのハッシュが CPU リファレンス(ProbeReference + PhysicsWorld。物理の熱を次の刻みの初めにセルへ足す。T-0561)と
-//          毎刻み一致・読み戻したセルの木の量が CPU と同じ(10 刻みごと)
-//   - 同じ写しを使い直す: 本物が刻み SECOND_TICK に来たら、コマンドを当てずに写しを取り直し、条件「木の量が閾値以下」で止める。
-//     止まった刻みが、CPU リファレンスで同じ条件を数えた刻みと同じ(閾値は CPU の木の量の道のりから決める)・
+//          毎刻み一致・読み戻したセルの木の量と最高温度が CPU と同じ(10 刻みごと)
+//   - 同じ写しを使い直す: 本物が刻み SECOND_TICK に来たら、コマンドを当てずに写しを取り直し、条件「最高温度が閾値以下」で止める。
+//     止まった刻みが、CPU リファレンスで同じ条件を数えた刻みと同じ(閾値は CPU の最高温度の道のりから決める)・
+//     (条件は木の量だったが、現実の伝導率〔T-1066〕では火をつけたセルが 1 刻み目に熱分解し、刻み 40 から木の量が変わらない。
+//      火をつけたセルが冷める最高温度で止める。T-1163)
 //     止まるまでのセルのハッシュが CPU と一致・つつきを当てていないので基準と違う刻みがある
 //   - 重さの集め方(T-0413・ADR-0204): 本物はばらばらの単位の数(刻みがフレームをまたぐ)で流しても、sim::TickCostAccumulator が
 //     全部の刻みの重さを集め、活性のブロック数が要約と同じ。写しは全部の刻みに GPU の時間があり、活性のブロック数が基準の同じ刻みと
@@ -55,7 +57,7 @@ namespace {
     constexpr uint64_t SECOND_TICK = 40;  // 写しを使い直す刻み(1 つ目の早送りが終わった後)
     constexpr uint64_t SECOND_LIMIT = 60;
     constexpr uint64_t DIVERGING_POKE_TICK = 50;  // 使い直した写しに当てないつつき
-    constexpr uint64_t THRESHOLD_SAMPLE = 4;      // 2 つ目の閾値 = CPU の木の量の道のりの、この番目の読み戻しの値
+    constexpr uint64_t THRESHOLD_SAMPLE = 4;      // 2 つ目の閾値 = CPU の最高温度の道のりの、この番目の読み戻しの値
     constexpr uint32_t SAMPLE_INTERVAL = 10;
     constexpr uint64_t COPY_TICKS_PER_FRAME = 16;  // 読み戻す刻み(10 刻みごと)で切れる
     constexpr std::array<uint32_t, 5> FRAME_UNITS = {3, 7, 5, 11, 4};
@@ -117,10 +119,11 @@ namespace {
         }
     };
 
-    // CPU リファレンスで見た道のり(刻み → セルのハッシュ、読み戻す刻み → 木の量)
+    // CPU リファレンスで見た道のり(刻み → セルのハッシュ、読み戻す刻み → 木の量・最高温度)
     struct ReferencePath {
         std::map<uint64_t, uint64_t> cellHashes;
         std::map<uint64_t, uint64_t> wood;
+        std::map<uint64_t, uint64_t> peak;  // 最高温度(mK)
     };
 
     // CPU の世界: セル(ProbeReference)と物(PhysicsWorld)。物理の刻み t の熱の入口を刻み t + 1 の初めにセルへ足す(GPU と同じ。T-0561)
@@ -151,8 +154,10 @@ namespace {
     void Record(const ProbeReference& reference, uint64_t tick, uint64_t sampleStart, uint32_t cellulose,
                 ReferencePath& path) {
         path.cellHashes[tick] = reference.StateHash(tick);
-        if (tick >= sampleStart && (tick - sampleStart) % SAMPLE_INTERVAL == 0)
+        if (tick >= sampleStart && (tick - sampleStart) % SAMPLE_INTERVAL == 0) {
             path.wood[tick] = ProbeSpeciesAmount(reference.State(tick), cellulose);
+            path.peak[tick] = ProbeMaxTemperature(reference.Caches(tick));
+        }
     }
 
     // CPU リファレンス: コマンドありで TICKS まで(full)と、SECOND_TICK からコマンドなしで SECOND_LIMIT 刻み(second)
@@ -313,6 +318,7 @@ namespace {
         std::map<uint64_t, uint64_t> worldHashes;
         std::map<uint64_t, uint64_t> cellHashes;
         std::map<uint64_t, uint64_t> wood;
+        std::map<uint64_t, uint64_t> peak;
         std::map<uint64_t, uint32_t> blocks;     // 活性のブロック数(T-0413)
         std::vector<frame::WeightTick> weights;  // 刻みごとの重さ(GPU の時間が 0 の刻みは入れない)
         bool weightsAligned = false;             // tickGpuTimestampTicks が hashes と同じ数
@@ -369,17 +375,18 @@ namespace {
 
         // --- CPU リファレンス ---
         const auto [referenceFull, referenceSecond] = RunReference(table, scene, cellulose);
-        const uint64_t threshold = std::next(referenceSecond.wood.begin(), THRESHOLD_SAMPLE)->second;
+        const uint64_t threshold = std::next(referenceSecond.peak.begin(), THRESHOLD_SAMPLE)->second;
         uint64_t expectedEnd = 0;
-        for (const auto& [tick, amount] : referenceSecond.wood) {
+        for (const auto& [tick, amount] : referenceSecond.peak) {
             if (amount <= threshold) {
                 expectedEnd = tick;
                 break;
             }
         }
 
-        Log(Channel::Sim, Level::Info, "CPU: 刻み {} からの木の量 {} → {}(閾値 {}・着く刻み {})", SECOND_TICK,
-            referenceSecond.wood.begin()->second, referenceSecond.wood.rbegin()->second, threshold, expectedEnd);
+        Log(Channel::Sim, Level::Info, "CPU: 刻み {} からの木の量 {} → {}・最高温度 {} → {} mK(閾値 {}・着く刻み {})",
+            SECOND_TICK, referenceSecond.wood.begin()->second, referenceSecond.wood.rbegin()->second,
+            referenceSecond.peak.begin()->second, referenceSecond.peak.rbegin()->second, threshold, expectedEnd);
 
         // --- 写しを取りながら本物を流す ---
         auto copy = WorldCopy::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, real->simulation->Table(),
@@ -414,9 +421,10 @@ namespace {
                                          if (sample.cells.empty())
                                              return false;
 
-                                         const uint64_t amount = ProbeSpeciesAmount(sample.cells, cellulose);
-                                         path.wood[sample.tick] = amount;
-                                         return !startFirst && amount <= threshold;
+                                         path.wood[sample.tick] = ProbeSpeciesAmount(sample.cells, cellulose);
+                                         const uint64_t peak = ProbeMaxTemperature(sample.thermal);
+                                         path.peak[sample.tick] = peak;
+                                         return !startFirst && peak <= threshold;
                                      }};
                 return copy->RecordStart(*real->simulation, tick, std::move(query));
             }
@@ -452,7 +460,8 @@ namespace {
         failures.Check(CountMismatches(first.cellHashes, referenceFull.cellHashes, FORK_TICK + 1, TICKS,
                                        "1 つ目の写し と CPU") == 0,
                        "写しのセルのハッシュが CPU リファレンスと毎刻み同じ");
-        failures.Check(first.wood == referenceFull.wood, "読み戻した木の量が CPU と同じ(10 刻みごと)");
+        failures.Check(first.wood == referenceFull.wood && first.peak == referenceFull.peak,
+                       "読み戻した木の量と最高温度が CPU と同じ(10 刻みごと)");
 
         // --- 使い直した写し(コマンドなし・条件で止まる)---
         const WorldCopyResult& result = copy->Result();
@@ -470,8 +479,9 @@ namespace {
         failures.Check(result.endTick > DIVERGING_POKE_TICK && diverged,
                        "つつきを当てない写しは本物と違う(コマンドが効いている)");
         for (const auto& [tick, amount] : second.wood) {
-            failures.Check(referenceSecond.wood.contains(tick) && referenceSecond.wood.at(tick) == amount,
-                           "使い直した写しの木の量が CPU と同じ");
+            failures.Check(referenceSecond.wood.contains(tick) && referenceSecond.wood.at(tick) == amount &&
+                               second.peak.at(tick) == referenceSecond.peak.at(tick),
+                           "使い直した写しの木の量と最高温度が CPU と同じ");
         }
 
         // --- 重さの集め方(T-0413。決定的な値 = 刻みの数と活性のブロック数で比べる)---
