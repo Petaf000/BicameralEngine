@@ -82,11 +82,7 @@ namespace bicameral::sim {
             FxDivU128By64(FxMulU64Full(tensile * tensile * dx, dx * dx * MICRO), 2 * stiffness).quotient, 1);
         m_softening = std::min(FxDivU128By64(FxMulU64Full(m_faceSurfacePj, ONE), m_faceUnitPj).quotient, SOFTENING_CAP);
 
-        // 1 刻みに進む割合 = 速さ × 刻み ÷ セル(1 を超えたら 1。小刻みの道〔D-612 (a)〕は T-0943)
-        const uint64_t step = FxDivU128By64(FxMulU64Full(m_strength.crackSpeedMmPerS * m_fracture.stepUs, ONE),
-                                            MICRO * dx)
-                                  .quotient;
-        m_speedStep = (uint32_t)std::clamp<uint64_t>(step, 1, ONE);
+        m_speedStep = SpeedStepFor(dx);
         m_rootStrength = FxSqrtU64(m_strength.compressiveKpa * tensile);
         // 割れの判定の長さ ℓ = 硬さ × 割れ面のエネルギー ÷ 引きの強さ²(Irwin の長さ。D-644 = ADR-0448 の (C))。法則の下限 ℓ_min 0.5 m
         // (kPa × mJ/m² ÷ kPa² = 10^-3 m → ÷ 1000 で mm)
@@ -105,6 +101,7 @@ namespace bicameral::sim {
 
     void SupportFracture::Rebuild() {
         auto next = std::make_unique<SupportLaw>(m_scene, m_options);
+        ++m_ledger.rebuilds;
         if (m_law != nullptr)
             next->CarryFrom(*m_law);
 
@@ -354,11 +351,22 @@ namespace bicameral::sim {
         Rebuild();
     }
 
+    // 1 刻みに進む割合の上限 = 速さ × 刻み ÷ 割れが渡る幅(1 を超えたら 1。小刻みの道〔D-612 (a)〕は T-0943)。
+    // 幅は 1 本目・2 本目なら面 1 つ(セル)、3 本目なら持ち主の区間の面の幅の和(T-1135: 面の幅で割ると、区間に面が多いほど
+    // 区間全体が速く割れ切り、細かさで割れ切るまでの時間が変わった)
+    uint32_t SupportFracture::SpeedStepFor(uint64_t widthMm) const {
+        const FxU128 travel = FxMulU64Full(m_strength.crackSpeedMmPerS * m_fracture.stepUs, ONE);
+        const uint64_t step = FxDivU128By64(travel, MICRO * std::max<uint64_t>(widthMm, 1)).quotient;
+
+        return (uint32_t)std::clamp<uint64_t>(step, 1, ONE);
+    }
+
     // --- 3 本目(T-1042・T-1069): 割れの面を線ごとの「面の続き」(割れ切っていない面の並び)に分け、続きの両端
     //     (物の表面・割れ切った面)から ℓ ずつの区間で判定する(世界の原点にそろえない = 置く場所によらない)。
     //     面は近い方の端から数えた区間に属し(持ち主の区間)、持ち主の区間の面は一緒に進む。
     //     強さの判定 = 区間の範囲(端から k ℓ〜(k + 1) ℓ。続きが 2ℓ より短ければ反対の半分にかかる)の応力の平均。
-    //     エネルギーと進み = 持ち主の区間の面の平均(同じ進みで、その平均のエネルギーで進めるので、熱 ≥ 0 が区間ごとに成り立つ)
+    //     エネルギーと進み = 持ち主の区間の面の平均(同じ進みで、その平均のエネルギーで進めるので、熱 ≥ 0 が区間ごとに成り立つ)。
+    //     進む割合の上限 = 速さ × 刻み ÷ 持ち主の区間の幅(面の数 × セル。T-1135)
     bool SupportFracture::WindowStep() {
         const size_t cells = (size_t)m_scene.width * m_scene.height;
         const uint64_t dx = m_scene.cellMm;
@@ -521,7 +529,8 @@ namespace bicameral::sim {
                 continue;
 
             // 共通の届く所。区間の熱が負なら(面の進みがそろっていない時など)、熱 ≥ 0 の所まで二分で下げる(T-1103。坂を下る所までしか進まない)
-            uint32_t reach = window.progress + std::min(window.target - window.progress, m_speedStep);
+            const uint32_t speedStep = SpeedStepFor(window.count * m_scene.cellMm);
+            uint32_t reach = window.progress + std::min(window.target - window.progress, speedStep);
             if (WindowHeat(faces, nextOf, firstOf[w], reach) < 0) {
                 uint32_t low = window.progress;
                 uint32_t high = reach;

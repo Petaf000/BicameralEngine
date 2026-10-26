@@ -310,6 +310,7 @@ namespace {
 
     void CheckFineLedger(const sim::SupportFracture& fracture, const sim::SupportFractureLedger& ledger,
                          std::string_view label);
+    std::string WhereFine(const sim::SupportFracture& fracture);
 
     // 割れの形(refine なら割れかけの所を細かくする道 = T-1067・T-1134)
     sim::SupportFractureOptions FractureOptions(sim::FractureRule rule, bool refine) {
@@ -441,9 +442,11 @@ namespace {
                                               refine ? "・下りる" : "");
         const Outcome outcome = RunStages(fracture, 10, [](uint32_t) {}, label);
         CheckAnyLedger(fracture, outcome, rule, label);
+        // 下りた時は割れが細かい面にあるので細かい格子の場所も(粗い面の場所は 2 つの細かい面が割れ切った所だけ)
+        const std::string fineWhere = refine ? "・細かい格子 " + WhereFine(fracture) : std::string();
         LogOutcome(label, fracture, outcome,
-                   std::format("割れ始め {} 刻み({:.3f} 秒)・分かれた {} 刻み({:.3f} 秒)", outcome.startTick,
-                               outcome.startTick / 60.0, outcome.brokenTick, outcome.brokenTick / 60.0));
+                   std::format("割れ始め {} 刻み({:.3f} 秒)・分かれた {} 刻み({:.3f} 秒){}", outcome.startTick,
+                               outcome.startTick / 60.0, outcome.brokenTick, outcome.brokenTick / 60.0, fineWhere));
 
         return outcome.brokenTick;
     }
@@ -893,6 +896,96 @@ namespace {
             root.where, first.where, closest.where);
     }
 
+    // 下りる道の 1 刻みの費用の内訳(T-1134 の残り・ADR-0469 の 5-3 の材料。CPU・release): 刻みを、法則を作り直した刻み
+    // (割れが進んだ・分けた・戻した)と作り直さない刻みに分け、さらに細かいセルがいちばん多い時の場面で、法則を作る(+ 温めた始まりの移し替え)
+    // 時間と、釣り合いを解く(SupportLaw::Step)時間を別に測る。作り直さない刻み − 解く = 割れの読み(面の力・区間・細かくする判定)
+    void MeasureRefineCost(std::string_view name, const BeamShape& shape, uint32_t startKn) {
+        sim::SupportFractureOptions options{.rule = sim::FractureRule::Window};
+        options.refine = true;
+        const sim::SupportScene scene = Cantilever(500, shape);
+        sim::SupportFracture fracture(scene, {}, Strength(), options);
+        std::vector<uint32_t> loaded;
+        for (uint32_t up = 0; up < scene.height; ++up) {
+            for (uint32_t x = 0; x < scene.width; ++x) {
+                const size_t at = x + (size_t)scene.width * up;
+                if (scene.solid[at] != 0 && Center(x, 500) > shape.lengthMm)
+                    loaded.push_back((uint32_t)at);
+            }
+        }
+
+        // --- 刻みごとの時間を、作り直した刻みと作り直さない刻みに分ける ---
+        const auto millisecondsSince = [](chr::steady_clock::time_point begin) {
+            return chr::duration<double, std::milli>(chr::steady_clock::now() - begin).count();
+        };
+        double loadMs = 0.0;
+        double rebuildMs = 0.0;
+        double plainMs = 0.0;
+        uint32_t rebuildTicks = 0;
+        uint32_t plainTicks = 0;
+        uint32_t busiestFine = 0;
+        sim::SupportScene busiest = fracture.Scene();
+        for (uint32_t stage = 0; stage < 400 && fracture.Ledger().separatedCells == 0; ++stage) {
+            std::vector<int64_t> loads(scene.solid.size(), 0);
+            const auto perCell = (int64_t)((uint64_t)(startKn + stage) * 1000 * 500 / loaded.size());
+            for (const uint32_t at : loaded)
+                loads[at] = perCell;
+
+            const auto loadBegin = chr::steady_clock::now();
+            fracture.SetLoads(loads);
+            loadMs += millisecondsSince(loadBegin);
+            for (uint32_t i = 0; i < SETTLE_TICKS && fracture.Ledger().separatedCells == 0; ++i) {
+                const uint32_t before = fracture.Ledger().rebuilds;
+                const auto begin = chr::steady_clock::now();
+                fracture.Step();
+                const double ms = millisecondsSince(begin);
+                const bool rebuilt = fracture.Ledger().rebuilds != before;
+                (rebuilt ? rebuildMs : plainMs) += ms;
+                ++(rebuilt ? rebuildTicks : plainTicks);
+                if (fracture.Ledger().fineCells > busiestFine) {
+                    busiestFine = fracture.Ledger().fineCells;
+                    busiest = fracture.Scene();
+                }
+            }
+        }
+
+        // --- 細かいセルがいちばん多い時の場面で、作る時間と解く時間 ---
+        constexpr uint32_t BUILDS = 20;
+        constexpr uint32_t SOLVES = 200;
+        sim::SupportLaw law(busiest, {});
+        const auto buildBegin = chr::steady_clock::now();
+        for (uint32_t i = 0; i < BUILDS; ++i) {
+            sim::SupportLaw next(busiest, {});
+            next.CarryFrom(law);
+        }
+
+        const double buildMs = millisecondsSince(buildBegin) / BUILDS;
+        const auto solveBegin = chr::steady_clock::now();
+        for (uint32_t i = 0; i < SOLVES; ++i)
+            law.Step();
+
+        const double solveMs = millisecondsSince(solveBegin) / SOLVES;
+        const uint32_t ticks = rebuildTicks + plainTicks;
+        const double totalMs = loadMs + rebuildMs + plainMs;
+        const double plainMean = plainMs / std::max<uint32_t>(plainTicks, 1);
+        const double rebuildMean = rebuildMs / std::max<uint32_t>(rebuildTicks, 1);
+        Expect(ticks > 0 && fracture.Ledger().separatedCells > 0, std::format("費用の測り({}): 折れた", name));
+        Log(Channel::Sim, Level::Info,
+            "下りる道の費用({}・0.5 m・ℓ 0.5 m): {} 刻みに {:.0f} ms({:.3f} ms/刻み)/ 作り直した刻み {}({:.3f} "
+            "ms/刻み・計 {:.1f} %)・"
+            "作り直さない刻み {}({:.3f} ms/刻み・計 {:.1f} %)・荷を置いた {} 回(計 {:.1f} %)/ 細かいセル 最大 {}・セル "
+            "{} の場面で "
+            "作る + 移す {:.3f} ms・解く {:.3f} ms/刻み・割れの読み(作り直さない刻み − 解く){:.3f} ms/刻み",
+            name, ticks, totalMs, totalMs / std::max<uint32_t>(ticks, 1), rebuildTicks, rebuildMean,
+            100.0 * rebuildMs / totalMs, plainTicks, plainMean, 100.0 * plainMs / totalMs,
+            fracture.Ledger().rebuilds - rebuildTicks, 100.0 * loadMs / totalMs, busiestFine, law.CellCount(), buildMs,
+            solveMs, plainMean - solveMs);
+    }
+
+    void RunRefineCost() {
+        MeasureRefineCost("A 片持ち梁(厚さ 1 m)", {}, 46);
+        MeasureRefineCost("厚い梁(厚さ 2 m)", {.bottomMm = 2000, .thicknessMm = 2000, .lengthMm = 3000}, 55);
+    }
+
     // ほかの場面でも下りる道が 0.25 m の答えに合うか(T-1134): B・C・D・厚い梁を 0.5 m / 0.25 m / 0.5 m + 下りる で(ℓ 0.5 m の平均)
     void RunRefineScenes() {
         constexpr auto WINDOW = sim::FractureRule::Window;
@@ -925,6 +1018,13 @@ namespace {
         const uint32_t shelfFine = TestShelf(250, WINDOW);
         const uint32_t shelfRefine = TestShelf(500, WINDOW, 0, true);
         Expect(shelfRefine > 0, std::format("D: 下りても折れる(分かれた刻み {})", shelfRefine));
+        // 割れの先が区間を渡る速さが細かさによらない(T-1135: 速さ × 刻み ÷ 区間の幅。面の幅で割った時は 11 / 12 / 5 刻み)
+        const auto closeTicks = [](uint32_t a, uint32_t b) {
+            return a + 2 >= b && b + 2 >= a;
+        };
+        Expect(closeTicks(shelfCoarse, shelfFine) && closeTicks(shelfRefine, shelfFine),
+               std::format("D: 分かれた刻みが細かさによらない(±2 刻み): {} / {} / {}", shelfCoarse, shelfFine,
+                           shelfRefine));
         summary += std::format("D すぐ折れる棚(分かれた刻み): 0.5 m {} / 0.25 m {} / 下りる {}\n", shelfCoarse,
                                shelfFine, shelfRefine);
 
@@ -1059,6 +1159,10 @@ int main(int argc, char** argv) {
         RunRefine();
         exitCode = failureCount == 0 ? 0 : 1;
         Log(Channel::Sim, Level::Info, "support_fracture_test --refine: {}", exitCode == 0 ? "OK" : "FAILED");
+    } else if (mode == "--refine-cost") {
+        RunRefineCost();
+        exitCode = failureCount == 0 ? 0 : 1;
+        Log(Channel::Sim, Level::Info, "support_fracture_test --refine-cost: {}", exitCode == 0 ? "OK" : "FAILED");
     } else if (mode == "--refine-scenes") {
         RunRefineScenes();
         exitCode = failureCount == 0 ? 0 : 1;
