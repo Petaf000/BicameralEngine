@@ -835,6 +835,7 @@ namespace bicameral::sim {
             const uint32_t count = area.offsets[MR_BLOCK_CELLS];
             area.species.resize(count);
             area.amounts.resize(count);
+            area.layers.clear();  // GPU は溢れの成分の層を知らない(読んだ列で並びが変わる。層の付け替えは T-1221)
             for (uint32_t entry = 0; entry < count; ++entry) {
                 const uint32_t word = MrWideEntryWord(entry);
                 area.species[entry] = logical(word);

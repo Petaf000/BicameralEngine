@@ -75,19 +75,65 @@ namespace bicameral::sim {
             nest.counters[MR_COUNTER_FOLDED] += 1;
         }
 
-        // 値 1 つに戻して、頁を返す(溢れを使う世界は一様の値の溢れを空に)
+        // 値 1 つに戻して、頁を返す(溢れを使う世界は一様の値の溢れを空に。一様の値の層は 0。層まで一様な頁は FoldLayeredPage)
         void FoldPage(MultiresNest& nest, uint32_t slot, const RxCell& value) {
             UniformAt(nest, slot) = value;
             if (nest.wideCells)
                 nest.uniformOverflow[slot] = {};
 
+            nest_detail::ClearUniformLayers(nest, slot);
             ReleaseFoldedPage(nest, slot);
         }
 
         // 上限の無い値 1 つ(インライン + 一様の値の溢れ)に戻して、頁を返す(T-0199)
         void FoldWidePage(MultiresNest& nest, uint32_t slot, const RxWideCell& value) {
             StoreWideUniform(nest, slot, value);
+            nest_detail::ClearUniformLayers(nest, slot);
             ReleaseFoldedPage(nest, slot);
+        }
+
+        // --- 層(T-1220。ADR-0489)---
+
+        // 覆われていないセルのどれかに舞う粒(層を使う世界で、粒の物質の 量 > 層)があるか(あれば眠らない)
+        bool PageHasFloatingGrain(const MultiresNest& nest, uint32_t slot) {
+            if (!nest.cellLayers.enabled)
+                return false;
+
+            const MrBlock& block = nest.blocks[slot];
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                if (MrIsCoveredCell(block, index))
+                    continue;
+
+                const std::vector<uint64_t> layers = LoadWideNestCellLayers(nest, slot, index);
+                if (nest_detail::HasFloatingGrain(nest, LoadWideNestCell(nest, slot, index), layers))
+                    return true;
+            }
+
+            return false;
+        }
+
+        // 層まで一様なら層ごと値 1 つに畳む(層のある頁・層を使う世界の FoldExact)。舞う粒が残る頁は畳まない。畳んだら true
+        bool FoldLayeredPage(MultiresNest& nest, uint32_t slot) {
+            const std::optional<RxWideCell> value = ExactWideFoldValue(nest, slot);
+            if (!value)
+                return false;
+
+            const MrBlock& block = nest.blocks[slot];
+            const uint32_t valueCell = MrFoldValueCell(block);
+            const std::vector<uint64_t> layers = valueCell < MR_BLOCK_CELLS
+                                                     ? LoadWideNestCellLayers(nest, slot, valueCell)
+                                                     : std::vector<uint64_t>{};
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                if (!MrIsCoveredCell(block, index) && LoadWideNestCellLayers(nest, slot, index) != layers)
+                    return false;
+            }
+
+            if (nest_detail::HasFloatingGrain(nest, *value, layers))
+                return false;
+
+            FoldWidePage(nest, slot, *value);
+            nest_detail::SetUniformLayers(nest, slot, *value, layers);
+            return true;
         }
 
         // ビット単位で一様なら畳む(溢れのある頁は溢れまで同じ時だけ)。畳んだら true
@@ -97,9 +143,9 @@ namespace bicameral::sim {
             if (!nest_fields::PageFoldable(nest, slot))                  // 登録した欄が一様でなければ畳まない(T-0711)
                 return false;
 
-            if (nest_detail::PageHasLayers(nest,
-                                           nest.blocks[slot].page))  // 層のある頁は畳まない(1 段目。一様の層は T-1220)
-                return false;
+            // --- 層のある頁・層を使う世界は層まで一様な時だけ(T-1220)---
+            if (nest.cellLayers.enabled || nest_detail::PageKeepsLayers(nest, nest.blocks[slot].page))
+                return FoldLayeredPage(nest, slot);
 
             if (PageHasOverflow(nest, nest.blocks[slot].page)) {
                 const std::optional<RxWideCell> wide = ExactWideFoldValue(nest, slot);
@@ -255,7 +301,8 @@ namespace bicameral::sim {
             if (!nest_fields::PageFoldable(nest, slot))  // 欄はビット単位で一様な時だけ畳む(仮。T-0711)
                 return false;
 
-            if (nest_detail::PageHasLayers(nest, nest.blocks[slot].page))  // 層のある頁は畳まない(1 段目。T-1210)
+            // --- 層のある頁は平均で畳まない(層まで一様な時だけ FoldExact が畳む)・舞う粒のある頁は眠らない(T-1210・T-1220)---
+            if (nest_detail::PageHasLayers(nest, nest.blocks[slot].page) || PageHasFloatingGrain(nest, slot))
                 return false;
 
             if (nest.wideCells) {
