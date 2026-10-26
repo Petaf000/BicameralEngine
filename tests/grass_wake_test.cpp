@@ -184,6 +184,7 @@ namespace {
         world.blockStates.push_back({.flags = rx::OH_BLOCK_EXPOSED});
         world.waits.push_back({.changedTick = tick, .wakeTick = 0});
         world.heats.push_back(rx::OhVoxelHeat{});
+        world.gasStarts.push_back(rx::OhVoxelGas{});
         world.flows.push_back(rx::OhZeroFlow());
         world.ranges[0].objectCount += 1;
         bed.objects[BedIndex(x, z)] = static_cast<int32_t>(index);
