@@ -58,7 +58,7 @@ namespace bicameral::sim {
         FractureRule rule = FractureRule::Energy;
         uint64_t stepUs = 16667;  // 1 刻み(µs。60 刻み/秒)
 
-        // --- 割れかけの所を細かくする(T-1067)---
+        // --- 割れかけの所を細かくする(T-1067。値は D-675〔2026-10-26 ユーザー決定〕で今のまま確定)---
         bool refine = false;
         uint32_t refineIndex = 32768;  // 分ける強さの比(Q16。1/2)
         uint32_t refineRing = 1;  // 分ける周り(比が線を超えた面の両側のセルから、この数のセルまで。チェビシェフの距離)
