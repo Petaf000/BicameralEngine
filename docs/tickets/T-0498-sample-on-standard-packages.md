@@ -73,3 +73,5 @@
 - 型検査: `local real: PackageEntry = require("@real_matter")` は表のリテラルの型が PackageEntry に入らず落ちたので、any で受けて物質の表に型を付けた。
 - CPU の試験 48 本が通った(1 回目は物質 9 種の前提で 6 本落ち → 直した)。archmap --check OK。
 - GPU・窓の最小の組 19 本が通った(2026-10-15)。
+
+- **2026-10-26 本体の棚卸し(QUESTIONS Q65)**: サンプルを標準パッケージの上に作り直した時の仮 → ①② 閉じた(棚へ書き戻さない・初めの空気は今のまま。D-539)・③ もう要らない(本体は package.luau の game = true で決まる。ADR-0250)。

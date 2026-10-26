@@ -62,3 +62,5 @@
   気体の試験は環境を StandardWorldPhysics(粘り 0)で書き直しているので値は変わらない(standard_world_physics.h に仮の値の写し
   STANDARD_GAS_EDDY_VISCOSITY_MM2_PER_S を足し、StandardWorldPhysics() には入れない)。standard_packages・environment_package の比べ方だけ直した。
 - 凍結の多重解像度の気体の木(gas_tree・gpu_gas_tree)は粘りを持たないまま(MakeGasTree の assert。エンジンの中で表の環境から木を作る所は無い)。
+
+- **2026-10-26 本体の棚卸し(QUESTIONS Q121)**: 気体が静まる値の置き場と静止の丸め → ① もう要らない(D-516)・②③ 閉じた(既定の値は場面で・RrShouldRest の形。D-539)。

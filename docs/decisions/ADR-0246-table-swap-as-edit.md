@@ -34,3 +34,5 @@
 - ADR-0047 §6(差し替えたら保存点を捨てる)・T-0299 の「差し替えより前へは戻さない」を置き換えた。ADR-0236 の影響の最後の段落(Q64 ⑤)を解いた。
 - window_hot_reload_game の --auto-rewind は、差し替えより前の刻み 0 の保存点へ戻る形になった(表も戻り、印でまた差し替わる)。
 - 試験: edit_table(CPU)・window_play_table_record/play(--auto-play-table。手順は frame/auto_play.h)。
+
+- **2026-10-26 本体の棚卸し(QUESTIONS Q76)**: 表の差し替えを編集として扱った時の仮 2 つ → 閉じた(ファイルが正本・Ctrl+Z は世界の編集だけ。D-539)。

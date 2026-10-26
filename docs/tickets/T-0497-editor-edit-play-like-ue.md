@@ -83,3 +83,5 @@
   window_play_record/play(--auto-play: 刻み 2 で Undo 2 回・Redo 2 回が合い、プレイ → やめるで戻って 2 回のプレイの 50 刻みが同じ・置いた後の 40 刻みが違う)・
   --play を足した window_blank/mixer/rebuild/copy/metrics/hot_reload/table_edit/place/place_tick0/mix_start/lab×3・
   再生の window_replay_editor/rewind・window_blank_rewind が通った。archmap OK。window_patch_record は wt4(T-0496)が消すので触っていない。
+
+- **2026-10-26 本体の棚卸し(QUESTIONS Q64)**: エディタの編集の状態とプレイの仮 → ②③ 閉じた(今の仮を決定扱い: キー F5/Space・Esc・Space・N・Ctrl+Y、プレイ中の Undo の幅 720 刻み。値で選べ作りは変わらない。D-539)。①④⑤ は前に閉じた。

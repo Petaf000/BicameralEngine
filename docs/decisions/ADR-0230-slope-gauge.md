@@ -23,3 +23,5 @@
   標準パッケージ real_matter の炭・セルロースに `condensed = true`(表の版が変わる。世界は変わらない)。
 - sim/reaction_slope に RuleNetTerms・RuleStandardGibbs(ベイクの検査と計器が同じ ΔG° を使う)。
 - MeasurePlayMetricReference に刻みごとの見張り(PlayMetricReferenceWatch。省けば今までどおり)。
+
+- **2026-10-26 本体の棚卸し(QUESTIONS Q73)**: 坂の計器の仮 2 つ → ① もう要らない(相は phase 1 本。D-512)・② 閉じた(案 A: 場面を CPU で流して数える。D-539)。

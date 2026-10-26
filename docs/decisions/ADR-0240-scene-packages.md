@@ -30,3 +30,5 @@ D-486: ⑤ の各場面(T-0414〜T-0416)の中身は、作り手と同じやり�
 - 2 の回避を外した: ゲーム本体はマニフェストの `game = true` で決まる(名前に依らない。ADR-0250。仮)。場面のパッケージに `game = true` を書き、
   フォルダを `data/scenes/grass_fire_river/grass_fire_river` に直した。起動は `bicameral --packages data/scenes/grass_fire_river`
   (ブランクの世界のまま。`--world sample` は要らない)。
+
+- **2026-10-26 本体の棚卸し(QUESTIONS Q75)**: 草原の延焼の最小の版の仮 3 つ → もう要らない(A 場面の置き場は ADR-0250・B 試験の倍率は D-511・D-637 で外した・C 草の物質はゲームの中身 D-539)。

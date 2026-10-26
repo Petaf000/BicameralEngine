@@ -47,3 +47,7 @@
 - 作り手: 環境の world_edges の open が MR の液体にも効く(池の堤を消すと開いた横の端から出る = 設計 20 例 3)。真空の open では液体は出ない(閉じた面)。
 - MR の液体の報告 MultiresLiquidStepReport に edge(端の面の運動量の出入り)・edgeMilligrams(外へ出た質量)を足した(仮の世界の報告から派生)。
 - 当てる段に TxFaceFieldIsOwn・TxApplyPacketSide・World::AddEdgePacket を足した(TxApplyPacket は残す)。
+
+- **2026-10-26 本体の棚卸し(QUESTIONS Q124)**: 開いた端の液体の面の運動量 → もう要らない(案 B。D-550)。
+
+- **2026-10-26 本体の棚卸し(QUESTIONS Q125)**: 大気の無い世界で端を open にした時の液体 → 閉じた(閉じた面として扱う。D-539)。

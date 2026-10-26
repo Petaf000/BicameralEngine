@@ -34,3 +34,5 @@
 - 作り手: 環境に world_edges を書けば、MR の世界の端が基準の大気を外として効く(呼ぶ口は縦切りの段)。大気を書かずに open なら注意が出る。
 - 上の軸は y(D-518): WE_UP_AXIS = 1 にした(端と気体は直さず、^multires_ ほかが通った)。MR の液体を従わせるのは T-0774。
 - 名前: WeLevelZeroUp・WeOutsideUp・columnBaseUp。MultiresGasOptions の端の欄は消した。
+
+- **2026-10-26 本体の棚卸し(QUESTIONS Q123)**: 世界の端を環境から作る時の仮 2 つ → 閉じた(端の層と同じ高さの大気・大気の無い open は真空 + 注意。D-539)。
