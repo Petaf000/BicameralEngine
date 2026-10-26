@@ -228,6 +228,8 @@ bicameral_add_shader(sim/object_heat.hlsl PROFILE cs_6_8 ENTRY OhListMark NAME o
 bicameral_add_shader(sim/object_heat.hlsl PROFILE cs_6_8 ENTRY OhListTotals NAME object_heat_list_totals)
 bicameral_add_shader(sim/object_heat.hlsl PROFILE cs_6_8 ENTRY OhListPlace NAME object_heat_list_place)
 bicameral_add_shader(sim/object_heat.hlsl PROFILE cs_6_8 ENTRY OhFinishObjects NAME object_heat_finish_objects)
+# 物のまわりの空気の層の流れ(物 1 つ = 1 グループで 1 刻みを中で回す研究の形。T-1200。比べと費用は tests/gpu_object_shell_flow_test.cpp)
+bicameral_add_shader(sim/object_shell_flow.hlsl PROFILE cs_6_8 ENTRY OhShellFlowTick NAME object_shell_flow)
 # 物の熱の囲むセルを多重解像度の世界と写し合う(多重解像度のルート署名 + 外の u4・u5。T-1077。呼ぶ順は tests/gpu_object_heat_nest_test.cpp)
 bicameral_add_shader(sim/object_heat_nest.hlsl PROFILE cs_6_8 ENTRY OhNestGather NAME object_heat_nest_gather)
 bicameral_add_shader(sim/object_heat_nest.hlsl PROFILE cs_6_8 ENTRY OhNestMarkExpand NAME object_heat_nest_mark_expand)
