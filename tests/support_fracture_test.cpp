@@ -1018,13 +1018,20 @@ namespace {
         const uint32_t shelfFine = TestShelf(250, WINDOW);
         const uint32_t shelfRefine = TestShelf(500, WINDOW, 0, true);
         Expect(shelfRefine > 0, std::format("D: 下りても折れる(分かれた刻み {})", shelfRefine));
-        // 割れの先が区間を渡る速さが細かさによらない(T-1135: 速さ × 刻み ÷ 区間の幅。面の幅で割った時は 11 / 12 / 5 刻み)
+        // 割れの先が区間を渡る速さの上限が細かさによらない(T-1135: 速さ × 刻み ÷ 区間の幅。面の幅で割った時は 11 / 12 / 5 刻み)。
+        // どの細かさでも、割れ始め(1 刻み目より後)から区間 ℓ 0.5 m を割れの速さ 5 m/s で渡る 6 刻みより早く分かれない。
+        // 0.5 m と下りる道(同じ 0.5 m の解き)は ±2 刻み。0.25 m は冷えた始まりの釣り合いの遅れで割れの先がエネルギーを待つ
+        // (速さの上限ではなく T-1041・T-1068 の側。T-1206 で固定した面を面の点の形にしたら 0.5 m が 11 → 7 刻み = 速さの上限に着き、
+        // 0.25 m の 12 → 13 刻みと ±2 に入らなくなった。T-1206 のチケット)
+        constexpr uint32_t CROSS_TICKS = (500 * 60 + 5000 - 1) / 5000;
         const auto closeTicks = [](uint32_t a, uint32_t b) {
             return a + 2 >= b && b + 2 >= a;
         };
-        Expect(closeTicks(shelfCoarse, shelfFine) && closeTicks(shelfRefine, shelfFine),
-               std::format("D: 分かれた刻みが細かさによらない(±2 刻み): {} / {} / {}", shelfCoarse, shelfFine,
-                           shelfRefine));
+        Expect(shelfCoarse > CROSS_TICKS && shelfFine > CROSS_TICKS && shelfRefine > CROSS_TICKS,
+               std::format("D: 割れの速さで区間を渡るより早く分かれない(> {} 刻み): {} / {} / {}", CROSS_TICKS,
+                           shelfCoarse, shelfFine, shelfRefine));
+        Expect(closeTicks(shelfCoarse, shelfRefine),
+               std::format("D: 0.5 m と下りる道の分かれた刻みが ±2 刻み: {} / {}", shelfCoarse, shelfRefine));
         summary += std::format("D すぐ折れる棚(分かれた刻み): 0.5 m {} / 0.25 m {} / 下りる {}\n", shelfCoarse,
                                shelfFine, shelfRefine);
 

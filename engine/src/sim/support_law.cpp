@@ -3,7 +3,10 @@
 //   BeamLattice の面(セル a → 隣 b、軸の向き n・横の向き t)のエネルギー(Euler–Bernoulli の梁を半分ずつ。22 §3.2 ①'):
 //     ½ ka (n_b − n_a)²  +  ½ ka (t_b − t_a ∓ (φ_a + φ_b))²  +  ½ (ka/3) (φ_b − φ_a)²
 //     (∓ は x の面で −・上の面で +。φ = 角 × dx ÷ 2 は反時計回りが正)
-//   固定した面(半分の長さの梁で動かない壁へ): ½ 2ka n²  +  ½ 8ka (t ± φ/2)²  +  ½ (2ka/3) φ²
+//   固定した面(面の点の形。T-1206): ½ 2ka n²  +  ½ 2ka (t ± φ)²  +  ½ (2ka/3) φ²
+//     3 つのばねを面(壁)の中心の点に置く(セルの剛体の動きで面の点へ: 横 t ± φ)。硬さは面と同じ規則(伸びとずれ E × 面積 ÷ 中心から壁 dx/2 = 2ka・
+//     曲げ E I ÷ dx/2 = 2ka/3 φ²)。T-1206 の前は半分の長さの梁(ずれ 12 E I / (dx/2)³ = 8ka を中心から dx/4 の点 t ± φ/2 に)で、
+//     ずれの点が面に無く、硬さが大きさで揃わなかった(違う大きさのセルの固定した面が並ぶ所で 14 %。ADR-0491)
 //   PerComponent: 面ごとに伸び縮み ka とずれ ka/2 のばね(回りなし)。固定した面は 2ka と ka。
 //   段の斜めの棒(stairBraces。T-0944): 下のセル a → 斜め上のセル c(横の向き s = ±1)に ½ (ka/24) (s Δx + Δup)²
 //     (斜めの長さ √2 dx・軸の硬さ ka/12 の棒。Δ = c − a)。x と上の面に ka/24・x ⇄ 上の結合は遅らせる。
@@ -434,7 +437,7 @@ namespace bicameral::sim {
         }
     }
 
-    // 分けたセルの固定した面は、向きの側の細かいセルへ(半分の長さの梁の式は大きさによらず同じ = 冒頭)
+    // 分けたセルの固定した面は、向きの側の細かいセルへ(面の点の式は大きさによらず同じ = 冒頭。T-1206)
     void SupportLaw::AddFineClamps(uint32_t cell) {
         const auto [fx, fup] = m_cells[cell];
         const uint8_t clamps = m_scene.clamps[fx / 2 + (size_t)m_scene.width * (fup / 2)];
@@ -649,7 +652,7 @@ namespace bicameral::sim {
         // (面だけでは正でない所がある。系の全体は正)
         BuildMixedBlocks(system.faces);
 
-        // 固定した面: ½ 12b n² + ½ 12b (2t + s φ)² + ½ 4b φ²(s は Lagged の AddClamp と同じ)
+        // 固定した面(面の点の形。T-1206): ½ 12b n² + ½ 12b (t + s φ)² + ½ 4b φ²(s は Lagged の AddClamp と同じ)
         for (const Clamp& clamp : m_clamps) {
             const uint64_t b = clamp.axis == 0 ? m_bondX : m_bondUp;
             const uint32_t along = clamp.axis == 0 ? SUPPORT_X : SUPPORT_UP;
@@ -660,7 +663,7 @@ namespace bicameral::sim {
             AddFixedTerm(fixed, 12 * b, gradient);
 
             gradient = {};
-            gradient[across] = 2;
+            gradient[across] = 1;
             gradient[SUPPORT_TURN] = clamp.axis == 0 ? clamp.side : -clamp.side;
             AddFixedTerm(fixed, 12 * b, gradient);
 
@@ -819,17 +822,17 @@ namespace bicameral::sim {
         const bool beam = m_options.form == SupportForm::BeamLattice;
         m_systems[along].fixedFaces.push_back({.node = clamp.cell, .coefficient = ImWide(12 * b), .value = 0});
         m_systems[across].fixedFaces.push_back(
-            {.node = clamp.cell, .coefficient = ImWide(beam ? 48 * b : 6 * b), .value = 0});
+            {.node = clamp.cell, .coefficient = ImWide(beam ? 12 * b : 6 * b), .value = 0});
         if (!beam)
             return;
 
-        // 8ka (t ± φ/2)²: φ の対角 2ka は容量・曲げ 2ka/3 は値 0 の固定した面・t ⇄ φ の 4ka は遅らせる
+        // 2ka (t ± φ)²(面の点の形。T-1206): φ の対角 2ka は容量・曲げ 2ka/3 は値 0 の固定した面・t ⇄ φ の 2ka は遅らせる
         // ±: 左の面 −・右の面 +・下の面 +(x の面の t は上・上の面の t は x で、回りの向きが逆になる)
         m_systems[SUPPORT_TURN].nodes[clamp.cell].capacity += 12 * b;
         m_systems[SUPPORT_TURN].fixedFaces.push_back({.node = clamp.cell, .coefficient = ImWide(4 * b), .value = 0});
         const int64_t sign = clamp.axis == 0 ? clamp.side : -clamp.side;
-        AddLag(across, clamp.cell, SUPPORT_TURN, clamp.cell, sign, 24 * b);
-        AddLag(SUPPORT_TURN, clamp.cell, across, clamp.cell, sign, 24 * b);
+        AddLag(across, clamp.cell, SUPPORT_TURN, clamp.cell, sign, 12 * b);
+        AddLag(SUPPORT_TURN, clamp.cell, across, clamp.cell, sign, 12 * b);
     }
 
     // ½ q (s Δx + Δup)²: x と上の面に q・x ⇄ 上の項(同じセルに +s q・相手のセルに −s q)は遅らせる
@@ -1123,8 +1126,8 @@ namespace bicameral::sim {
         if (m_options.form == SupportForm::PerComponent)
             return -Flow(6 * m_bondX, lift);
 
-        // 8ka (t ± φ/2) = 24b (2t ± φ)
-        return -Flow(24 * m_bondX, 2 * lift + clamp.side * CellValue(clamp.cell, SUPPORT_TURN));
+        // 2ka (t ± φ) = 12b (t ± φ)(面の点の形。T-1206)
+        return -Flow(12 * m_bondX, lift + clamp.side * CellValue(clamp.cell, SUPPORT_TURN));
     }
 
     // 面の力(梁の切り口。dx = セル・ka = 6b): N = ka Δn・ずれ = ka (Δt ∓ (φ_a + φ_b))・6M/dx = ka (φ_b − φ_a)。
