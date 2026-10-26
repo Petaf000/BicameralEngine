@@ -9,7 +9,10 @@
 //         暖機 30 刻みの後 20 刻みの 1 刻みの平均の GPU の時間を出す。
 //   圧力の反復の規則(T-1201): 比べは「0 から決まった 24 回」(T-1200 まで)・「0 から収まるまで」(既定)・「温めた始まり + 収まるまで」。
 //         測るのは 0 から決まった回数(--sweeps)・0 から収まるまで・温めた始まり + 収まるまで の 3 つ(--rule 0 / 1 / 3 で 1 つだけ)。
-// 引数は gpu_test_options.h と --measure / --measure-only / --sweeps N / --rule N。
+//   --profile(T-1223。比べを飛ばす): 紙 24 列の層 2・4・6 段を物 1・4・16・46 個で、段を 1 つずつだけ回した時の 1 刻みの時間を出し、
+//         段ごとの費用(段なしとの差)・固定の費用・物 1 つあたり・ボクセル 1 つあたりに分ける(段を外すと結果は変わるので測るだけ)。
+//   --threads 256 / 512 / 1024: グループのスレッドの数を変えた形(object_shell_flow_t256 など。費用の比べ)。
+// 引数は gpu_test_options.h と --measure / --measure-only / --profile / --threads N / --sweeps N / --rule N。
 #include <cstdlib>
 #include <cstring>
 
@@ -50,25 +53,33 @@ namespace {
 
     // --- GPU の並び(object_shell_flow.hlsl と同じ)---
     constexpr uint32_t SHARED_VOXELS = 7168;
-    constexpr uint32_t ROOT_CONSTANT_COUNT = 9;
+    constexpr uint32_t ROOT_CONSTANT_COUNT = 10;
     constexpr uint32_t SWEEP_STATS = 4;  // g_stats の後ろ: 解いた回数・赤黒の和・一番多い・上限で止まった(T-1201)
-    // u0〜u10 / b0 / デバッグのリング / t0〜t7(11 × 2 + 9 + 2 + 8 × 2 = 49 語。物の熱の 63 語とは別の署名)
+    // u0〜u10 / b0 / デバッグのリング / t0〜t7(11 × 2 + 10 + 2 + 8 × 2 = 50 語。物の熱の 63 語とは別の署名)
     constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
         .uavCount = 11, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = 8};
 
+    // 段の印(object_shell_flow.hlsl の OH_STAGE_*。1 つずつだけ回して費用を分ける。T-1223)
+    constexpr uint32_t ALL_STAGES = 0xFFFFFFFFu;
+    constexpr uint32_t STAGE_PRESSURE = 1u << 4;
+    constexpr std::array<const char*, 10> STAGE_NAMES = {"① 見立て", "② 面",    "③ 運ぶ運動量", "④ 残り",
+                                                         "⑤ 圧力",   "⑥ 力積",  "⑦ 出る割合",   "⑧ 運ぶ",
+                                                         "⑨ セルへ", "⑩ 起こす"};
+
     struct ShellVoxelWork {
         rx::OhFlowCell cell;
-        int64_t residual;
         int64_t potential;
         uint64_t total;
         uint64_t outShare;
         uint32_t changed;
         uint32_t padding;
+        int64_t residual;
         uint64_t recipMultiplier;
         uint32_t recipShift1;
         uint32_t recipShift2;
+        std::array<uint64_t, 6> weights;  // 隣との面の重み(圧力の反復が続けて読む。T-1223)
     };
-    static_assert(sizeof(ShellVoxelWork) == 80);
+    static_assert(sizeof(ShellVoxelWork) == 128);
 
     struct ShellFaceWork {
         uint64_t mass;
@@ -250,8 +261,9 @@ namespace {
         uint32_t faceCount = 0;
         uint32_t passBase = 0;
         uint32_t sharedPotential = 0;
-        uint32_t pressureSweeps = 1024;  // 圧力の赤黒の上限(CPU の OhShellFlow と同じ既定)
-        uint32_t pressureMode = 1;       // 1 = 収まったら止める・2 = 温めた始まり(shaders の OH_PRESSURE_*。T-1201)
+        uint32_t pressureSweeps = 1024;   // 圧力の赤黒の上限(CPU の OhShellFlow と同じ既定)
+        uint32_t pressureMode = 1;        // 1 = 収まったら止める・2 = 温めた始まり(shaders の OH_PRESSURE_*。T-1201)
+        uint32_t stageMask = ALL_STAGES;  // 回す段(測るだけ。T-1223)
     };
 
     // 圧力の反復の規則(T-1201。CPU の OhShellFlow と GPU の g_pressureMode に同じものを渡す)
@@ -278,13 +290,13 @@ namespace {
 
     std::expected<Gpu, std::string> CreateGpu(ID3D12Device5* device, const sim::BakedReactionTable& table,
                                               const test::OhTables& tables, const test::OhWorld& world,
-                                              bool sharedPotential) {
+                                              bool sharedPotential, std::string_view shader) {
         Gpu result;
         result.objectCount = static_cast<uint32_t>(world.objects.size());
         result.passBase = world.pass;
         result.sharedPotential = sharedPotential ? 1u : 0u;
         result.rootSignature = gpu::CreateRootSignature(device, ROOT_LAYOUT);
-        const auto bytecode = gpu::LoadShader("sim/object_shell_flow.cso");
+        const auto bytecode = gpu::LoadShader(shader);
         if (!result.rootSignature || !bytecode)
             return std::unexpected("ルート署名かシェーダーを作れない");
 
@@ -377,7 +389,8 @@ namespace {
                                                                          gpuState.pressureSweeps,
                                                                          1u,
                                                                          gpuState.sharedPotential,
-                                                                         gpuState.pressureMode};
+                                                                         gpuState.pressureMode,
+                                                                         gpuState.stageMask};
             list->SetComputeRoot32BitConstants(ROOT_LAYOUT.RootConstantIndex(), ROOT_CONSTANT_COUNT, constants.data(),
                                                0);
             list->Dispatch(gpuState.objectCount, 1, 1);
@@ -497,6 +510,7 @@ namespace {
         const test::OhTables& tables;
         const test::OhCpuTable& shared;
         uint32_t measureSweeps;  // 測る時の「0 から決まった回数」の回数(切り分け。比べは 24 のまま)
+        std::string shader;      // シェーダー(--threads で変える。T-1223)
     };
 
     // CPU と GPU を同じ場面から回して比べる
@@ -515,7 +529,8 @@ namespace {
 
         auto queue = gpu::ImmediateQueue::Create(context.device, context.queueType);
         auto debugRing = gpu::DebugRing::Create(context.device);
-        auto gpuState = CreateGpu(context.device, context.table, context.tables, world, sharedPotential);
+        auto gpuState = CreateGpu(context.device, context.table, context.tables, world, sharedPotential,
+                                  context.shader);
         if (!queue || !debugRing || !gpuState || !Upload(*queue, *gpuState))
             return std::unexpected(gpuState ? "GPU の準備に失敗" : gpuState.error());
 
@@ -558,8 +573,10 @@ namespace {
         return {};
     }
 
-    std::expected<void, std::string> Measure(const Context& context, const Shape& shape, uint32_t copies,
-                                             bool sharedPotential, const PressureRule& rule) {
+    // 戻り値 = 1 刻みの平均の GPU の ms。stageMask を全部でなくすると暖機の後だけ段を外す(結果は変わるので数え上げは見ない・書き出さない)
+    std::expected<double, std::string> Measure(const Context& context, const Shape& shape, uint32_t copies,
+                                               bool sharedPotential, const PressureRule& rule,
+                                               uint32_t stageMask = ALL_STAGES) {
         const auto one = MakePaper(context.table, context.shared, context.tables.gases, shape);
         if (!one)
             return std::unexpected("層を作れない");
@@ -567,7 +584,8 @@ namespace {
         const test::OhWorld world = Replicate(*one, copies);
         auto queue = gpu::ImmediateQueue::Create(context.device, context.queueType);
         auto debugRing = gpu::DebugRing::Create(context.device);
-        auto gpuState = CreateGpu(context.device, context.table, context.tables, world, sharedPotential);
+        auto gpuState = CreateGpu(context.device, context.table, context.tables, world, sharedPotential,
+                                  context.shader);
         if (!queue || !debugRing || !gpuState || !Upload(*queue, *gpuState))
             return std::unexpected(gpuState ? "GPU の準備に失敗" : gpuState.error());
 
@@ -581,9 +599,13 @@ namespace {
             before = test::object_heat_gpu::ReadUav<uint32_t>(context.device, *queue, gpuState->uavs[UavStats].Get(),
                                                               statsCount);
 
+        gpuState->stageMask = stageMask;
         const auto measured = before ? RunTicks(*queue, *gpuState, *debugRing, 2 + WARM_TICKS, MEASURE_TICKS) : warm;
         if (!measured)
             return std::unexpected(measured.error());
+
+        if (stageMask != ALL_STAGES)
+            return *measured;
 
         const auto stats = test::object_heat_gpu::ReadUav<uint32_t>(context.device, *queue,
                                                                     gpuState->uavs[UavStats].Get(), statsCount);
@@ -601,6 +623,39 @@ namespace {
             static_cast<double>(sweeps) / static_cast<double>(std::max<uint32_t>(solves, 1)), (*stats)[base + 2],
             (*stats)[base + 3]);
 
+        return *measured;
+    }
+
+    // 段ごとの費用(T-1223): 段を 1 つずつだけ回した時間 − 段なしの時間。圧力は決まった回数(--sweeps)・groupshared
+    std::expected<void, std::string> Profile(const Context& context) {
+        const std::array<Shape, 3> shapes = {Shape{"紙 24 列・層 2 段", 24, 3, 2}, Shape{"紙 24 列・層 4 段", 24, 3, 4},
+                                             Shape{"紙 24 列・層 6 段", 24, 3, 6}};
+        const PressureRule rule{"決まった回数", context.measureSweeps, 0};
+        for (const Shape& shape : shapes) {
+            const uint32_t voxels = (shape.columns + (2 * shape.layers)) * (1 + (2 * shape.layers)) *
+                                    (shape.sizeZ + (2 * shape.layers));
+            for (const uint32_t copies : {1u, 4u, 16u, SM_COUNT}) {
+                const auto all = Measure(context, shape, copies, true, rule, (1u << STAGE_NAMES.size()) - 1);
+                const auto none = Measure(context, shape, copies, true, rule, 0);
+                const auto withoutPressure = Measure(context, shape, copies, true, rule, ALL_STAGES & ~STAGE_PRESSURE);
+                if (!all || !none || !withoutPressure)
+                    return std::unexpected(!all ? all.error() : (!none ? none.error() : withoutPressure.error()));
+
+                std::string line = std::format(
+                    "段の費用: {}({} ボクセル)× {}・{}: 全部 {:.3f} ms・圧力なし {:.3f}・段なし {:.3f}", shape.name,
+                    voxels, copies, context.shader, *all, *withoutPressure, *none);
+                for (uint32_t stage = 0; stage < STAGE_NAMES.size(); ++stage) {
+                    const auto only = Measure(context, shape, copies, true, rule, 1u << stage);
+                    if (!only)
+                        return std::unexpected(only.error());
+
+                    line += std::format("・{} {:.3f}", STAGE_NAMES[stage], *only - *none);
+                }
+
+                Log(Channel::Gpu, Level::Info, "{}", line);
+            }
+        }
+
         return {};
     }
 
@@ -608,6 +663,8 @@ namespace {
         std::vector<char*> rest;
         bool measure = false;
         bool compare = true;
+        bool profile = false;
+        uint32_t threads = 1024;
         uint32_t measureSweeps = 24;
         int32_t onlyRule = -1;
         for (size_t i = 0; i < arguments.size(); ++i) {
@@ -617,6 +674,11 @@ namespace {
                 measureSweeps = static_cast<uint32_t>(std::strtoul(arguments[++i], nullptr, 10));
             } else if (text == "--rule" && i + 1 < arguments.size()) {
                 onlyRule = static_cast<int32_t>(std::strtol(arguments[++i], nullptr, 10));
+            } else if (text == "--threads" && i + 1 < arguments.size()) {
+                threads = static_cast<uint32_t>(std::strtoul(arguments[++i], nullptr, 10));
+            } else if (text == "--profile") {
+                profile = true;
+                compare = false;
             } else if (text == "--measure") {
                 measure = true;
             } else if (text == "--measure-only") {
@@ -649,7 +711,9 @@ namespace {
                               .table = table,
                               .tables = *tables,
                               .shared = shared,
-                              .measureSweeps = measureSweeps};
+                              .measureSweeps = measureSweeps,
+                              .shader = threads == 1024 ? std::string("sim/object_shell_flow.cso")
+                                                        : std::format("sim/object_shell_flow_t{}.cso", threads)};
         if (compare) {
             const std::array<Shape, 2> shapes = {Shape{"紙 24 列・層 2 段", 24, 3, 2},
                                                  Shape{"紙 24 列・層 4 段", 24, 3, 4}};
@@ -666,6 +730,13 @@ namespace {
                         }
                     }
                 }
+            }
+        }
+
+        if (profile) {
+            if (auto profiled = Profile(context); !profiled) {
+                Log(Channel::Gpu, Level::Error, "gpu_object_shell_flow_test: FAILED({})", profiled.error());
+                return 1;
             }
         }
 
