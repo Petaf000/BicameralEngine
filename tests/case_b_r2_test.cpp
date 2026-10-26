@@ -25,6 +25,17 @@ namespace {
     using namespace bicameral::sim::case_b;
 
     int failureCount = 0;
+    bool restsOnLayerOverride = false;    // 2 本目の見直し 1(T-1137)。引数のどこかに keeplayer2
+    bool keepLayerOverride = false;       // 層は落ちても層のまま(T-1137 の 2 本目)。引数のどこかに keeplayer
+    bool onSurfaceOverride = false;       // 横へ動く層は列の表面に置く(T-1138 の見直し 2)。引数 onsurface
+    bool surfaceOnLayerOverride = false;  // 見直し 2 の 2(床は下に層があればよい)。引数 onsurface2
+    bool twoStatesOverride = false;  // 粒を層と舞う粒の 2 つの状態で持つ(T-1136・D-659 の研究)。引数のどこかに twostate
+    bool splitOverride =
+        false;  // 層と舞う粒に別々の運動量の置き場(T-1138。④ の場面を GrainTwoState に)。引数のどこかに split
+
+    MomentumLayout SplitLayout(MomentumLayout layout) {
+        return splitOverride && layout == MomentumLayout::GrainSeparate ? MomentumLayout::GrainTwoState : layout;
+    }
 
     void Expect(bool condition, const char* text, int line) {
         if (condition)
@@ -180,7 +191,7 @@ namespace {
     Run RunR2(const Scene& scene, int32_t level, uint32_t ticksPerSecond, uint64_t seconds,
               const std::vector<std::string>& regionNames, bool drag = true,
               const std::function<void(Box&)>& prepare = nullptr) {
-        auto created = BuildScene(scene, level, MomentumLayout::GrainSeparate);
+        auto created = BuildScene(scene, level, SplitLayout(MomentumLayout::GrainSeparate));
         EXPECT(created.has_value());
         Run run{.recording = {},
                 .stats = {},
@@ -198,7 +209,12 @@ namespace {
         for (const std::string& name : regionNames)
             regions.push_back(*FindRegion(scene, name, level));
 
-        const FlowStages flow = MakeFlowStages({.drag = drag});
+        const FlowStages flow = MakeFlowStages({.drag = drag,
+                                                .grainTwoStates = twoStatesOverride,
+                                                .grainLayerKeepsFalling = keepLayerOverride,
+                                                .grainLayerRestsOnLayer = restsOnLayerOverride,
+                                                .grainLayerPlacesOnSurface = onSurfaceOverride,
+                                                .grainLayerSurfaceOnLayer = surfaceOnLayerOverride});
         const PressureSolver solver = MakeImplicitGridSolver(CYCLES, TOLERANCE_NL);
         run.grainHeightUm.push_back(GrainHeightUm(run.box));
         run.recording = RunScene(run.box, flow.stages, solver, seconds * ticksPerSecond, regions, [&](Box& box) {
@@ -538,7 +554,7 @@ namespace {
                       uint64_t seconds, const std::vector<std::string>& regionNames, bool drag,
                       const std::function<void(Box&)>& prepare, const std::function<void(Box&)>& afterTick,
                       bool splitSurfaceLayer = false) {
-        auto created = BuildScene(scene, level, layout);
+        auto created = BuildScene(scene, level, SplitLayout(layout));
         EXPECT(created.has_value());
         PlaceRun run{.recording = {}, .stats = {}, .box = std::move(*created), .liquidHeightUm = {}};
         run.box.config.ticksPerSecond = ticksPerSecond;
@@ -551,7 +567,13 @@ namespace {
         for (const std::string& name : regionNames)
             regions.push_back(*FindRegion(scene, name, level));
 
-        const FlowStages flow = MakeFlowStages({.drag = drag, .splitSurfaceLayer = splitSurfaceLayer});
+        const FlowStages flow = MakeFlowStages({.drag = drag,
+                                                .splitSurfaceLayer = splitSurfaceLayer,
+                                                .grainTwoStates = twoStatesOverride,
+                                                .grainLayerKeepsFalling = keepLayerOverride,
+                                                .grainLayerRestsOnLayer = restsOnLayerOverride,
+                                                .grainLayerPlacesOnSurface = onSurfaceOverride,
+                                                .grainLayerSurfaceOnLayer = surfaceOnLayerOverride});
         const PressureSolver solver = MakeImplicitGridSolver(CYCLES, TOLERANCE_NL);
         run.liquidHeightUm.push_back(LiquidHeightUm(run.box));
         run.recording = RunScene(run.box, flow.stages, solver, seconds * ticksPerSecond, regions, [&](Box& box) {
@@ -721,6 +743,25 @@ namespace {
 int main(int argc, char** argv) {
     // 引数で場面を 1 つに絞れる(0 = 決定性・1 = 水中の砂・2 = 空気中の粉・3 = Darcy・4 = 1 mg・
     // 5 = しずく・6 = 水面の風・7 = 砂の芯・8 = 砂の堤。5〜8 は置き場 ①。T-0963)。無ければ全部
+    int kept = 1;
+    for (int index = 1; index < argc; ++index) {
+        if (std::string(argv[index]) == "twostate")
+            twoStatesOverride = true;
+        else if (std::string(argv[index]) == "keeplayer2")
+            twoStatesOverride = keepLayerOverride = restsOnLayerOverride = true;
+        else if (std::string(argv[index]) == "keeplayer")
+            twoStatesOverride = keepLayerOverride = true;
+        else if (std::string(argv[index]) == "split")
+            twoStatesOverride = splitOverride = true;
+        else if (std::string(argv[index]) == "onsurface")
+            onSurfaceOverride = true;
+        else if (std::string(argv[index]) == "onsurface2")
+            onSurfaceOverride = surfaceOnLayerOverride = true;
+        else
+            argv[kept++] = argv[index];
+    }
+
+    argc = kept;
     const int only = argc > 1 ? std::stoi(argv[1]) : -1;
     if (only < 0 || only == 0) {
         Determinism();

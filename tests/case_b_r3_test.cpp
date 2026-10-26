@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <format>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <utility>
@@ -47,6 +48,9 @@ namespace {
     }
 
     const char* LayoutName(MomentumLayout layout) {
+        if (layout == MomentumLayout::GrainTwoState)
+            return "④+舞う粒";
+
         return layout == MomentumLayout::PerPhase ? "①" : "④";
     }
 
@@ -178,6 +182,20 @@ namespace {
     int64_t MaxGrainSpeed(const Box& box) {
         const uint32_t slot = MomentumSlot(box.config.layout, Phase::Grain);
         int64_t speed = 0;
+        if (box.config.layout == MomentumLayout::GrainTwoState) {
+            // 層と舞う粒の置き場(T-1138): 置き場ごとの面の速さ(面の運動量 ÷ その置き場の質量の平均)の最大
+            const View view = BuildView(box);
+            for (uint32_t cell = 0; cell < CellCount(box); ++cell) {
+                for (uint32_t axis = 0; axis < 3; ++axis) {
+                    for (const uint32_t arm : {slot, SuspendedGrainSlot(box.config.layout)})
+                        speed = std::max<int64_t>(
+                            speed, std::abs(FaceVelocity(box, view, {.axis = axis, .cell = cell, .slot = arm})));
+                }
+            }
+
+            return speed;
+        }
+
         for (uint32_t cell = 0; cell < CellCount(box); ++cell) {
             for (uint32_t axis = 0; axis < 3; ++axis) {
                 const std::optional<uint32_t> neighbor = Neighbor(box, cell, axis);
@@ -235,6 +253,212 @@ namespace {
                     (long long)(totalMass == 0 ? 0 : movingMass * 1000 / totalMass), where.c_str());
     }
 
+    // 列 x のセルの様子(T-1166。引数 probe): 下から 詰まり・据わる固体・粒・層・上の面の粒の速さ
+    void PrintColumn(const Box& box, uint32_t x) {
+        const View view = BuildView(box);
+        const uint32_t slot = MomentumSlot(box.config.layout, Phase::Grain);
+        std::string text;
+        for (uint32_t y = 0; y < box.config.sizeY; ++y) {
+            const uint32_t cell = CellIndex(box, x, y, 0);
+            const CellView& cellView = view.cells[cell];
+            const int64_t grain = cellView.phaseMassMg[2];
+            const int64_t layer = box.grainLayerMg.empty()
+                                      ? -1
+                                      : box.grainLayerMg[(cell * box.materials.size()) + MaterialIndex(box, "sand")];
+            const std::optional<uint32_t> above = Neighbor(box, cell, 1);
+            const int64_t aboveGrain = above.has_value() ? view.cells[*above].phaseMassMg[2] : 0;
+            const int64_t faceMass = (grain + aboveGrain + 1) / 2;
+            const int64_t momentum = above.has_value() ? box.faceMomentum[1][FaceIndex(box, cell, slot)] : 0;
+            const int64_t speed = faceMass == 0 ? 0 : momentum / faceMass;
+            text += std::format("[y{} 詰 {}‰ 固 {}‰ 粒 {} kg 層 {} kg 上 {} mm/s] ", y,
+                                ((uint64_t)cellView.grainPackedQ16 * 1000) >> 16,
+                                ((uint64_t)cellView.fixedQ16 * 1000) >> 16, grain / 1000000,
+                                layer < 0 ? -1 : layer / 1000000, (speed * 1000) / (1 << 20));
+        }
+
+        std::printf("    列 %u: %s\n", x, text.c_str());
+    }
+
+    // --- 速さの出どころの測り(T-1137。引数 probe)---
+    // 段(陰の圧力・降伏・運ぶ・当てる)の前後で面の粒の速さ(運動量 ÷ 面の粒の質量)を比べ、段ごとに一番速さを上げた面を覚える。
+    // 面の粒の質量で 2 つに分ける(1 kg 以上 = 山の粒・未満 = 舞う粒のかす)。運動量だけあって質量 0 の面も数える
+    bool probeOverride = false;
+    struct SpeedJump {
+        int64_t speed = 0;  // 段の後の速さ(2^-20 m/s)
+        int64_t before = 0;
+        int64_t massMg = 0;
+        int64_t massBeforeMg = 0;
+        uint64_t tick = 0;
+        uint32_t x = 0;
+        uint32_t y = 0;
+        uint32_t axis = 0;
+    };
+    struct StageProbe {
+        std::array<SpeedJump, 2> jumps{};  // [0] = 1 kg 以上・[1] = 未満
+        uint64_t massless = 0;             // 段の後に質量 0 で運動量のある面(刻み × 面)
+        int64_t masslessMomentum = 0;      // その運動量の大きさの最大(mg·2^-20 m/s)
+    };
+    struct SpeedProbe {
+        std::array<StageProbe, 4> stages{};
+        uint64_t tick = 0;
+        std::vector<int64_t> massBefore;
+        std::array<std::vector<int64_t>, 3> momentumBefore;
+        std::vector<int64_t> airPerSecond;      // 1 秒ごとの空気の面の速さの最大(陰の圧力の段の後)
+        std::array<std::string, 2> airFirst{};  // 空気が初めて 1 m/s・10 m/s を超えた刻みと場所
+    };
+
+    int64_t FaceGrainMass(const Box& box, uint32_t cell, uint32_t neighbor) {
+        int64_t mass = 0;
+        for (uint32_t index = 0; index < box.materials.size(); ++index) {
+            if (box.materials[index].phase == Phase::Grain)
+                mass += std::max<int64_t>(CellMass(box, cell, index), 0) +
+                        std::max<int64_t>(CellMass(box, neighbor, index), 0);
+        }
+
+        return (mass + 1) / 2;
+    }
+
+    void ProbeBefore(SpeedProbe& probe, const Box& box) {
+        probe.massBefore.assign((size_t)CellCount(box) * 3, 0);
+        for (uint32_t cell = 0; cell < CellCount(box); ++cell) {
+            for (uint32_t axis = 0; axis < 3; ++axis) {
+                const std::optional<uint32_t> neighbor = Neighbor(box, cell, axis);
+                if (neighbor.has_value())
+                    probe.massBefore[((size_t)cell * 3) + axis] = FaceGrainMass(box, cell, *neighbor);
+            }
+        }
+
+        probe.momentumBefore = box.faceMomentum;
+    }
+
+    void ProbeAfter(SpeedProbe& probe, const Box& box, size_t stage) {
+        const uint32_t slot = MomentumSlot(box.config.layout, Phase::Grain);
+        StageProbe& result = probe.stages[stage];
+        for (uint32_t cell = 0; cell < CellCount(box); ++cell) {
+            for (uint32_t axis = 0; axis < 3; ++axis) {
+                const std::optional<uint32_t> neighbor = Neighbor(box, cell, axis);
+                if (!neighbor.has_value())
+                    continue;
+
+                const size_t face = FaceIndex(box, cell, slot);
+                const int64_t mass = FaceGrainMass(box, cell, *neighbor);
+                const int64_t momentum = std::abs(box.faceMomentum[axis][face]);
+                if (mass == 0) {
+                    result.massless += momentum != 0 ? 1u : 0u;
+                    result.masslessMomentum = std::max(result.masslessMomentum, momentum);
+                    continue;
+                }
+
+                const int64_t massBefore = probe.massBefore[((size_t)cell * 3) + axis];
+                const int64_t before = massBefore == 0 ? 0 : std::abs(probe.momentumBefore[axis][face]) / massBefore;
+                const int64_t speed = momentum / mass;
+                SpeedJump& jump = result.jumps[mass >= 1000000 ? 0 : 1];
+                if (speed - before <= jump.speed - jump.before)
+                    continue;
+
+                const std::array<uint32_t, 3> at = CellCoordinates(box, cell);
+                jump = {.speed = speed,
+                        .before = before,
+                        .massMg = mass,
+                        .massBeforeMg = massBefore,
+                        .tick = probe.tick,
+                        .x = at[0],
+                        .y = at[1],
+                        .axis = axis};
+            }
+        }
+    }
+
+    // 陰の圧力の段の後の空気の面の速さの最大(1 秒ごと)と、初めて 1 m/s・10 m/s を超えた所
+    void ProbeAir(SpeedProbe& probe, const Box& box) {
+        const View view = BuildView(box);
+        const uint32_t slot = MomentumSlot(box.config.layout, Phase::Gas);
+        int64_t best = 0;
+        std::string where;
+        for (uint32_t cell = 0; cell < CellCount(box); ++cell) {
+            for (uint32_t axis = 0; axis < 3; ++axis) {
+                const std::optional<uint32_t> neighbor = Neighbor(box, cell, axis);
+                if (!neighbor.has_value())
+                    continue;
+
+                const int64_t mass = (view.cells[cell].phaseMassMg[0] + view.cells[*neighbor].phaseMassMg[0] + 1) / 2;
+                if (mass <= 0)
+                    continue;
+
+                const int64_t speed = std::abs(box.faceMomentum[axis][FaceIndex(box, cell, slot)]) / mass;
+                if (speed <= best)
+                    continue;
+
+                const std::array<uint32_t, 3> at = CellCoordinates(box, cell);
+                best = speed;
+                where = std::format("({}, {}) 軸 {}・粒 {} / {} mg・詰まり {} / {} ‰", at[0], at[1], axis,
+                                    view.cells[cell].phaseMassMg[2], view.cells[*neighbor].phaseMassMg[2],
+                                    ((uint64_t)view.cells[cell].grainPackedQ16 * 1000) >> 16,
+                                    ((uint64_t)view.cells[*neighbor].grainPackedQ16 * 1000) >> 16);
+            }
+        }
+
+        const size_t second = (size_t)((probe.tick - 1) / box.config.ticksPerSecond);
+        if (probe.airPerSecond.size() <= second)
+            probe.airPerSecond.resize(second + 1, 0);
+        probe.airPerSecond[second] = std::max(probe.airPerSecond[second], best);
+        for (size_t index = 0; index < 2; ++index) {
+            const int64_t limit = index == 0 ? ((int64_t)1 << 20) : ((int64_t)10 << 20);
+            if (probe.airFirst[index].empty() && best > limit)
+                probe.airFirst[index] = std::format("刻み {}・{} mm/s・{}", probe.tick, (best * 1000) >> 20, where);
+        }
+    }
+
+    Stages WrapProbe(const Stages& stages, std::shared_ptr<SpeedProbe> probe) {
+        Stages wrapped = stages;
+        const std::array<Stage Stages::*, 4> members = {&Stages::pressure, &Stages::grainYield, &Stages::transport,
+                                                        &Stages::apply};
+        for (size_t index = 0; index < members.size(); ++index) {
+            const Stage inner = stages.*members[index];
+            if (!inner)
+                continue;
+
+            wrapped.*members[index] = [inner, probe, index](Box& box, const StepContext& context) {
+                if (index == 0)
+                    ++probe->tick;
+                ProbeBefore(*probe, box);
+                inner(box, context);
+                ProbeAfter(*probe, box, index);
+                if (index == 0)
+                    ProbeAir(*probe, box);
+            };
+        }
+
+        return wrapped;
+    }
+
+    void PrintProbe(const SpeedProbe& probe) {
+        std::string series;
+        for (const int64_t speed : probe.airPerSecond)
+            series += std::format("{} ", (speed * 1000) >> 20);
+        std::printf(
+            "    空気の面の速さの最大(mm/s・1 秒ごと)%s\n    初めて 1 m/s を超えた: %s\n    初めて 10 m/s を超えた: "
+            "%s\n",
+            series.c_str(), probe.airFirst[0].c_str(), probe.airFirst[1].c_str());
+        const std::array<const char*, 4> names = {"陰の圧力(受け渡し・重さ・引きずり)", "降伏", "運ぶ",
+                                                  "当てる(運動量を運ぶ)"};
+        for (size_t index = 0; index < probe.stages.size(); ++index) {
+            const StageProbe& stage = probe.stages[index];
+            std::string text;
+            for (size_t bucket = 0; bucket < 2; ++bucket) {
+                const SpeedJump& jump = stage.jumps[bucket];
+                text += std::format("{}: {} → {} mm/s・{} → {} mg・刻み {}・({}, {}) 軸 {} / ",
+                                    bucket == 0 ? "1 kg 以上" : "未満", (jump.before * 1000) >> 20,
+                                    (jump.speed * 1000) >> 20, jump.massBeforeMg, jump.massMg, jump.tick, jump.x,
+                                    jump.y, jump.axis);
+            }
+
+            std::printf("    速さを上げた面(段 %s)%s質量 0 で運動量のある面 %llu(最大 %lld mg·mm/s)\n", names[index],
+                        text.c_str(), (unsigned long long)stage.massless,
+                        (long long)((stage.masslessMomentum * 1000) >> 20));
+        }
+    }
+
     // 2^-20 m/s → mm/s
     int64_t MillimetersPerSecond(int64_t speed) {
         return (speed * 1000) >> 20;
@@ -248,10 +472,30 @@ namespace {
     std::optional<uint32_t> movingSpeedOverride;
     std::shared_ptr<FlowStats> currentStats;  // 走っている場面の段の数え(刻みの後の操作から読む。T-1003 の測り)
     bool movingByCellOverride = false;
-    uint32_t dragScaleOverride = 1000;  // 引きずりの倍率(‰。T-1003 の根の測り。引数 drag=<‰>)
-    bool restLayerOverride = false;     // 積もった層を解く間は障害物に(T-1043 の 2 回目。打ち切り)。引数 layer
-    bool restLockOverride = true;       // 解く前に止める(T-1043)。引数のどこかに norestlock で解いた後で止める(T-0996)
-    bool vacuumOverride = false;        // 空気を抜く(粒と空気の引きずりの影響を見る。T-1046)。引数のどこかに vacuum
+    uint32_t dragScaleOverride = 1000;    // 引きずりの倍率(‰。T-1003 の根の測り。引数 drag=<‰>)
+    bool sideDragOverride = false;        // 層の横の面の Kozeny–Carman(T-1136 の 1 本目の計画)。引数 sidedrag
+    bool restsOnLayerOverride = false;    // 2 本目の見直し 1(T-1137)。引数 keeplayer2
+    bool keepLayerOverride = false;       // 層は落ちても層のまま(T-1137 の 2 本目)。引数 keeplayer(twostate も入る)
+    bool twoStatesOverride = false;       // 粒を層と舞う粒の 2 つの状態で持つ(T-1136・D-659 の研究)。引数 twostate
+    bool spillOverride = false;           // 横へ動く層は下に層があれば層のまま(T-1138 の見直し)。引数 spill
+    bool onSurfaceOverride = false;       // 横へ動く層は向かう列の層の表面に置く(T-1138 の見直し 2)。引数 onsurface
+    bool surfaceOnLayerOverride = false;  // 見直し 2 の 2: 表面のセルの床は下に層があればよい。引数 onsurface2
+    bool splitOverride =
+        false;  // 層と舞う粒に別々の運動量の置き場(T-1138・D-668。④ の場面を GrainTwoState に)。引数 split(twostate も入る)
+    bool restLayerOverride = false;        // 積もった層を解く間は障害物に(T-1043 の 2 回目。打ち切り)。引数 layer
+    uint32_t cyclesOverride = CYCLES;      // 陰の圧力の V サイクルの回数(T-1105)。引数 cycles=<回>
+    uint32_t ticksOverride = 0;            // 1 秒の刻みの数(T-1105)。引数 tps=<数>。0 = 場面の既定
+    bool buoyancyOverride = false;         // 浮力を柱から(T-1105)。引数 buoyancy
+    bool openColumnOverride = false;       // 流体の柱を開いた面積あたりで(T-1105)。引数 opencolumn
+    bool poreDragOverride = false;         // 層の中の空気だけ孔の引きずり(T-1092 の 2 本目)。引数 prescribed2
+    bool prescribedOverride = false;       // 表面のセルの層を速さの決まった相に(T-1092)。引数 prescribed
+    bool surfaceHeldOnlyOverride = false;  // 層の止まった粒の面だけ障害物(T-1071 の 2 本目)。引数 surface2
+    bool surfaceLayerOverride = false;     // 表面のセルを層に(T-1071)。引数 surface(摩擦を解きの中へも入れる)
+    uint32_t contactOverride = 0;          // 上の粒を支える詰まり(‰。T-1070 の 2 本目)。引数 contact=<‰>
+    bool frictionInSolveOverride = false;  // 摩擦を解きの中へ(T-1070。打ち切り)。引数 friction
+    bool restLockOverride = true;      // 解く前に止める(T-1043)。引数のどこかに norestlock で解いた後で止める(T-0996)
+    bool nativeSlopeOverride = false;  // 斜面を箱の細かさで描き直す(T-1106。絵の 2 × 2 の段を消す)。引数 native
+    bool vacuumOverride = false;       // 空気を抜く(粒と空気の引きずりの影響を見る。T-1046)。引数のどこかに vacuum
     bool impactTurnOverride =
         false;  // 受け止めた縦の運動量を横へ向け直す(T-1046)。引数のどこかに turn  // 動いているかをセルで決める(T-1004 の 2 本目)。しきい値を負で渡すと true
 
@@ -276,10 +520,13 @@ namespace {
             }
         }
 
-        auto created = BuildScene(scene, options.level, options.layout);
+        const MomentumLayout layout = splitOverride && options.layout == MomentumLayout::GrainSeparate
+                                          ? MomentumLayout::GrainTwoState
+                                          : options.layout;
+        auto created = BuildScene(scene, options.level, layout);
         EXPECT(created.has_value());
         Run run{.recording = {}, .stats = {}, .box = std::move(*created), .grainSpeed = {}};
-        run.box.config.ticksPerSecond = options.ticksPerSecond;
+        run.box.config.ticksPerSecond = ticksOverride != 0 ? ticksOverride : options.ticksPerSecond;
         if (options.prepare) {
             options.prepare(run.box);
             ResetLedger(run.box);
@@ -303,12 +550,29 @@ namespace {
         flowOptions.dragScalePermille = dragScaleOverride;
         flowOptions.grainRestLock = restLockOverride;
         flowOptions.grainRestLayer = restLayerOverride;
+        flowOptions.grainFrictionInSolve = frictionInSolveOverride;
+        flowOptions.grainContactPermille = contactOverride;
+        flowOptions.grainSurfaceLayer = surfaceLayerOverride;
+        flowOptions.grainSurfaceLayerMoving = !surfaceHeldOnlyOverride;
+        flowOptions.grainLayerPrescribed = prescribedOverride;
+        flowOptions.grainLayerPoreDrag = poreDragOverride;
+        flowOptions.columnPerOpenArea = openColumnOverride;
+        flowOptions.buoyancyFromColumn = buoyancyOverride;
+        flowOptions.grainTwoStates = twoStatesOverride;
+        flowOptions.grainLayerSideDrag = sideDragOverride;
+        flowOptions.grainLayerKeepsFalling = keepLayerOverride;
+        flowOptions.grainLayerRestsOnLayer = restsOnLayerOverride;
+        flowOptions.grainLayerSpillsOnLayer = spillOverride;
+        flowOptions.grainLayerPlacesOnSurface = onSurfaceOverride;
+        flowOptions.grainLayerSurfaceOnLayer = surfaceOnLayerOverride;
 
         const FlowStages flow = MakeFlowStages(flowOptions);
         currentStats = flow.stats;
-        const PressureSolver solver = MakeImplicitGridSolver(CYCLES, TOLERANCE_NL);
+        const PressureSolver solver = MakeImplicitGridSolver(cyclesOverride, TOLERANCE_NL);
         uint64_t tick = 0;
-        run.recording = RunScene(run.box, flow.stages, solver, options.seconds * options.ticksPerSecond, regions,
+        auto probe = std::make_shared<SpeedProbe>();
+        const Stages stages = probeOverride ? WrapProbe(flow.stages, probe) : flow.stages;
+        run.recording = RunScene(run.box, stages, solver, options.seconds * options.ticksPerSecond, regions,
                                  [&](Box& box) {
                                      ++tick;
                                      if (options.afterTick)
@@ -317,6 +581,8 @@ namespace {
                                      run.grainSpeed.push_back(MaxGrainSpeed(box));
                                  });
         run.stats = *flow.stats;
+        if (probeOverride)
+            PrintProbe(*probe);
         EXPECT(run.recording.AllConserved());
         EXPECT(!CheckConservation(run.box).negativeMass);
 
@@ -327,14 +593,26 @@ namespace {
         std::printf(
             "    費用 %lld ns/セル/刻み(計器込み)・降伏で動いた面の柱 %llu・止めた %llu・空きが無く止めた %llu・"
             "詰まりの最大 %u ‰・詰まりを超えたセル %llu・入る粒を縮めたセル %llu・V 最大 %u・動く面の上限 "
-            "%llu・受け止めた縦 %llu・横へ %llu・層の面 %llu・解く前に止めた面 %llu\n",
+            "%llu・受け止めた縦 %llu・横へ %llu・層の面 %llu・解く前に止めた面 %llu・止まった粒の面 "
+            "%llu・押されて動いた %llu・表面の層の面 %llu\n",
             (long long)run.recording.NanosecondsPerCellTick(), (unsigned long long)run.stats.yieldMovingPairs,
             (unsigned long long)run.stats.yieldHeldPairs, (unsigned long long)run.stats.yieldBlockedPairs,
             (unsigned)((uint64_t)run.stats.maxPackedQ16 * 1000 >> 16), (unsigned long long)run.stats.overpackedCells,
             (unsigned long long)run.stats.grainLimitedCells, run.stats.maxCycles,
             (unsigned long long)run.stats.yieldDynamicFaces, (unsigned long long)run.stats.impactGrainImpulse,
             (unsigned long long)run.stats.turnedGrainImpulse, (unsigned long long)run.stats.restLayerGrainFaces,
-            (unsigned long long)run.stats.restLockedGrainFaces);
+            (unsigned long long)run.stats.restLockedGrainFaces, (unsigned long long)run.stats.heldGrainFaces,
+            (unsigned long long)run.stats.releasedGrainFaces, (unsigned long long)run.stats.surfaceLayerGrainFaces);
+        if (twoStatesOverride)
+            std::printf(
+                "    2 つの状態(T-1136): 舞う粒 → 層 %llu mg・層 → 舞う粒 %llu mg・運ぶ段で層 → 舞う粒 %llu mg・"
+                "舞う粒の面 %llu・表面へ置いた層 %llu mg(運ぶ段の層 → 舞う粒のうち上へ出た %llu "
+                "mg・表面の空きが足りない %llu mg)(累計)\n",
+                (unsigned long long)run.stats.settledGrainMg, (unsigned long long)run.stats.liftedGrainMg,
+                (unsigned long long)run.stats.convertedGrainMg, (unsigned long long)run.stats.suspendedFaces,
+                (unsigned long long)run.stats.surfacePlacedGrainMg,
+                (unsigned long long)run.stats.convertedUpwardGrainMg,
+                (unsigned long long)run.stats.convertedBesideSurfaceGrainMg);
     }
 
     // 1 mm/s 以上で動く粒の質量の割合(‰。面の粒の質量で重み)
@@ -475,6 +753,9 @@ namespace {
                                    .hash = run.recording.HashChain()};
         std::printf("    高さ(cm。列ごと)%s\n", Profile(heights).c_str());
         PrintFastFaces(run.box);
+        if (probeOverride)
+            PrintColumn(run.box, run.box.config.sizeX / 2 - 1);
+
         std::printf("    斜面の芯(頂上の 90 %%〜10 %%)の角度 %u°・動く面 %u / %u\n", result.core,
                     run.recording.samples.back().movingFaces, run.recording.samples.back().totalFaces);
         const char* size = level == 0 ? "0.5" : (level == 1 ? "0.25" : "2");
@@ -1041,6 +1322,138 @@ namespace {
                     (long long)MillimetersPerSecond(run.grainSpeed.back()));
     }
 
+    // --- 12. 部分セルが沈み固まる時間(T-1091。記録): 壁から壁までの床の上に、詰まり切らない砂(高さ 3 m)を置き、
+    // 粒の 9 割が詰まったセルに入るまでの時間を測る(横へは広がらない。縦に沈むだけ)。
+    // 本物の目安: 真空は上の端が自由に落ちる時間 √(2 (1 − f) H ÷ g)。空気は群れの沈み(Richardson–Zaki。300 µm・n ≈ 3)で約 2 秒
+    void Settle(int32_t level, char symbol) {
+        Scene scene = BaseR3Scene("settle", 12, 12);
+        Fill(scene, 0, 11, 0, 0, '#');
+        Fill(scene, 0, 11, 1, 6, symbol);
+        scene.regions = {{.name = "all", .xBegin = 0, .xEnd = 12, .yBegin = 1, .yEnd = 12}};
+        std::string series;
+        int64_t settledTick = -1;
+        const auto sample = [&](Box& box, uint64_t tick) {
+            const View view = BuildView(box);
+            int64_t packedMass = 0;
+            int64_t total = 0;
+            for (uint32_t cell = 0; cell < CellCount(box); ++cell) {
+                const int64_t mass = view.cells[cell].phaseMassMg[2];
+                total += mass;
+                if (view.cells[cell].grainPackedQ16 + (1u << 10) >= (1u << 16))
+                    packedMass += mass;
+            }
+
+            const int64_t permille = total == 0 ? 0 : packedMass * 1000 / total;
+            if (settledTick < 0 && permille >= 900)
+                settledTick = (int64_t)tick;
+
+            if (tick % 30 == 0)
+                series += std::format(" {}s {}‰", Fixed3((int64_t)tick * 1000 / 60), permille);
+        };
+        const Run run = RunR3(scene, {.level = level, .seconds = 6, .afterTick = sample}, {"all"});
+        std::printf(
+            "  沈み固まる %s m 「%c」%s: 9 割が詰まったセルに入る時間 %s 秒(-1 = 6 秒で入らない)・%s・最大の速さ %lld "
+            "mm/s\n",
+            level == 0 ? "0.5" : "0.25", symbol, vacuumOverride ? "・真空" : "",
+            settledTick < 0 ? "-1" : Fixed3(settledTick * 1000 / 60).c_str(), series.c_str(),
+            (long long)MillimetersPerSecond(run.grainSpeed.back()));
+    }
+
+    // --- 13. 空気が暴れる元(T-1105。記録): 斜面 25°(初めは止まっている)で、空気の面の速さの最大と場所・陰の圧力の誤差・
+    // 運ぶ段で縮めたセル(解いた流れと運んだ流れが食い違う所)を 0.25 秒ごとに ---
+    struct AirPeak {
+        int64_t speed = 0;
+        std::string where;
+    };
+
+    AirPeak MaxGasSpeed(const Box& box) {
+        const View view = BuildView(box);
+        const uint32_t slot = MomentumSlot(box.config.layout, Phase::Gas);
+        AirPeak peak;
+        for (uint32_t cell = 0; cell < CellCount(box); ++cell) {
+            for (uint32_t axis = 0; axis < 3; ++axis) {
+                const std::optional<uint32_t> neighbor = Neighbor(box, cell, axis);
+                if (!neighbor.has_value())
+                    continue;
+
+                const int64_t mass = (view.cells[cell].phaseMassMg[0] + view.cells[*neighbor].phaseMassMg[0] + 1) / 2;
+                if (mass <= 0)
+                    continue;
+
+                const int64_t speed = std::abs(box.faceMomentum[axis][FaceIndex(box, cell, slot)]) / mass;
+                if (speed <= peak.speed)
+                    continue;
+
+                const std::array<uint32_t, 3> at = CellCoordinates(box, cell);
+                peak.speed = speed;
+                peak.where = std::format("({},{})軸{}・詰まり {}/{}‰", at[0], at[1], axis,
+                                         ((uint64_t)view.cells[cell].grainPackedQ16 * 1000) >> 16,
+                                         ((uint64_t)view.cells[*neighbor].grainPackedQ16 * 1000) >> 16);
+            }
+        }
+
+        return peak;
+    }
+
+    // 斜面を箱の細かさ(レベル level のセル)で描き直す(T-1106 の切り分け): 0.5 m の絵を 2 × 2 に分けると、表面が
+    // 0.5 m ごとの段(平ら → 1 セル近い段差)になる。箱のセルの列ごとに頂上 4 m から tan θ で下げ、表面のセルは詰まりの 1/10 刻み。床の石はそのまま
+    void RefillSlopeNative(Box& box, uint64_t tanQ16) {
+        const uint32_t fine = 1u << (uint32_t)box.config.level;
+        const uint32_t sand = MaterialIndex(box, "sand");
+        const uint32_t air = MaterialIndex(box, "air");
+        const uint64_t volume = CellVolumeMm3(box);
+        const uint64_t top = (8ull * fine) << 16;  // 4 m(箱のセルの Q16)
+        for (uint32_t x = 0; x < box.config.sizeX; ++x) {
+            const uint64_t drop = tanQ16 * (2 * x + 1) / 2;
+            const uint64_t height = drop >= top ? 0 : top - drop;
+            const auto whole = (uint32_t)(height >> 16);
+            const auto tenth = (uint32_t)(((height & 0xffff) * 10 + 0x8000) >> 16);
+            for (uint32_t y = fine; y < box.config.sizeY; ++y) {
+                const uint32_t row = y - fine;
+                const uint32_t tenths = row < whole ? 10 : (row == whole ? tenth : 0);
+                const uint32_t cell = CellIndex(box, x, y, 0);
+                const uint64_t grainVolume = volume * 6 * tenths / 100;
+                CellMass(box, cell, sand) = (int64_t)(grainVolume * box.materials[sand].densityKgPerM3 / 1000);
+                CellMass(box, cell, air) = IdealGasMassMg((uint64_t)ATMOSPHERE_PA, volume - grainVolume,
+                                                          box.materials[air].molarMassMgPerMol, 300000);
+                box.energyMillijoules[cell] = ThermalEnergyMillijoules(box, cell, 300000);
+            }
+        }
+    }
+
+    void AirWatch(int32_t level) {
+        std::string series;
+        uint64_t limited = 0;
+        uint64_t grainLimited = 0;
+        const auto sample = [&](Box& box, uint64_t tick) {
+            const uint64_t perQuarter = box.config.ticksPerSecond / 4;
+            if (tick % perQuarter != 0)
+                return;
+
+            const AirPeak air = MaxGasSpeed(box);
+            series += std::format(
+                "\n    {} 秒: 空気 {} mm/s {}・粒 {} mm/s・誤差 {} nL(最大 {})・縮めたセル 流体 {} / 粒 {}",
+                Fixed3((int64_t)tick * 1000 / box.config.ticksPerSecond), MillimetersPerSecond(air.speed), air.where,
+                MillimetersPerSecond(MaxGrainSpeed(box)), currentStats->lastErrorNl, currentStats->maxErrorNl,
+                currentStats->limitedCells - limited, currentStats->grainLimitedCells - grainLimited);
+            limited = currentStats->limitedCells;
+            grainLimited = currentStats->grainLimitedCells;
+        };
+        RunOptions options{.level = level, .seconds = 4, .afterTick = sample};
+        if (nativeSlopeOverride)
+            options.prepare = [](Box& box) {
+                RefillSlopeNative(box, 30560);
+            };
+
+        const Run run = RunR3(MakeSlopeScene(30560), options, {"slope"});
+        std::printf(
+            "  空気の見張り 斜面 25° %s m%s(V %u 回・%u 刻み/秒):%s\n    V 最大 %u・止まった粒の面 %llu・表面の層の面 "
+            "%llu\n",
+            level == 0 ? "0.5" : "0.25", nativeSlopeOverride ? "・箱の細かさで描いた斜面" : "", cyclesOverride,
+            run.box.config.ticksPerSecond, series.c_str(), run.stats.maxCycles,
+            (unsigned long long)run.stats.heldGrainFaces, (unsigned long long)run.stats.surfaceLayerGrainFaces);
+    }
+
     // --- 8. 置き場 ① で同じ場面(④ との比べ)---
     void PlaceOne() {
         const PileResult pile = Pile(0, MomentumLayout::PerPhase);
@@ -1064,10 +1477,52 @@ int main(int argc, char** argv) {
             impactTurnOverride = true;
         else if (word == "vacuum")
             vacuumOverride = true;
+        else if (word == "native")
+            nativeSlopeOverride = true;
         else if (word == "norestlock")
             restLockOverride = false;
+        else if (word.starts_with("contact="))
+            contactOverride = (uint32_t)std::stoi(word.substr(8));
+        else if (word == "friction")
+            frictionInSolveOverride = true;
+        else if (word == "surface")
+            surfaceLayerOverride = frictionInSolveOverride = true;
+        else if (word == "prescribed")
+            prescribedOverride = frictionInSolveOverride = true;
+        else if (word.starts_with("cycles="))
+            cyclesOverride = (uint32_t)std::stoi(word.substr(7));
+        else if (word.starts_with("tps="))
+            ticksOverride = (uint32_t)std::stoi(word.substr(4));
+        else if (word == "opencolumn")
+            openColumnOverride = true;
+        else if (word == "buoyancy")
+            buoyancyOverride = true;
+        else if (word == "prescribed2")
+            prescribedOverride = frictionInSolveOverride = poreDragOverride = true;
+        else if (word == "surface2")
+            surfaceLayerOverride = frictionInSolveOverride = surfaceHeldOnlyOverride = true;
         else if (word == "layer")
             restLayerOverride = true;
+        else if (word == "twostate")
+            twoStatesOverride = true;
+        else if (word == "keeplayer2")
+            twoStatesOverride = keepLayerOverride = restsOnLayerOverride = true;
+        else if (word == "keeplayer")
+            twoStatesOverride = keepLayerOverride = true;
+        else if (word == "split")
+            twoStatesOverride = splitOverride = true;
+        else if (word == "spill")
+            spillOverride = true;
+        else if (word == "onsurface")
+            onSurfaceOverride = true;
+        else if (word == "onsurface2")
+            onSurfaceOverride = surfaceOnLayerOverride = true;
+        else if (word == "probe")
+            probeOverride = true;
+        else if (word == "sidedrag")
+            sideDragOverride = true;
+        else if (word == "nosidedrag")
+            sideDragOverride = false;
         else if (word.starts_with("drag="))
             dragScaleOverride = (uint32_t)std::stoi(word.substr(5));
         else
@@ -1076,7 +1531,7 @@ int main(int argc, char** argv) {
 
     argc = kept;
     const int only = argc > 1 ? std::stoi(argv[1]) : -1;
-    const int speedArgument = only == 10 ? 3 : 2;
+    const int speedArgument = only == 10 ? 3 : (only == 14 ? argc : 2);  // 14 は 2 つ目がレベル
     if (argc > speedArgument) {
         const int speed = std::stoi(argv[speedArgument]);
         movingSpeedOverride = (uint32_t)std::abs(speed);
@@ -1085,6 +1540,33 @@ int main(int argc, char** argv) {
 
     if (only == 10) {
         ReposeSweep(argc > 2 ? (uint32_t)std::stoi(argv[2]) : 0);
+        std::printf("case_b r3: %d failure(s)\n", failureCount);
+
+        return failureCount == 0 ? 0 : 1;
+    }
+
+    if (only == 14) {
+        // 砂山 1 つ(T-1137。全部には入れない): 2 つ目の引数 = レベル(0 = 0.5 m・1 = 0.25 m・-2 = 2 m)・3 つ目 = 秒(既定 20)
+        const int32_t level = argc > 2 ? std::stoi(argv[2]) : 0;
+        Pile(level, MomentumLayout::GrainSeparate, argc > 3 ? (uint64_t)std::stoi(argv[3]) : 20);
+        std::printf("case_b r3: %d failure(s)\n", failureCount);
+
+        return failureCount == 0 ? 0 : 1;
+    }
+
+    if (only == 13) {
+        AirWatch(argc > 2 ? std::stoi(argv[2]) : 1);
+        std::printf("case_b r3: %d failure(s)\n", failureCount);
+
+        return failureCount == 0 ? 0 : 1;
+    }
+
+    if (only == 12) {
+        // 部分セルが沈み固まる時間(T-1091。全部には入れない): 詰まりの 30 %・50 %・80 %(凡例 3・5・8)
+        for (const char symbol : {'3', '5', '8'})
+            Settle(0, symbol);
+
+        Settle(1, '5');
         std::printf("case_b r3: %d failure(s)\n", failureCount);
 
         return failureCount == 0 ? 0 : 1;

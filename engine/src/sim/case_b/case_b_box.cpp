@@ -133,6 +133,29 @@ namespace bicameral::sim::case_b {
             return mass;
         }
 
+        // 置き場 slot に入る質量(GrainTwoState の粒は層と舞う粒に分ける。層が無い箱 = 初めの刻みの前は全部層。T-1138)
+        int64_t SlotMassAt(const Box& box, const View& view, uint32_t cell, uint32_t slot) {
+            const MomentumLayout layout = box.config.layout;
+            if (layout != MomentumLayout::GrainTwoState || slot == 0)
+                return SlotMass(layout, view.cells[cell], slot);
+
+            const int64_t grain = view.cells[cell].phaseMassMg[(uint32_t)Phase::Grain];
+            if (box.grainLayerMg.size() != box.massMg.size())
+                return slot == 1 ? grain : 0;
+
+            const auto materials = (uint32_t)box.materials.size();
+            int64_t layer = 0;
+            for (uint32_t index = 0; index < materials; ++index) {
+                if (box.materials[index].phase != Phase::Grain)
+                    continue;
+
+                const int64_t mass = std::max<int64_t>(CellMass(box, cell, index), 0);
+                layer += std::clamp<int64_t>(box.grainLayerMg[((size_t)cell * materials) + index], 0, mass);
+            }
+
+            return slot == 1 ? layer : std::max<int64_t>(grain - layer, 0);
+        }
+
         // 柱の軸(加速の絶対値が最も大きい軸。全部 0 なら y)
         void FindGravityAxis(const BoxConfig& config, View& view) {
             view.gravityAxis = 1;
@@ -342,7 +365,10 @@ namespace bicameral::sim::case_b {
     }
 
     uint32_t SlotCount(MomentumLayout layout) {
-        return layout == MomentumLayout::PerPhase ? MOVING_PHASE_COUNT : 2;
+        if (layout == MomentumLayout::GrainSeparate)
+            return 2;
+
+        return 3;  // ①(相ごと)・GrainTwoState(流体・層・舞う粒)
     }
 
     uint32_t MomentumSlot(MomentumLayout layout, Phase phase) {
@@ -351,6 +377,10 @@ namespace bicameral::sim::case_b {
             return (uint32_t)phase;
 
         return phase == Phase::Grain ? 1 : 0;
+    }
+
+    uint32_t SuspendedGrainSlot(MomentumLayout layout) {
+        return layout == MomentumLayout::GrainTwoState ? 2 : MomentumSlot(layout, Phase::Grain);
     }
 
     uint32_t FaceIndex(const Box& box, uint32_t cell, uint32_t slot) {
@@ -460,9 +490,7 @@ namespace bicameral::sim::case_b {
         if (!neighbor.has_value())
             return 0;
 
-        const MomentumLayout layout = box.config.layout;
-        const int64_t mass = SlotMass(layout, view.cells[face.cell], face.slot) +
-                             SlotMass(layout, view.cells[*neighbor], face.slot);
+        const int64_t mass = SlotMassAt(box, view, face.cell, face.slot) + SlotMassAt(box, view, *neighbor, face.slot);
         if (mass <= 0)
             return 0;
 
@@ -562,6 +590,10 @@ namespace bicameral::sim::case_b {
         }
 
         error.negativeMass = rng::any_of(box.massMg, [](int64_t value) { return value < 0; });
+        // 層は 0 以上・そのセルの質量以下(T-1136。層は質量の内訳)
+        for (size_t index = 0; index < box.grainLayerMg.size(); ++index)
+            error.negativeMass = error.negativeMass || box.grainLayerMg[index] < 0 ||
+                                 box.grainLayerMg[index] > box.massMg[index];
 
         return error;
     }
@@ -582,6 +614,10 @@ namespace bicameral::sim::case_b {
         }
 
         hash = HashVector(hash, box.pressureMicroPascal);
+        // 層が全部 0 の箱(粒が無い)は層を持たない箱と同じハッシュ(T-1136)
+        if (rng::any_of(box.grainLayerMg, [](int64_t value) { return value != 0; }))
+            hash = HashVector(hash, box.grainLayerMg);
+
         for (uint32_t axis = 0; axis < 3; ++axis) {
             hash = HashVector(hash, box.faceMomentum[axis]);
             hash = HashVector(hash, box.faceCarry[axis]);
@@ -654,6 +690,14 @@ namespace bicameral::sim::case_b {
             const uint32_t target = CellIndex(coarse, at[0] / merge[0], at[1] / merge[1], at[2] / merge[2]);
             for (uint32_t material = 0; material < materials; ++material)
                 CellMass(coarse, target, material) += CellMass(fine, cell, material) * extrude;
+
+            // 層も和(21 §2.12。T-1136)
+            if (!fine.grainLayerMg.empty()) {
+                coarse.grainLayerMg.resize(coarse.massMg.size(), 0);
+                for (uint32_t material = 0; material < materials; ++material)
+                    coarse.grainLayerMg[((size_t)target * materials) +
+                                        material] += fine.grainLayerMg[((size_t)cell * materials) + material] * extrude;
+            }
 
             coarse.energyMillijoules[target] += fine.energyMillijoules[cell] * extrude;
             occupancy[target] += fine.bodyOccupancyQ16[cell];

@@ -1,11 +1,15 @@
 // case_b_scene.cpp — 案 B の試作の場面(B1。T-0867)。何をするかは case_b_scene.h。
 // 場面の絵は描く道具(Canvas。四角を塗る)で作る(サイフォンの頂上の高さのように、形を引数で変えられるように)。
+// 細かくする口(T-1106): 0.5 m の絵から 0.25 m の箱を作る時、詰まり 1/10〜9/10 の表面のセルの粒を 4 つの子に同じ詰まりで配ると、
+// 上の子が「支えの無い詰まり切らないセル」になって初めから落ち、空気の重い流れを作った(T-1105)。粒と液体は下の子から詰めて配る。
+// 寄せ方は多重解像度と同じ sim::PlaceRefineCell(D-664。T-1166 で試作の SettleColumn・SettlePictureCell から置き換えた。答えは同じ)。
 #include "sim/case_b/case_b_scene.h"
 
 #include <algorithm>
 #include <format>
 #include <utility>
 
+#include "common/fixed.hlsli"
 #include "core/aliases.h"
 
 namespace bicameral::sim::case_b {
@@ -104,6 +108,130 @@ namespace bicameral::sim::case_b {
             box.energyMillijoules[cell] = ThermalEnergyMillijoules(box, cell, temperature);
         }
 
+        // --- 細かくする口(T-1106)---
+        // 質量 → 物質そのものの体積(mm³。密度 kg/m³ = 1e-3 mg/mm³)
+        uint64_t SubstanceVolumeMm3(const Material& material, int64_t massMg) {
+            if (material.densityKgPerM3 == 0 || massMg <= 0)
+                return 0;
+
+            return (uint64_t)massMg * 1000 / material.densityKgPerM3;
+        }
+
+        // 細かくする時(T-1106)の絵の 1 セル: 子 childCount 個(n × n)に同じ数で配った時の子 1 つの量(StoreCell と同じ丸め)× 子の数 = 親の量と、
+        // 沈み固まった詰まり(Q16。1 = 子の体積の和。隣の傾きを読む。据わる固体・物 = 1・舞う粒 = 0)。寄せるか・寄せ方は
+        // sim::PlaceRefineCell(D-664 の置かれ方で配る。T-1166 で wt3 の SettlePictureCell から置き換えた。答えは同じ)
+        struct PictureSettle {
+            bool blocked = false;     // 物を含む(寄せない)
+            int64_t fullnessQ16 = 0;  // SfSettleFullnessQ16
+            std::vector<int64_t> massMg;
+        };
+
+        PictureSettle ReadPictureCell(const Box& box, std::span<const PlaceMaterial> places, const LegendEntry& entry,
+                                      uint32_t childCount, uint64_t childVolumeMm3) {
+            PictureSettle cell;
+            cell.massMg.assign(box.materials.size(), 0);
+            if (entry.suspended)
+                return cell;
+
+            std::vector<uint64_t> pct(box.materials.size(), 0);
+            for (const VolumeFill& volume : entry.condensed)
+                pct[MaterialIndex(box, volume.material)] += volume.volumePct;
+
+            for (uint32_t index = 0; index < box.materials.size(); ++index) {
+                const Material& material = box.materials[index];
+                const uint64_t volume = childVolumeMm3 * pct[index] / 100;
+                cell.massMg[index] = (int64_t)(volume * material.densityKgPerM3 / 1000 * childCount);
+            }
+
+            cell.blocked = entry.bodyPct > 0;
+            const state_field::SfSettleSum sum = PlaceSettleSum(places, cell.massMg);
+            cell.fullnessQ16 = state_field::SfSettleFullnessQ16(
+                state_field::SfSettledVolume(sum), childVolumeMm3 * childCount, sum.anchored || cell.blocked);
+
+            return cell;
+        }
+
+        // 絵のセル (x, y) の表面の傾き(Q16。右へ絵の 1 セルで上がる高さ。y − 1〜y + 1 の詰まりの和・minmod)。絵の外は下 = 詰まり切る・上 = 空
+        int64_t PictureSlopeQ16(std::span<const PictureSettle> cells, uint32_t width, uint32_t x, uint32_t y) {
+            const auto rows = (uint32_t)(cells.size() / width);
+            const auto surface = [&](uint32_t column) {
+                const int64_t below = y == 0 ? state_field::SF_SETTLE_FULL_Q16
+                                             : cells[((size_t)(y - 1) * width) + column].fullnessQ16;
+                const int64_t above = y + 1 >= rows ? 0 : cells[((size_t)(y + 1) * width) + column].fullnessQ16;
+
+                return state_field::SfColumnSurfaceQ16(below, cells[((size_t)y * width) + column].fullnessQ16, above);
+            };
+
+            if (x == 0 || x + 1 >= width)
+                return 0;
+
+            return state_field::SfSurfaceSlopeQ16(surface(x - 1), surface(x), surface(x + 1), true);
+        }
+
+        // 子のセルに凝縮相を書き、残りの空きに凡例の圧力の気体(AddPictureCell と同じ式)・熱
+        void WriteSettledChild(Box& box, uint32_t cell, const LegendEntry& entry, std::span<const int64_t> massMg,
+                               uint64_t cellVolumeMm3, uint32_t temperature) {
+            uint64_t taken = 0;
+            for (uint32_t index = 0; index < box.materials.size(); ++index) {
+                CellMass(box, cell, index) = massMg[index];
+                taken += SubstanceVolumeMm3(box.materials[index], massMg[index]);
+            }
+
+            if (entry.gasPressurePa > 0 && taken < cellVolumeMm3) {
+                const uint64_t openVolume = cellVolumeMm3 - taken;
+                for (const GasFill& gas : entry.gas) {
+                    const uint32_t index = MaterialIndex(box, gas.material);
+                    const int64_t mass = IdealGasMassMg(entry.gasPressurePa, openVolume,
+                                                        box.materials[index].molarMassMgPerMol, temperature);
+                    CellMass(box, cell, index) += (int64_t)((uint64_t)mass * gas.molePermille / 1000);
+                }
+            }
+
+            box.bodyOccupancyQ16[cell] = 0;
+            box.energyMillijoules[cell] = ThermalEnergyMillijoules(box, cell, temperature);
+        }
+
+        // 細かくする時(T-1106): 寄せる絵のセルの子を全部書き、書いた子に印を付ける(残りは呼ぶ側が同じ数で配る。T-1106 の前と同じビット)。
+        // 重さの向きは −y(BuildScene の箱の既定)
+        void StoreSettledCells(const Scene& scene, Box& box, uint32_t fine, uint64_t cellVolumeMm3,
+                               std::vector<uint8_t>& written) {
+            const uint32_t width = SceneWidth(scene);
+            const uint32_t height = SceneHeight(scene);
+            const std::vector<PlaceMaterial> places = ScenePlaceMaterials(box.materials);
+            std::vector<PictureSettle> cells;
+            cells.reserve((size_t)width * height);
+            for (uint32_t y = 0; y < height; ++y) {
+                for (uint32_t x = 0; x < width; ++x) {
+                    const LegendEntry& entry = *FindLegend(scene, scene.rows[height - 1 - y][x]);
+                    cells.push_back(ReadPictureCell(box, places, entry, fine * fine, cellVolumeMm3));
+                }
+            }
+
+            for (uint32_t y = 0; y < height; ++y) {
+                for (uint32_t x = 0; x < width; ++x) {
+                    const PictureSettle& cell = cells[((size_t)y * width) + x];
+                    // 箱は 2 次元(z の子は 1 つ)。子の番号は PlacedChildren::ChildIndex(列, 0, 段)
+                    const PlaceCell place = {.massMg = cell.massMg,
+                                             .slopeXQ16 = PictureSlopeQ16(cells, width, x, y),
+                                             .slopeZQ16 = 0,
+                                             .blocked = cell.blocked};
+                    const PlacedChildren children = PlaceRefineCell(places, place, fine, 1, cellVolumeMm3);
+                    if (!children.settled)
+                        continue;
+
+                    const LegendEntry& entry = *FindLegend(scene, scene.rows[height - 1 - y][x]);
+                    for (uint32_t j = 0; j < fine; ++j) {
+                        for (uint32_t row = 0; row < fine; ++row) {
+                            const uint32_t child = CellIndex(box, (x * fine) + j, (y * fine) + row, 0);
+                            WriteSettledChild(box, child, entry, children.massMg[children.ChildIndex(j, 0, row)],
+                                              cellVolumeMm3, scene.temperatureMilliKelvin);
+                            written[child] = 1;
+                        }
+                    }
+                }
+            }
+        }
+
         std::expected<void, std::string> CheckScene(const Scene& scene, int32_t level) {
             if (level < SCENE_MIN_LEVEL || level > SCENE_MAX_LEVEL)
                 return std::unexpected(
@@ -165,6 +293,22 @@ namespace bicameral::sim::case_b {
         return (uint32_t)scene.rows.size();
     }
 
+    std::vector<PlaceMaterial> ScenePlaceMaterials(std::span<const Material> materials) {
+        std::vector<PlaceMaterial> places;
+        places.reserve(materials.size());
+        for (const Material& material : materials) {
+            const uint32_t kind = material.phase == Phase::Gas      ? state_field::SF_SETTLE_GAS
+                                  : material.phase == Phase::Liquid ? state_field::SF_SETTLE_LIQUID
+                                  : material.phase == Phase::Grain  ? state_field::SF_SETTLE_GRAIN
+                                                                    : state_field::SF_SETTLE_ANCHORED;
+            places.push_back({.kind = kind,
+                              .densityKgPerM3 = material.densityKgPerM3,
+                              .packedFractionPct = material.packedFractionPct});
+        }
+
+        return places;
+    }
+
     std::expected<Box, std::string> BuildScene(const Scene& scene, int32_t level, MomentumLayout layout,
                                                Diagnostics* diagnostics) {
         if (auto checked = CheckScene(scene, level); !checked)
@@ -185,7 +329,14 @@ namespace bicameral::sim::case_b {
         Box box = std::move(*created);
         const uint64_t cellVolume = CellVolumeMm3(box);
         const uint32_t height = SceneHeight(scene);
+        std::vector<uint8_t> written(CellCount(box), 0);
+        if (fine > 1 && scene.refineFill == RefineFill::Settle)
+            StoreSettledCells(scene, box, fine, cellVolume, written);
+
         for (uint32_t cell = 0; cell < CellCount(box); ++cell) {
+            if (written[cell] != 0)
+                continue;
+
             const std::array<uint32_t, 3> at = CellCoordinates(box, cell);
             CellFill fill;
             fill.condensedPct.assign(box.materials.size(), 0);

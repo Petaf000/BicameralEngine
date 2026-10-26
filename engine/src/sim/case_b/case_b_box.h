@@ -38,6 +38,9 @@ namespace bicameral::sim::case_b {
     enum class MomentumLayout : uint8_t {
         PerPhase,       // 案 ①: 相ごとの面 ×3(気体・液体・粒)
         GrainSeparate,  // 案 ④: 粒だけ別 + 気体と液体は混ざった運動量(流体・粒)
+        // 案 ④ + 舞う粒(T-1138・D-668。研究): 流体・積もった層の粒・舞う粒の 3 つ。粒の 2 つの状態(FlowOptions::grainTwoStates)と
+        // 一緒に使い、層と舞う粒がそれぞれの速さを持つ。2 つの状態を使わない時は ④ と同じ(舞う粒の置き場は 0 のまま)
+        GrainTwoState,
     };
 
     // --- 物質の欄(21 §1.1。書かなければ std::nullopt)---
@@ -169,6 +172,11 @@ namespace bicameral::sim::case_b {
         std::vector<std::array<int64_t, 3>> bodyVelocity;  // 物の速さ(2^-20 m/s。決まった相)
         std::vector<int64_t> pressureMicroPascal;          // 導かれる圧力(段が書く。次の刻みの初めの近似)
 
+        // --- 粒の 2 つの状態(T-1136・D-659。研究の 1 本目。空 = 使わない = 今までと同じ)---
+        // セル × 物質の「積もった層」の質量(粒の物質だけ。0 ≤ 層 ≤ そのセルの質量)。残り(質量 − 層)= 空気・水の中に舞う粒。
+        // 保存量は massMg のまま(層 ↔ 舞う粒はセルの中の受け渡しで、帳簿は増えない)。運ぶ段が層の分を一緒に運ぶ(case_b_flow)
+        std::vector<int64_t> grainLayerMg;
+
         // --- 面の開き具合(導かれる値。ハッシュ・保存・粗くするの外。T-0937 の欄 face.blocked と同じ形と意味・ADR-0420)---
         // 番号 = セル(+ 側の面)。空の軸は全部 0(欄の無い頁 = 塞がない)。運ぶ段が FoFaceOpen・FoGrainFaceOpen で読む
         std::array<std::vector<uint32_t>, 3> faceBlockedQ16;  // 面の塞ぐ割合(Q16)
@@ -201,7 +209,10 @@ namespace bicameral::sim::case_b {
     [[nodiscard]] uint32_t CellIndex(const Box& box, uint32_t x, uint32_t y, uint32_t z);
     [[nodiscard]] std::array<uint32_t, 3> CellCoordinates(const Box& box, uint32_t cell);
     [[nodiscard]] uint32_t SlotCount(MomentumLayout layout);
-    [[nodiscard]] uint32_t MomentumSlot(MomentumLayout layout, Phase phase);  // Phase は動く相(0〜2)
+    // Phase は動く相(0〜2)。GrainTwoState の粒は積もった層の置き場
+    [[nodiscard]] uint32_t MomentumSlot(MomentumLayout layout, Phase phase);
+    // 舞う粒の置き場(T-1138)。GrainTwoState だけ層と別で、ほかの置き場は粒の置き場と同じ
+    [[nodiscard]] uint32_t SuspendedGrainSlot(MomentumLayout layout);
     [[nodiscard]] uint32_t FaceIndex(const Box& box, uint32_t cell, uint32_t slot);
     // 軸 axis で cell の + 側の隣(無ければ std::nullopt = 壁)
     [[nodiscard]] std::optional<uint32_t> Neighbor(const Box& box, uint32_t cell, uint32_t axis);
