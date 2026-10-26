@@ -28,7 +28,8 @@ namespace bicameral::sim {
         uint32_t smallSide = 8;      // 小さい箱の辺(セル。8 = 512)
         uint32_t largeSide = 16;     // 大きい箱の辺(16 = 4,096)
         int32_t levelExponent = 10;  // 段の多い箱の面の係数 × 2^e(長い歩の列の系の形。段の数ごとの費用を測る)
-        // 測る前に GPU の時計を上げる: 大きい箱の解きを heatBatchSolves 回ずつ、GPU の時間が heatNs に届くまで(0 = 熱さない)
+        // 測る前に GPU の時計を上げる: 大きい箱の解きを heatBatchSolves 回ずつ、GPU の時間が heatNs に届くまで(0 = 熱さない。
+        // 既定 0.4 秒 = D-672。起動が延びるのは構わない)
         uint64_t heatNs = 400000000;
         uint32_t heatBatchSolves = 512;
         uint32_t maxHeatBatches = 64;

@@ -144,6 +144,8 @@ namespace {
     // select= を書いた時は forward をその選び方だけで(T-1063。予算ごとに 1 通り目 + 前線の緩衝だけ確かめる)
     bool selectGiven = false;
     uint32_t bufferUnits = 0;  // 前線の緩衝を単位(groupShift の組)の数で(T-1074。0 = buffer= の形)
+    // 滑る窓の半径(m。window=。D-669・T-1175。0 = 外す = 4 m の格子)。窓の時は 4 m の格子の組(unitByLength)を使わない
+    double windowMeters = 0.0;
     // 燃える物を置く所(T-1153。空 = どこにも置く。x〔m〕→ 置くか)
     std::function<bool(double)> fuelAt;
 
@@ -174,7 +176,8 @@ namespace {
         setup.cyclesAtZero = zeroCycles;
         setup.shortExponent = shortExponent;
         setup.residualStop = residualStop;
-        setup.unitByLength = unitByLength;
+        setup.unitByLength = unitByLength && windowMeters <= 0.0;
+        setup.windowLevel0Cells = static_cast<uint32_t>(std::llround(windowMeters / 0.5));  // レベル 0 のセルは 0.5 m
 
         return setup;
     }
@@ -584,7 +587,9 @@ namespace {
 
         return std::format("{} 通り目{}・予算 {}・木 {}・揃える段 {}・V {}(1 刻み {})・単位 {}",
                            selectRule == TimeTreeSelect::Retake ? 2 : 1, buffer, BudgetText(), shapeName, groupShift,
-                           trialCycles != 0 ? trialCycles : longCycles, zeroCycles, unitByLength ? "4 m" : "ブロック");
+                           trialCycles != 0 ? trialCycles : longCycles, zeroCycles,
+                           windowMeters > 0.0 ? std::format("窓 {:g} m", windowMeters)
+                                              : std::string(unitByLength ? "4 m" : "ブロック"));
     }
 
     void LogRun(std::string_view scene, std::string_view name, const TimeTreeWorld& world, const RunResult& run,
@@ -1491,6 +1496,8 @@ namespace {
                 shortExponent = std::atoi(value.c_str());
             else if (key == "unit")
                 unitByLength = value != "block";
+            else if (key == "window")
+                windowMeters = std::atof(value.c_str());
             else if (key == "bufferunits")
                 bufferUnits = static_cast<uint32_t>(std::atoi(value.c_str()));
             else if (key == "shape") {
