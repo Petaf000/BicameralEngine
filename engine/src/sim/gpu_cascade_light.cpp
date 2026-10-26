@@ -48,6 +48,7 @@ namespace bicameral::sim {
             ResetBags,
             PipelineCount,
         };
+        static_assert(PipelineCount == GpuCascadeLight::STAGE_COUNT);
 
         constexpr std::array<const char*, PipelineCount> SHADER_NAMES = {
             "sim/cascade_light_init_state.cso",     "sim/cascade_light_init_bags.cso",
@@ -325,35 +326,49 @@ namespace bicameral::sim {
     }
 
     void GpuCascadeLight::RecordTick(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
-                                     uint64_t tick) {
+                                     uint64_t tick, gpu::StageStamps* stamps, uint8_t firstStage) {
         if (m_ownRoot)
-            RecordTickWith(list, nullptr, debugRing, tick, static_cast<uint32_t>(tick & 1));
+            RecordTickWith(list, nullptr, debugRing, tick, static_cast<uint32_t>(tick & 1), stamps, firstStage);
+    }
+
+    std::string_view GpuCascadeLight::StageName(uint32_t stage) {
+        constexpr std::array<std::string_view, PipelineCount> NAMES = {
+            "InitState",     "InitBags",   "BeginTick", "Sources",   "CarryIn",  "ClearFaces",
+            "Level0Prepare", "Level0Walk", "LevelWalk", "ClearBags", "ResetBags"};
+        return stage < NAMES.size() ? NAMES[stage] : std::string_view("?");
     }
 
     void GpuCascadeLight::RecordTickWith(ID3D12GraphicsCommandList10* list, GpuMultires* nest,
-                                         D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick, uint32_t in) {
+                                         D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick, uint32_t in,
+                                         gpu::StageStamps* stamps, uint8_t firstStage) {
         const auto tickLow = static_cast<uint32_t>(tick);  // 刻みは 2^32 未満(試験と測りの範囲)
         const uint64_t cells = m_cellCount;
         if (nest != nullptr)
             nest->SetExternalViews(m_work->GetGPUVirtualAddress(), m_state->GetGPUVirtualAddress());
 
+        // 起動の後ろ(Dispatch がバリアを置いた後)に段の印(測りの時だけ。結果には入らない)
+        const auto run = [&](Pipeline pipeline, uint64_t items, std::array<uint32_t, 4> external) {
+            Dispatch(list, nest, debugRing, pipeline, items, external);
+            if (stamps != nullptr)
+                stamps->Mark(list, static_cast<uint8_t>(firstStage + pipeline));
+        };
+
         // --- 段 0: 放つ面 ---
-        Dispatch(list, nest, debugRing, BeginTick, rx::RC_GPU_HEADER_WORDS, {tickLow, in, 0, 0});
-        Dispatch(list, nest, debugRing, Sources, cells, {tickLow, in, 0, 0});
+        run(BeginTick, rx::RC_GPU_HEADER_WORDS, {tickLow, in, 0, 0});
+        run(Sources, cells, {tickLow, in, 0, 0});
         const uint32_t out = 1 - in;
-        Dispatch(list, nest, debugRing, CarryIn, m_params.carryKeys, {tickLow, in, 0, 0});
-        Dispatch(list, nest, debugRing, Level0Prepare, m_params.faceCapacity, {tickLow, in, 0, 0});
-        Dispatch(list, nest, debugRing, Level0Walk, uint64_t{m_params.faceCapacity} * m_params.texelsPerFace,
-                 {tickLow, in, 0, out << 1});
-        Dispatch(list, nest, debugRing, ClearFaces, m_params.faceCapacity, {tickLow, in, 0, 0});
+        run(CarryIn, m_params.carryKeys, {tickLow, in, 0, 0});
+        run(Level0Prepare, m_params.faceCapacity, {tickLow, in, 0, 0});
+        run(Level0Walk, uint64_t{m_params.faceCapacity} * m_params.texelsPerFace, {tickLow, in, 0, out << 1});
+        run(ClearFaces, m_params.faceCapacity, {tickLow, in, 0, 0});
 
         // --- 段 1 から: 袋の表を交互に ---
         for (uint32_t level = 1; level < m_params.levels; ++level) {
             const uint32_t table = (level - 1) & 1u;
-            Dispatch(list, nest, debugRing, LevelWalk, uint64_t{m_params.bagCapacity} * m_params.raysPerBag,
-                     {tickLow, level, 0, table | (out << 1)});
-            Dispatch(list, nest, debugRing, ClearBags, m_params.bagCapacity, {tickLow, level, 0, table});
-            Dispatch(list, nest, debugRing, ResetBags, 1, {tickLow, level, 0, table});
+            run(LevelWalk, uint64_t{m_params.bagCapacity} * m_params.raysPerBag,
+                {tickLow, level, 0, table | (out << 1)});
+            run(ClearBags, m_params.bagCapacity, {tickLow, level, 0, table});
+            run(ResetBags, 1, {tickLow, level, 0, table});
         }
 
         // 照り返しと組を待つ光は、歩く間に表 out へ足してある(次の刻みが読む)

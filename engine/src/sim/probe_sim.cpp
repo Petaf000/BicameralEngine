@@ -736,6 +736,9 @@ namespace bicameral::sim {
         ID3D12GraphicsCommandList10* list = frame.list.Get();
         const uint32_t firstQuery = slot * TIMESTAMPS_PER_SLOT;
         list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, firstQuery);
+        if (m_radiationStamps)
+            m_radiationStamps->Begin(slot);
+
         const bool initializing = !m_initialized;
         if (initializing)
             RecordInitialization(list);
@@ -803,6 +806,9 @@ namespace bicameral::sim {
         RecordReadbacks(list, slot, hasHash);
         const uint32_t lastQuery = firstQuery + 1 + input.unitCount;
         list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, lastQuery);
+        if (m_radiationStamps)
+            m_radiationStamps->Resolve(list);
+
         list->ResolveQueryData(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, firstQuery, input.unitCount + 2,
                                frame.timestampReadback.Get(), 0);
         if (const HRESULT closed = list->Close(); FAILED(closed)) {
@@ -1012,14 +1018,19 @@ namespace bicameral::sim {
     void ProbeSim::RecordRadiation(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick) {
         const D3D12_RESOURCE_BARRIER allUavs = gpu::UavBarrier(nullptr);
         const GpuCascadeLight& negative = m_cascadeNegative ? *m_cascadeNegative : *m_cascade;
+        MarkRadiation(list, ProbeRadiationStage::Start);
         BindRadiationViews(list, m_cascade->Work(), negative.Work(), m_radiationLights.Get());
         list->SetPipelineState(m_radiationPipelines[0].Get());
         list->Dispatch(LINEAR_CELL_GROUPS, 1, 1);
         list->ResourceBarrier(1, &allUavs);
+        MarkRadiation(list, ProbeRadiationStage::Grid);
 
-        m_cascade->RecordTick(list, m_debugRing.GpuAddress(), tick);
+        gpu::StageStamps* stamps = m_radiationStamps ? &*m_radiationStamps : nullptr;
+        m_cascade->RecordTick(list, m_debugRing.GpuAddress(), tick, stamps,
+                              static_cast<uint8_t>(ProbeRadiationStage::PositiveFirst));
         if (m_cascadeNegative)
-            m_cascadeNegative->RecordTick(list, m_debugRing.GpuAddress(), tick);
+            m_cascadeNegative->RecordTick(list, m_debugRing.GpuAddress(), tick, stamps,
+                                          static_cast<uint8_t>(ProbeRadiationStage::NegativeFirst));
 
         BindRootArguments(list, input);
         SetUnitConstants(list, tick, m_speciesCount);
@@ -1027,20 +1038,36 @@ namespace bicameral::sim {
         list->SetPipelineState(m_radiationPipelines[1].Get());
         list->Dispatch(LINEAR_CELL_GROUPS, 1, 1);
         list->ResourceBarrier(1, &allUavs);
+        MarkRadiation(list, ProbeRadiationStage::Apply);
         BindRootViews(list, input);
     }
 
+    // 段ごとの GPU 時間の印(測りの時だけ)
+    void ProbeSim::MarkRadiation(ID3D12GraphicsCommandList10* list, ProbeRadiationStage stage) {
+        if (m_radiationStamps)
+            m_radiationStamps->Mark(list, static_cast<uint8_t>(stage));
+    }
+
     // 状態のハッシュの単位: 次の刻みへの持ち越しの寄与を足す(側ごと。単位の引数 = 歩幅のスレッドの数)
-    void ProbeSim::RecordRadiationHash(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick) const {
+    void ProbeSim::RecordRadiationHash(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick) {
         constexpr uint32_t HASH_GROUPS = 2048;  // 持ち越しの表の全部の鍵(セル × 12)を掃く(T-1164)
+        const D3D12_RESOURCE_BARRIER allUavs = gpu::UavBarrier(nullptr);
         SetUnitConstants(list, tick, HASH_GROUPS * PROBE_LINEAR_GROUP_SIZE);
         list->SetPipelineState(m_radiationPipelines[2].Get());
+        MarkRadiation(list, ProbeRadiationStage::Start);
         for (const std::optional<GpuCascadeLight>* side : {&m_cascade, &m_cascadeNegative}) {
             if (!side->has_value())
                 continue;
 
             BindRadiationViews(list, (*side)->Work(), (*side)->State(), m_radiationLights.Get());
             list->Dispatch(HASH_GROUPS, 1, 1);
+            // 測りの時だけ側ごとに待つ(ハッシュは atomic の和なので順は結果に入らない)
+            if (!m_radiationStamps)
+                continue;
+
+            list->ResourceBarrier(1, &allUavs);
+            MarkRadiation(list,
+                          side == &m_cascade ? ProbeRadiationStage::HashPositive : ProbeRadiationStage::HashNegative);
         }
 
         SetUnitConstants(list, tick, 0);
@@ -1324,6 +1351,8 @@ namespace bicameral::sim {
         result.hashes = ReadHashes(frame);
         result.debugAssertCount = m_debugRing.Drain(MAX_LOGGED_DEBUG_MESSAGES, slot).assertCount;
         ReadRadiationHeader(frame, result);
+        if (m_radiationStamps)
+            m_radiationStamps->Collect(slot);
 
         // ノードのカウンタ: 要約は Trace、上限に当たった・近づいたものは Warning(gpu/work_graph_stats.h)
         auto graphStats = m_graphStats.Read(slot);
@@ -1381,6 +1410,8 @@ namespace bicameral::sim {
                                              static_cast<uint32_t>(header[reaction::RC_GPU_FACE_COUNT]));
             result.radiationBagPeak = std::max(result.radiationBagPeak,
                                                static_cast<uint32_t>(header[reaction::RC_GPU_BAG_PEAK]));
+            for (uint32_t level = 0; level < reaction::RC_GPU_STEPS - reaction::RC_GPU_RAYS; ++level)
+                result.radiationRays += header[reaction::RC_GPU_RAYS + level];
         }
 
         if (result.radiationOverflow == 0 || m_radiationOverflowLogged)

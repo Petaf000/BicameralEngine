@@ -829,6 +829,9 @@ bicameral_add_gpu_test(gpu_play_metric_test)  # 遊びの指標を写しの早�
 target_link_libraries(gpu_play_metric_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_play_metric gpu_play_metric_test gpu)
 set_tests_properties(gpu_play_metric PROPERTIES TIMEOUT 900)
+bicameral_add_gpu_test(gpu_radiation_cost_test)  # 仮の世界の熱の放射の段の段ごとの費用(T-1161)。印を付けても結果が同じか
+target_link_libraries(gpu_radiation_cost_test PRIVATE bicameral_sim)
+bicameral_add_gpu_test_case(gpu_radiation_cost gpu_radiation_cost_test gpu)
 
 bicameral_add_gpu_test(gpu_probe_peek_test)
 target_link_libraries(gpu_probe_peek_test PRIVATE bicameral_sim)
@@ -1264,7 +1267,7 @@ foreach(_name IN ITEMS
     gpu_probe_trace_test gpu_probe_rewind_test gpu_world_copy_test gpu_probe_physics_test gpu_probe_fire_test
     gpu_conduct_bench gpu_implicit_box_bench gpu_place_bench blank_world_test gpu_probe_blank_test gpu_probe_gas_test
     gpu_probe_liquid_test world_layout_test play_metric_test
-    gpu_play_metric_test environment_package_test multires_graded_test placement_refine_test
+    gpu_play_metric_test gpu_radiation_cost_test environment_package_test multires_graded_test placement_refine_test
     tree_refine_placement_test)
   target_link_libraries(${_name} PRIVATE bicameral_test_reaction_table)
 endforeach()
