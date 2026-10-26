@@ -42,4 +42,6 @@ T-1157 の「置かれ方で配る」を GPU で回す形にして DXC で通し
 
 ## 作業ログ
 - 2026-10-26 本体: GPU の回しと入口・GPU の試験・PlaceIndexOfMrChild・2-3 の印。HW の GPU で SfOpenVolume の上の 32bit が壊れたのを、差・比べ・積を書き出して突き止め、32bit に分けた引き算で直した。
-  2-2・2-5・木のセルの中身は T-1176〜T-1178 に分けた。試験は下の行。
+  2-2・2-5・木のセルの中身は T-1176〜T-1178 に分けた。
+  通した試験(release・警告 0・archmap OK): placement_refine・field_storage・warm_start_save 49 s・multires 40 s・multires_state 67 s・multires_edge・multires_gas 403 s・multires_liquid 413 s・
+  gpu_placement_refine・gpu_placement_refine_warp・gpu_multires・gpu_multires_uniform。
