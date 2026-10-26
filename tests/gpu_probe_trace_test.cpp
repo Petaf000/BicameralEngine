@@ -132,6 +132,9 @@ namespace {
     CpuRun RunReference(const BakedReactionTable& table, std::span<const ProbeCommand> commands,
                         const GraphTraceFilter& filter, uint64_t ticks) {
         ProbeReference reference(table);
+        // トレースの予想(AppendExpectedProbeTrace)はつつき・置くの根だけを数え、熱の放射の段が起こすブロックを数えないので、
+        // 放射は GPU・CPU とも切る(T-1154。放射の根を予想に足すのは後で)
+        reference.SetCascadeRadiation({.enabled = false});
         CpuRun result;
         for (uint64_t tick = 0; tick < ticks; ++tick) {
             const std::vector<uint8_t> flagsBefore(reference.BlockFlags().begin(), reference.BlockFlags().end());
@@ -198,7 +201,9 @@ namespace {
         GpuRun result;
         auto queue = gpu::Queue::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, L"TraceTestSim");
         auto simulation = ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, table,
-                                           {.trace = filter, .traceCapacity = changes.empty() ? 0 : TRACE_CAPACITY});
+                                           {.trace = filter,
+                                            .traceCapacity = changes.empty() ? 0 : TRACE_CAPACITY,
+                                            .cascadeRadiation = {.enabled = false}});
         if (!queue || !simulation) {
             Log(Channel::Sim, Level::Error, "作れない: {}{}", queue ? "" : queue.error(),
                 simulation ? "" : simulation.error());

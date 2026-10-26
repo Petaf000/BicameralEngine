@@ -127,6 +127,8 @@ namespace {
         PhysicsWorld world(scene,
                            PhysicsParametersFor(StandardWorldPhysics()));  // サンプルの世界と同じ標準の重力(D-480)
         ProbeReference reference(table);
+        // 物理の熱の帳簿(増え = つつき + 物理の熱)を見る試験なので、熱の放射の段は GPU・CPU とも切る(physics_heat と同じ。T-1154)
+        reference.SetCascadeRadiation({.enabled = false});
         const std::vector<ProbeCommand> commands = MakePushCommands();
         std::vector<physics::PxHeatEntry> heat;  // 前の刻みの物理の熱の入口
         for (uint64_t tick = 0; tick < ticks; ++tick) {
@@ -268,7 +270,8 @@ namespace {
                                                 .busyPieces = m_second ? 3u : 1u,
                                                 .physicsScene = &scene,
                                                 .physicsOptions = {.broadphaseGraph = !m_config.computeBroadphase},
-                                                .physicsParameters = PhysicsParametersFor(StandardWorldPhysics())});
+                                                .physicsParameters = PhysicsParametersFor(StandardWorldPhysics()),
+                                                .cascadeRadiation = {.enabled = false}});
 
             // 雑音: 別の優先度の高い direct のキューで重い仕事を流す(窓の描画のように、物理の途中に割り込ませる)
             auto noiseQueue = gpu::Queue::Create(m_device, D3D12_COMMAND_LIST_TYPE_DIRECT, L"PhysicsProbeTestNoise",

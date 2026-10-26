@@ -169,6 +169,7 @@
 | 2026-10-26 | 空との交換の口を 1 回の起動で(T-1147・ADR-0474 案。`job.py run -Preset release -Exe gpu_sun_column_test -- --queue compute`、wt6 のランナー) | RTX 3070 Ti・release・64³ の地形(0.5 m・根 512)・既定の 4 向き・帯の正と負を 1 本の光線に・向きを 1 回の起動に・光線の細かさ 0・10 回の平均・0 にする段を含む | 昼(短い帯は正・長い帯は負)0.55 ms・夜(長い帯だけ負)0.46 ms・向きを刻みで回す形(1 向き)0.23〜0.25 ms。同じ回の T-1145 の形(掃き 8 本を 1 本ずつ)は 1.98 ms(前の回 4.42 ms は回の揺れ)。どれも CPU とビット一致 | RTX 3070 Ti | t-1062-light-alt |
 | 2026-10-25 | 空との交換の口(T-1145・ADR-0474 案。`job.py run -Preset release -Exe gpu_sun_column_test -- --queue compute`、wt6 のランナー) | RTX 3070 Ti・release・64³ の地形(0.5 m・根 512)・既定の 4 向き (±1, −1, ±1) × 正と負 = 太陽の影の柱の掃き 8 本・光線の細かさ 0 | 4.42 ms(掃きごとに 10 回の平均の和。掃き 1 本ごとに出力を 0 にする段を含む。同じ回の真上の太陽 1 本は 0.36 ms)。CPU とビット一致 |
 | 2026-10-26 | 仮の世界の CPU リファレンスの熱の放射の既定の段(RC。T-1113。`job.py run -Preset release -Exe probe_radiation_test -- --measure 1800`、wt6 のランナー) | CPU だけ(GPU の仮の世界には未。T-1154)・release・64³・サンプルの世界の木箱に火(3 セル)・15 組・熱も待つ(D-658) | 1 刻み 約 180 ms(放射なし 13 ms)= 放射の段 約 165 ms/刻み(CascadeGrid の写し + StepCascadeLight)。仮の線 1 ms は GPU で測る(T-1154) | CPU のみ | (t-1113-radiation-all) |
+| 2026-10-26 | 仮の世界の GPU の熱の放射の段(RC。T-1154。`job.py run -Preset release -Exe gpu_play_metric_test`、wt6 のランナー、ほかの作業ツリーと並走) | release・compute キュー・64³・サンプルの世界の木箱の壁に火(遊びの指標 sealed_fire_out の場面・物理なし)・15 組・熱も待つ(D-658)・CPU とビット一致 | 写しの早送りの 1 刻みの GPU 時間 699 µs(5280 刻みの平均)。放射なし(main 90ff780e・同じ場面)152.7 µs → 放射の取り分 約 0.55 ms/刻み(写し・RC の 12 段・当てる段・持ち越しのハッシュ)。仮の線 1 ms の内。sealed_fire_out は放射で火をつけたセルが冷めて 86 秒で止まる(放射なしでは 600 秒の上限まで) | RTX 3070 Ti | (t-1113-radiation-all) |
 
 ## 見積もり(計算。測った値ではない)
 

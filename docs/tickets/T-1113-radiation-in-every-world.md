@@ -14,7 +14,7 @@
 ## 完了条件
 - [x] 放射の段が仮の世界の既定で動く(CPU リファレンス。表のどれかの物質が光の値を書いた時。ブランクの世界では何もしない)
 - [ ] 多重解像度の世界(実験の箱・世界の刻み)で動く。光の RC(cascade_light。D-646)と同じ置き場・組を使う(決めた: 同じ段そのもの。下)→ T-1155
-- [ ] GPU 版と CPU リファレンスのビット一致 → T-1154(仮の世界の GPU の刻みに RC を載せる)
+- [x] GPU 版と CPU リファレンスのビット一致 → T-1154(2026-10-26 Done。仮の世界の GPU の刻みに RC を載せた)
 - [x] reaction_package_scene を戻した(基準の取り直し。下)/ [ ] lab_box(T-1155)・gpu_probe_fire(T-1154 + T-1156)
 - [ ] 費用(RTX 3070 Ti。D-634)→ GPU は T-1154。CPU リファレンスは記録した(docs/perf.md)
 
@@ -28,7 +28,8 @@
 - 仮の世界の CPU(ProbeReference)の (1d) の位置(気体 → 液体 → **放射** → 伝導と反応。23 §3.5)。sim/probe_reference_radiation.cpp。
   刻みの初めの温度(熱のキャッシュ)と成分の光の値(LtCellBandOf → RdOpticalDepthQ32)で 64³ の CascadeGrid を作り、吸った − 放った(2^−16 mJ)を最も近い mJ に丸めてセルへ当てる。
 - 保存: Σ セルのエネルギー × 2^16 + Σ 持ち越し + Σ 外へ出た + Σ 丸め − Σ つつき × 2^16 が毎刻みビット単位で一定(probe_radiation_test)。持ち越しは StateHash に入る(D-619。持ち越しが空なら今までと同じ値)。
-- 切る口: ProbeReference::SetCascadeRadiation({.enabled = false})。**GPU と比べる試験(gpu_probe_* 8 本・gpu_world_copy・遊びの指標の CPU リファレンス)は GPU に放射が入るまで切って比べる**(T-1154 で外す)。
+- 切る口: ProbeReference::SetCascadeRadiation({.enabled = false})・ProbeSimOptions::cascadeRadiation。GPU と比べる試験は T-1154 で放射ありの比べに戻した(trace・physics だけは両方切る)。
+- 持ち越しのハッシュは T-1154 で (セル・面・帯) ごとの寄与の和に変えた(GPU が順不同に足せる形)。
 
 ## 仮(ユーザー未確認)
 - 【エンジン】**放射の段を流す条件**: 表のどれかの物質が光の値(light_absorption_*・light_reflectance_*・radiation_absorption_mm2_per_mol)を書いた時だけ。書いた表では、書かない固体・液体は D-610 のとおり灰色で放つ・吸う。
@@ -67,10 +68,11 @@
   放射の坂(同じ温度で正味 0・熱い側から冷たい側へ)を計器に入れる形は R-R1 の「坂を下る」の合格と一緒に決める。
 
 - **gpu_play_metric が落ちた**(2026-10-26 wt6・release): 「反応の速さを変えた表では sealed_fire_out の値が変わる」(gpu_play_metric_test.cpp:55)。落ちたのは GPU だけで測る所で、
-  この枝は GPU の刻みを変えていない(CPU リファレンスの fire_prefix は一致)。T-1066(現実の伝導率で密室の火が広がらない → 速さを変えても消える刻みが同じ)由来の見込み。**未確認: main で流して確かめる**。
+  この枝は GPU の刻みを変えていない(CPU リファレンスの fire_prefix は一致)。T-1066(現実の伝導率で密室の火が広がらない → 速さを変えても消える刻みが同じ)由来の見込み。
+  → **確かめた(2026-10-26): main でも落ちる。T-1163 で判定の量を直した**(ブランチ t-1163-gpu-metric-fix。この枝はその上に載せた)。
 
 - **gpu_world_copy も落ちた**: 「つつきを当てない写しは本物と違う(コマンドが効いている)」(gpu_world_copy_test.cpp:472。写しが条件で止まる刻みが、違いを生むつつきの刻みより前)。
-  CPU との一致の判定は通っている(この試験の CPU リファレンスは放射を切って比べている)。GPU の刻みはこの枝で変えていないので、これも T-1066 由来の場面の変化の見込み(**未確認: main で流す**)。
+  CPU との一致の判定は通っている(この試験の CPU リファレンスは放射を切って比べている)。GPU の刻みはこの枝で変えていないので、これも T-1066 由来の場面の変化の見込み → **main でも落ちた。T-1163 で直した**。
 
 ## 試験(2026-10-26 wt6・release・警告 0)
 - 合格: probe_radiation(新)・reaction_package_scene(戻した)・reaction_package・reaction_replay_table・blank_world・physics_heat・rest_return・reaction_species_remap・slope_check・probe_liquid・probe_phase_porous_stone、
@@ -80,3 +82,4 @@
 ## 作業ログ
 - 2026-10-26(wt6・t-1113-radiation-all): 仮の世界の CPU リファレンスに RC の放射の段を既定で入れた(probe_reference_radiation.cpp・保存と決定性の試験 probe_radiation)。GPU と比べる試験は切って比べる。
   reaction_package_scene を基準の取り直しで戻した。木箱の火は放射でも広がらない(測り)。GPU・多重解像度・燃え広がりは T-1154〜T-1156 に分けた。release 警告 0。
+- 2026-10-26(wt6・2 回目): 落ちた 2 本は main 由来と確かめて T-1163 で直した。T-1154(GPU の放射)を済ませた。残りは T-1155・T-1156。
