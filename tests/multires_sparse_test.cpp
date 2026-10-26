@@ -93,11 +93,15 @@ namespace {
     }
 
     // --- 前とビット一致(T-0931): 場面ごとに毎刻みの状態の要約・世界の要約を 1 つに束ね、セルの持ち方を変える前の値と比べる ---
-    // 値は T-0931 の前(main d35b5c4。セル = RxCell 112 B の密な並び)で測った。0 は「まだ無い」(出すだけ)
+    // 値は T-0931 の前(main d35b5c4。セル = RxCell 112 B の密な並び)で測った。0 は「まだ無い」(出すだけ)。
+    // T-1209 で取り直した: 7d87b630(T-1077)が帳簿の理由を 1 つ足し(WL_REASON_OBJECT_EXCHANGE)、帳簿の区画が 22 → 24 欄に伸びた
+    // (足した 2 欄はこの場面では全部 0)。帳簿を前の 22 欄だけにして取ると 6 場面とも前の値
+    // (0xcf8ee04b11cfb313・0x33d63cfb8ecc3101・0x18b67f0d77dea1d0・0xbdae7d98a6a1fb69・0xe9aae7d44564f3d4・0x606acadec1f56d5f)と一致した
+    // = 状態の値は同じで、区画の長さだけが変わった。帳簿の理由・列の数を変えたら取り直す
     enum Scene : uint32_t { SceneStress, SceneShadow, SceneReal, SceneAir, SceneBurning, SceneLiquid, SceneCount };
-    constexpr std::array<uint64_t, SceneCount> GOLDEN_DIGESTS = {0xcf8ee04b11cfb313, 0x33d63cfb8ecc3101,
-                                                                 0x18b67f0d77dea1d0, 0xbdae7d98a6a1fb69,
-                                                                 0xe9aae7d44564f3d4, 0x606acadec1f56d5f};
+    constexpr std::array<uint64_t, SceneCount> GOLDEN_DIGESTS = {0xea0a6ae8c141e9c9, 0xad8c1f1a19990bba,
+                                                                 0xd5417fcbda4e221d, 0x04ad05e1a4443107,
+                                                                 0x9e558f3ef5837703, 0x5706c9b62720c953};
 
     uint64_t AddDigest(uint64_t digest, const MultiresNest& nest) {
         digest = fx::FxHashCombine(digest, HashWholeNest(nest));

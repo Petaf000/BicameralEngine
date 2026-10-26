@@ -21,6 +21,7 @@
 MR_NAMESPACE_BEGIN
 
 // --- 理由(帳簿の行の見出し。数を変えたら WL_REASON_COUNT も)---------------------------------------------
+// 数を変えると帳簿の区画の長さが変わり状態の要約も変わる。tests/multires_sparse_test の要約の束を取り直す(T-1209)
 FX_CONST uint32_t WL_REASON_COARSEN_REMAINDER = 0;  // 粗くした端数(畳んだ平均の余り・返した端数の枠。前の MR の帳簿)
 FX_CONST uint32_t WL_REASON_EDIT = 1;               // 改造(置く・消す・温度を決める。出 = 消した中身、入 = 置いた中身)
 FX_CONST uint32_t WL_REASON_PHYSICS_HEAT = 2;       // 物理の熱(物の運動のエネルギー → セルの熱。MR にはまだ無い)
