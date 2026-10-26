@@ -85,7 +85,7 @@ namespace bicameral::sim {
         [[nodiscard]] bool PageFoldable(const MultiresNest& nest, uint32_t slot);
 
         // 頁を持つ枠 slot の欄を値 1 つに戻す(頁を返す前に。PageFoldable の後)。導かれる値は覆われていないセルの平均を
-        // 残す(SfSleepValue。20 §10.3 の (b)。起きた時は ExpandPage が子は親と同じ数で配る)
+        // 残す(SfSleepValueOf。20 §10.3 の (b)。眠る時に捨てる印の欄は 0。起きた時は ExpandPage が子は親と同じ数で配る)
         void FoldPage(MultiresNest& nest, uint32_t slot);
 
         // 親 parentSlot の八分の一 octant を子 childSlot(頁 childPage。一様なら MR_NO_PAGE)に細かくする: 子は親と同じ数。

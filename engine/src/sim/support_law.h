@@ -117,7 +117,8 @@ namespace bicameral::sim {
         // Coupled は blocks.warmStart、Lagged は成分 c を値 component + c に。既定は置かない(法則の控えだけ)
         EquilibriumWarmStart warmStart;
         // 刻みをまたぐ共役勾配の向きと残差を C-1 の温めた始まりの欄に置く(D-649。値の数 ≥ 成分の数。Coupled だけ)。
-        // 置けば保存点とハッシュに入る。既定は置かない(法則の控えだけ)
+        // 置けば保存点とハッシュに入る。既定は置かない(法則の控えだけ)。欄は眠る時に捨てる印で登録する
+        // (RegisterWarmStartField の discardOnSleep = true。起きた刻みは形が変わるので使わない。ADR-0469 の 2-3・T-1159)
         EquilibriumWarmStart conjugateDirection;
         EquilibriumWarmStart conjugateResidual;
     };

@@ -822,6 +822,11 @@ target_link_libraries(gpu_surface_detail_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_surface_detail gpu_surface_detail_test gpu)
 bicameral_add_gpu_test_case(gpu_surface_detail_warp gpu_surface_detail_test warp --warp)
 
+bicameral_add_gpu_test(gpu_placement_refine_test)  # 細かくする時の「置かれ方で配る」の GPU と CPU のビット一致(T-1159)
+target_link_libraries(gpu_placement_refine_test PRIVATE bicameral_sim)
+bicameral_add_gpu_test_case(gpu_placement_refine gpu_placement_refine_test gpu --queue compute)
+bicameral_add_gpu_test_case(gpu_placement_refine_warp gpu_placement_refine_test warp --warp --queue compute)
+
 bicameral_add_gpu_test(gpu_probe_liquid_test)
 target_link_libraries(gpu_probe_liquid_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_probe_liquid gpu_probe_liquid_test gpu --no-gbv)

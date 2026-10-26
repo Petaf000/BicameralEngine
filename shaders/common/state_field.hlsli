@@ -73,7 +73,10 @@ FX_CONST uint32_t SF_FLAG_WARM_START = 8u;
 // 置かれ方が一様(気体だけ・詰まり切った・据わる固体)なら SAME とビット単位で同じ
 FX_CONST uint32_t SF_FLAG_PLACE_CONDENSED = 16u;
 FX_CONST uint32_t SF_FLAG_PLACE_OPEN = 32u;
-FX_CONST uint32_t SF_FLAG_MASK = 63u;
+// 眠る時に捨てる(T-1159。ADR-0469 の 2-3・20 §10.3): 導かれる値だけ。眠る(頁を畳む)時に一様の値の枠へ平均ではなく 0 を残す。
+// 起きた時に使わない温めた始まり(支えの刻みをまたぐ共役勾配の向きと残差。D-649・wt2 T-1086)に付ける(保存点の無駄を省く)
+FX_CONST uint32_t SF_FLAG_SLEEP_DISCARD = 64u;
+FX_CONST uint32_t SF_FLAG_MASK = 127u;
 
 // --- 細かくする時の配り方(印から決まる。SfRefinePlacement)---
 FX_CONST uint32_t SF_REFINE_SAME = 0;
@@ -147,6 +150,10 @@ FX_FN bool SfDescValid(SfFieldDesc desc) {
     // 導かれる値: セル・面の欄・量でない(SAME)・保存量でない。ハッシュに入るかは種類から決まるので HASHED を書かない(T-0854)
     if (derived && (desc.scale != SF_SCALE_SAME || (desc.flags & (SF_FLAG_CONSERVED | SF_FLAG_HASHED)) != 0u ||
                     (desc.place != SF_PLACE_CELL && desc.place != SF_PLACE_FACE)))
+        return false;
+
+    // 眠る時に捨てるのは導かれる値だけ(真実は眠っても状態そのもの。T-1159)
+    if ((desc.flags & SF_FLAG_SLEEP_DISCARD) != 0u && !derived)
         return false;
 
     // 置かれ方の印は真実のセル・面の欄だけ・どちらか 1 つ(T-1157)
@@ -451,6 +458,11 @@ FX_FN int64_t SfMeanValue(SfMeanSum sum) {
 // 眠る時に一様の値の枠へ残す値(平均 mean。(a) 捨てるなら 0)
 FX_FN int64_t SfSleepValue(int64_t mean) {
     return SF_DERIVED_SLEEP_KEEP_COARSE ? mean : (int64_t)0;
+}
+
+// 欄ごと(T-1159): 眠る時に捨てる印(SF_FLAG_SLEEP_DISCARD)の欄は 0、ほかは SfSleepValue
+FX_FN int64_t SfSleepValueOf(SfFieldDesc desc, int64_t mean) {
+    return (desc.flags & SF_FLAG_SLEEP_DISCARD) != 0u ? (int64_t)0 : SfSleepValue(mean);
 }
 
 // --- 観察の影を親に引き戻す(T-0761。ADR-0361)-------------------------------------------------------

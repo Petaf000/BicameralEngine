@@ -18,9 +18,11 @@
 namespace bicameral::sim {
 
     // 温めた始まりの欄を登録する(作った直後・根を置く前に)。SfMakeDerivedDesc(SF_PLACE_CELL, SF_TYPE_I64, phase, true, components)。
-    // components は節の値の数(1〜SF_MAX_COMPONENTS。成分を持つ節の k)。断られたら MULTIRES_NO_FIELD
+    // components は節の値の数(1〜SF_MAX_COMPONENTS。成分を持つ節の k)。断られたら MULTIRES_NO_FIELD。
+    // discardOnSleep: 眠る時に平均ではなく 0 を残す(SF_FLAG_SLEEP_DISCARD。起きた時に使わない値。支えの刻みをまたぐ共役勾配の向き・残差。
+    // ADR-0469 の 2-3・T-1159)
     [[nodiscard]] uint32_t RegisterWarmStartField(MultiresNest& nest, std::string name, uint32_t phase,
-                                                  uint32_t components);
+                                                  uint32_t components, bool discardOnSleep = false);
 
     // 節 i の値 values[i × perNode + c](c < perNode)を、節のセル(レベルと座標で引いた本物のブロックのセル)の欄の値
     // warm.component + c へ書く。書けなかった節の数を返す: 節のブロックが無い・一様(眠っている)・覆われたセルの節は書かない
