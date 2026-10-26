@@ -10,6 +10,7 @@
 // GPU の仮の世界は sim/probe_sim_radiation.cpp + shaders/sim/probe_radiation.hlsl(T-1154。毎刻みビット一致)。共有の「当てる段」(20 §2.4)がまだ無いので、この段がセルへ直接足す(土台に足りないもの。T-1113)。
 // 浮動小数点は使わない(engine/src/sim は検査の対象)。
 #include <algorithm>
+#include <array>
 
 #include "core/aliases.h"
 #include "sim/probe_sim.h"
@@ -78,24 +79,42 @@ namespace bicameral::sim {
             grid.temperatureMk[index] = m_caches[currentBase + index].temperature;  // 負は 0(熱のキャッシュの約束)
         }
 
-        // --- 段(1 刻み)---
-        const CascadeTickResult result = StepCascadeLight(grid, m_cascadeCarry, m_cascade.params, tick);
-        m_cascadeCarry = result.carry;
+        // --- 段(1 刻み)。参照の温度の形(T-1164)は正の側と負の側の 2 つ ---
+        const bool relative = m_cascade.params.referenceMk != 0 || m_cascade.params.negativePart;
+        std::array<CascadeTickResult, 2> sides;
+        if (relative) {
+            CascadeRelativeResult both = StepCascadeLightRelative(grid, {m_cascadeCarry, m_cascadeCarryNegative},
+                                                                  m_cascade.params, tick);
+            sides = std::move(both.sides);
+            m_cascadeCarryNegative = sides[1].carry;
+        } else {
+            sides[0] = StepCascadeLight(grid, m_cascadeCarry, m_cascade.params, tick);
+        }
+
+        m_cascadeCarry = sides[0].carry;
         m_cascadeReport.ran = true;
-        m_cascadeReport.rays = result.rays;
-        for (const CascadeBandLedger& band : result.ledger)
-            m_cascadeReport.escaped += band.escaped;
+        const size_t sideCount = relative ? 2 : 1;
+        for (size_t side = 0; side < sideCount; ++side) {
+            m_cascadeReport.rays += sides[side].rays;
+            for (const CascadeBandLedger& band : sides[side].ledger)
+                m_cascadeReport.escaped += side == 0 ? band.escaped : 0 - band.escaped;  // 負の側は引く(mod 2^64)
+        }
 
         // --- セルへ当てる(丸めの端数は帳簿へ)---
         for (uint32_t index = 0; index < PROBE_CELL_COUNT; ++index) {
-            const uint64_t absorbed = result.absorbed[(size_t{index} * rx::LT_BANDS) + rx::LT_BAND_SHORT] +
-                                      result.absorbed[(size_t{index} * rx::LT_BANDS) + rx::LT_BAND_LONG];
-            const uint64_t emitted = result.emitted[(size_t{index} * rx::LT_BANDS) + rx::LT_BAND_SHORT] +
-                                     result.emitted[(size_t{index} * rx::LT_BANDS) + rx::LT_BAND_LONG];
-            m_cascadeReport.absorbed += absorbed;
-            m_cascadeReport.emitted += emitted;
+            int64_t net = 0;
+            for (size_t side = 0; side < sideCount; ++side) {
+                const CascadeTickResult& result = sides[side];
+                const uint64_t absorbed = result.absorbed[(size_t{index} * rx::LT_BANDS) + rx::LT_BAND_SHORT] +
+                                          result.absorbed[(size_t{index} * rx::LT_BANDS) + rx::LT_BAND_LONG];
+                const uint64_t emitted = result.emitted[(size_t{index} * rx::LT_BANDS) + rx::LT_BAND_SHORT] +
+                                         result.emitted[(size_t{index} * rx::LT_BANDS) + rx::LT_BAND_LONG];
+                m_cascadeReport.absorbed += absorbed;
+                m_cascadeReport.emitted += emitted;
+                const int64_t sideNet = static_cast<int64_t>(absorbed) - static_cast<int64_t>(emitted);
+                net += side == 0 ? sideNet : -sideNet;
+            }
 
-            const int64_t net = static_cast<int64_t>(absorbed) - static_cast<int64_t>(emitted);
             const int64_t milliJoules = RoundToMilliJoules(net);
             m_cascadeReport.rounding += net - (milliJoules * (int64_t{1} << rx::RC_ENERGY_SHIFT));
             if (milliJoules == 0)
@@ -122,6 +141,9 @@ namespace bicameral::sim {
         uint64_t units = m_cascadeOutside;
         for (const CascadeCarryEntry& entry : m_cascadeCarry.entries)
             units += entry.amount;
+
+        for (const CascadeCarryEntry& entry : m_cascadeCarryNegative.entries)
+            units -= entry.amount;  // 負の側はセルから借りた分(mod 2^64)
 
         return units;
     }

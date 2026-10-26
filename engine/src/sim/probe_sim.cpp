@@ -1866,6 +1866,12 @@ namespace bicameral::sim {
                 hash += ProbeCascadeCarryHashTerm(entry.cell, entry.face, entry.band, entry.amount);
         }
 
+        // 負の側(参照の温度の形だけ。面の番号に 8 を足して正の側と分ける)
+        for (const CascadeCarryEntry& entry : m_cascadeCarryNegative.entries) {
+            if (entry.amount != 0)
+                hash += ProbeCascadeCarryHashTerm(entry.cell, entry.face | 8u, entry.band, entry.amount);
+        }
+
         return hash;
     }
 

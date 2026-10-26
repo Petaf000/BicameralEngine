@@ -133,12 +133,18 @@ FX_FN RcBands RcFaceEmissionRelative(uint32_t temperatureMk, uint32_t referenceW
                                      RcCellLight across) {
     const uint32_t referenceMk = referenceWord & ~RC_REFERENCE_NEGATIVE;
     const bool negative = (referenceWord & RC_REFERENCE_NEGATIVE) != 0;
+    RcBands bands;
+    bands.shortBand = 0;
+    bands.longBand = 0;
+    // 参照と同じ温度は両方の側で 0(下の差と同じ値。黒体の量を 2 回求めずに抜ける: 釣り合った世界の CPU の費用。T-1164)
+    if ((referenceMk != 0 || negative) && temperatureMk == referenceMk)
+        return bands;
+
     const RcBands own = RcFaceEmission(temperatureMk, light, across);
     if (referenceMk == 0 && !negative)
         return own;
 
     const RcBands reference = RcFaceEmission(referenceMk, light, across);
-    RcBands bands;
     bands.shortBand = negative ? RcPositivePart(reference.shortBand, own.shortBand)
                                : RcPositivePart(own.shortBand, reference.shortBand);
     bands.longBand = negative ? RcPositivePart(reference.longBand, own.longBand)

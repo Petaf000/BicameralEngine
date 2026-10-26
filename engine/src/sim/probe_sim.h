@@ -250,6 +250,9 @@ namespace bicameral::sim {
     // 表のどの物質も光の値(light_absorption_*・light_reflectance_*・radiation_absorption_mm2_per_mol)を書いていなければ流さない
     // (ProbeTableWritesLight。仮〔ユーザー未確認〕: 書いた表では書かない固体・液体は D-610 の灰色。T-1113 のチケット)。
     // CPU(ProbeReference::SetCascadeRadiation)と GPU(ProbeSimOptions::cascadeRadiation。T-1154)に同じ値を渡すと毎刻みビット一致する
+    // 世界の外の扱い(T-1155・T-1164): params.referenceMk が 0 なら外は 0 K の空(今の既定)。0 でなければ参照の温度との差だけを運ぶ
+    // (ADR-0461。StepCascadeLightRelative。外 = 参照の温度の物。同じ温度の所は何も放たないので、参照の温度の世界は眠れる)。
+    // 参照の温度の形は今は CPU リファレンスだけ(GPU の仮の世界は作る時に断る。T-1164)
     struct ProbeCascadeOptions {
         bool enabled = true;
         CascadeParams params;  // 既定は D-658 の形(15 組・熱も待つ)
@@ -711,7 +714,7 @@ namespace bicameral::sim {
         bool ran = false;                // 段を流した(表が光の値を書いている)
         uint64_t emitted = 0;            // セルから引いた(熱で放った。待たせた分も含む)
         uint64_t absorbed = 0;           // セルへ足した
-        uint64_t escaped = 0;            // 世界の外へ出た(帳簿の出)
+        uint64_t escaped = 0;            // 世界の外へ出た(帳簿の出。参照の温度の形では 正 − 負 の mod 2^64)
         int64_t rounding = 0;            // mJ に丸めた端数(セルへ当てなかった分。帳簿の「丸め」。正 = 世界から消えた)
         int64_t appliedMilliJoules = 0;  // セルのエネルギーの変化の和(mJ)
         uint32_t changedCells = 0;       // エネルギーが変わったセル
@@ -772,6 +775,8 @@ namespace bicameral::sim {
         [[nodiscard]] const ProbeCascadeOptions& CascadeRadiation() const { return m_cascade; }
         [[nodiscard]] const ProbeCascadeReport& LastCascadeReport() const { return m_cascadeReport; }
         [[nodiscard]] const CascadeCarry& CascadeRadiationCarry() const { return m_cascadeCarry; }
+        // 参照の温度との差の負の側の持ち越し(referenceMk が 0 なら空。量はセルから借りた分 = 保存の和では引く)
+        [[nodiscard]] const CascadeCarry& CascadeRadiationCarryNegative() const { return m_cascadeCarryNegative; }
         // セルの外にある放射のエネルギー(2^−16 mJ の mod 2^64)= 持ち越しの和 + これまでに世界の外へ出た分 + 丸めの端数。
         // 保存: ProbeEnergySum × 2^16 + これ − Σ つつき × 2^16 が刻みによらず一定(放射の段の無い世界では 0)
         [[nodiscard]] uint64_t CascadeRadiationUnits() const;
@@ -821,6 +826,7 @@ namespace bicameral::sim {
         ProbeCascadeOptions m_cascade;  // 熱の放射の既定の段(T-1113)
         ProbeCascadeReport m_cascadeReport;
         CascadeCarry m_cascadeCarry;               // 次の刻みへの持ち越し(照り返し・組を待つ光)
+        CascadeCarry m_cascadeCarryNegative;       // 参照の温度との差の負の側の持ち越し(T-1164)
         uint64_t m_cascadeOutside = 0;             // これまでに世界の外へ出た分 + 丸めの端数(2^−16 mJ の mod 2^64)
         std::optional<ProbeLiquidField> m_liquid;  // 液体の区画(T-0609。無ければ流さない)
         ProbeLiquidStepReport m_liquidReport;

@@ -110,6 +110,10 @@ add_executable(cascade_light_swing_test cascade_light_swing_test.cpp)
 target_link_libraries(cascade_light_swing_test PRIVATE bicameral_reaction_script bicameral_multires bicameral_core)
 add_test(NAME cascade_light_swing COMMAND cascade_light_swing_test)
 set_tests_properties(cascade_light_swing PROPERTIES TIMEOUT 1500)
+# 木を読む写し(T-1155: 粗い葉を 0.5 m に広げる・葉ごとに足す)
+add_executable(cascade_tree_grid_test cascade_tree_grid_test.cpp)
+target_link_libraries(cascade_tree_grid_test PRIVATE bicameral_reaction_script bicameral_multires bicameral_core)
+add_test(NAME cascade_tree_grid COMMAND cascade_tree_grid_test)
 set_tests_properties(cascade_light PROPERTIES TIMEOUT 1500)  # 筋の 500 刻み・坂の 200 刻み(T-0959)
 add_executable(radiation_lines_test radiation_lines_test.cpp)
 target_link_libraries(radiation_lines_test PRIVATE bicameral_reaction bicameral_core)
@@ -1211,7 +1215,7 @@ add_test(NAME float_check_source_accepts
 foreach(_name IN ITEMS
     reaction_package_test reaction_package_scene_test reaction_species_remap_test reaction_test reaction_contention_test
     reaction_wait_test multires_test multires_wide_test multires_activity_test multires_quiet_test multires_uniform_test
-    multires_state_test field_storage_test sun_column_test sun_lens_test object_heat_test object_heat_nest_test grass_wake_test cascade_light_test sky_port_test cascade_light_swing_test
+    multires_state_test field_storage_test sun_column_test sun_lens_test object_heat_test object_heat_nest_test grass_wake_test cascade_light_test sky_port_test cascade_light_swing_test cascade_tree_grid_test
     multires_conduction_test multires_edge_test multires_subcycle_test multires_implicit_test multires_implicit_tree_test lab_box_test
     gpu_reaction_test gpu_sun_column_test gpu_cascade_light_test gpu_object_heat_test gpu_object_heat_nest_test gpu_multires_test gpu_multires_activity_test gpu_multires_quiet_test gpu_multires_uniform_test
     gpu_multires_conduction_test gpu_multires_implicit_test gpu_multires_implicit_build_test gpu_multires_implicit_tree_test

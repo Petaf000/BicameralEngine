@@ -33,6 +33,10 @@ namespace bicameral::sim {
         if (!m_options.cascadeRadiation.enabled || table.speciesLight.empty() || !ProbeTableWritesLight(table))
             return {};
 
+        if (m_options.cascadeRadiation.params.referenceMk != 0 || m_options.cascadeRadiation.params.negativePart)
+            return std::unexpected(
+                "熱の放射の段: 参照の温度の形は GPU の仮の世界でまだ動かない(CPU リファレンスだけ。T-1164)");
+
         CascadeGrid grid;
         grid.size = {PROBE_GRID_SIZE, PROBE_GRID_SIZE, PROBE_GRID_SIZE};
         grid.lights.resize(PROBE_CELL_COUNT);
