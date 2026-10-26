@@ -54,6 +54,18 @@ namespace bicameral::sim {
             page.layers = std::move(layers);
         }
 
+        // 頁のセル index に成分を書く(成分の数の外は 0 に。並びが値だけで決まるように)。頁の幅は足りていること
+        void WriteCell(MultiresCellPage& page, uint32_t index, const RxCell& cell) {
+            page.energy[index] = cell.energy;
+            page.counts[index] = static_cast<uint8_t>(cell.speciesCount);
+            const size_t base = size_t{index} * page.width;
+            for (uint32_t i = 0; i < page.width; ++i) {
+                const bool used = i < cell.speciesCount;
+                page.species[base + i] = used ? cell.species[i] : 0;
+                page.amounts[base + i] = used ? cell.amounts[i] : 0;
+            }
+        }
+
         // --- 層(T-1210)---
 
         // 書く前の頁のセル index の層を、新しいセルの成分へ物質で結ぶ: 層 = min(前の層, 新しい量)。前に無かった物質の層は 0
@@ -119,22 +131,16 @@ namespace bicameral::sim {
             if (cell.speciesCount > cells.width)
                 RelayoutPage(cells, cell.speciesCount);
 
-            // --- 層を物質で結んで付け替える(書く前の成分から。層の無い頁は何もしない。T-1210)---
-            const bool layered = !cells.layers.empty();
-            const MrCellLayers layers = layered ? RebindLayers(cells, index, cell) : MrCellLayers{};
-
-            // --- 書く(成分の数の外は 0 に。並びが値だけで決まるように)---
-            cells.energy[index] = cell.energy;
-            cells.counts[index] = static_cast<uint8_t>(cell.speciesCount);
-            const size_t base = size_t{index} * cells.width;
-            for (uint32_t i = 0; i < cells.width; ++i) {
-                const bool used = i < cell.speciesCount;
-                cells.species[base + i] = used ? cell.species[i] : 0;
-                cells.amounts[base + i] = used ? cell.amounts[i] : 0;
+            // --- 層の無い頁は成分だけ書く(前と同じ道)---
+            if (cells.layers.empty()) {
+                WriteCell(cells, index, cell);
+                return;
             }
 
-            if (layered)
-                WriteLayers(cells, index, cell.speciesCount, layers);
+            // --- 層を物質で結んで付け替える(書く前の成分から。T-1210)---
+            const MrCellLayers layers = RebindLayers(cells, index, cell);
+            WriteCell(cells, index, cell);
+            WriteLayers(cells, index, cell.speciesCount, layers);
         }
 
         void NarrowPageCells(MultiresNest& nest, uint32_t page) {
