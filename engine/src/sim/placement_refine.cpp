@@ -96,7 +96,8 @@ namespace bicameral::sim {
         SfSettleSum sum = SfMakeSettleSum();
         for (size_t index = 0; index < materials.size(); ++index) {
             const PlaceMaterial& material = materials[index];
-            sum = SfAddSettle(sum, material.kind, material.densityKgPerM3, material.packedFractionPct, massMg[index]);
+            sum = SfAddSettleOf(sum, material.kind, material.densityKgPerM3, material.packedFractionPct,
+                                material.molarVolumeMm3PerMol, massMg[index]);
         }
 
         return sum;
@@ -187,7 +188,8 @@ namespace bicameral::sim {
                     continue;
 
                 condensedMass += (uint64_t)child[index];
-                condensedVolume += SfSubstanceVolume(child[index], material.densityKgPerM3);
+                condensedVolume += SfMaterialVolume(child[index], material.densityKgPerM3,
+                                                    material.molarVolumeMm3PerMol);
             }
 
             weights.condensed.push_back(condensedMass);

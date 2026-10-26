@@ -3,6 +3,10 @@
 // 乱数の親のセルと端の場面(気体だけ・詰まり切った・据わる固体・物・半分の砂・凝縮相がごくわずか・傾きの頭打ち)で走らせ、
 // sim::PlaceRefineCell・PlaceChildWeights(columns = 2・depth = 2)と、子の番号を写し替えて(sim::PlaceIndexOfMrChild)ビット単位で比べる。
 // 子の体積は 3 通り(32bit を超える体積も。体積は t0 の先頭の 8 バイトで渡す)。引数は gpu_test_options.h。
+// 傾きの式(SfColumnSurfaceQ16・SfSurfaceSlopeQ16・SfClampColumnSlopeQ16)も乱数と端の値で 1 値ずつ比べる(入口の g_mode = 1。T-1176。
+// 64bit の引き算と比べを並べる形は HW の GPU で壊れた〔T-1159〕ので、式は 32bit で計算する。それが HW で合うかを見る)。
+#include <array>
+
 #include "core/log.h"
 #include "core/singleton.h"
 #include "gpu/com_ptr.h"
@@ -224,6 +228,150 @@ namespace {
         }
     }
 
+    // --- 傾きの式(g_mode = 1)---
+    constexpr uint32_t SLOPE_CASES = 8192;
+    constexpr uint32_t SLOPE_WORDS = 8;
+    constexpr uint32_t SLOPE_OUTPUTS = 3;
+
+    // 詰まり(0〜1。端の値を多めに)
+    int64_t RandomFullness(Random& random) {
+        const uint64_t pick = random.Next(8);
+        if (pick == 0)
+            return 0;
+
+        if (pick == 1)
+            return SF_SETTLE_FULL_Q16;
+
+        if (pick == 2)
+            return SF_SETTLE_FULL_Q16 - (int64_t)random.Next(3);
+
+        return (int64_t)random.Next((uint64_t)SF_SETTLE_FULL_Q16 + 1);
+    }
+
+    std::vector<int64_t> MakeSlopeCases(uint64_t seed) {
+        Random random(seed);
+        std::vector<int64_t> words;
+        for (uint32_t i = 0; i < SLOPE_CASES; ++i) {
+            const int64_t below = RandomFullness(random);
+            const int64_t here = RandomFullness(random);
+            const int64_t above = RandomFullness(random);
+            const int64_t surface = SfColumnSurfaceQ16(below, here, above);
+
+            // 横の表面: 列の表面そのもの(差 0)・隣の 3 つの詰まりから・差 ±1
+            const auto side = [&]() -> int64_t {
+                const uint64_t pick = random.Next(6);
+                if (pick == 0)
+                    return surface;
+
+                if (pick == 1)
+                    return surface + (int64_t)random.Next(3) - 1;
+
+                return SfColumnSurfaceQ16(RandomFullness(random), RandomFullness(random), RandomFullness(random));
+            };
+            const int64_t lowSide = side();
+            const int64_t highSide = side();
+            const int64_t slope = random.Next(4) == 0 ? (int64_t)random.Next(1u << 21) - (1 << 20)
+                                                      : (int64_t)random.Next(400001) - 200000;
+            const uint32_t columns = std::array<uint32_t, 4>{2, 3, 4, 8}[random.Next(4)];
+            words.insert(words.end(),
+                         {below, here, above, lowSide, highSide, random.Next(5) == 0 ? 0 : 1, slope, (int64_t)columns});
+        }
+
+        return words;
+    }
+
+    std::expected<std::vector<int64_t>, std::string> RunSlopesOnGpu(ID3D12Device5* device,
+                                                                    D3D12_COMMAND_LIST_TYPE queueType,
+                                                                    std::span<const int64_t> cases) {
+        auto queue = gpu::ImmediateQueue::Create(device, queueType);
+        const auto bytecode = gpu::LoadShader("sim/placement_refine_check.cso");
+        const auto debugRing = gpu::DebugRing::Create(device);
+        if (!queue || !bytecode || !debugRing)
+            return std::unexpected("キュー・シェーダー・デバッグの輪を作れない");
+
+        const ComPtr<ID3D12RootSignature> rootSignature = gpu::CreateRootSignature(device, ROOT_LAYOUT);
+        if (!rootSignature)
+            return std::unexpected("ルート署名を作れない");
+
+        const ComPtr<ID3D12PipelineState> pipeline = gpu::CreateComputePipeline(device, rootSignature.Get(), *bytecode);
+        const auto count = (uint32_t)(cases.size() / SLOPE_WORDS);
+        const std::vector<uint32_t> unusedMaterials(4, 0);
+        std::vector<gpu::ResidentBuffer> inputs;
+        inputs.push_back(gpu::CreateResidentBuffer(device, std::as_bytes(std::span(unusedMaterials))));
+        inputs.push_back(gpu::CreateResidentBuffer(device, std::as_bytes(cases)));
+        const uint64_t outputBytes = (uint64_t)count * SLOPE_OUTPUTS * sizeof(int64_t);
+        const ComPtr<ID3D12Resource> output = gpu::CreateBuffer(device, outputBytes, gpu::BufferKind::UnorderedAccess);
+        const ComPtr<ID3D12Resource> readback = gpu::CreateBuffer(device, outputBytes, gpu::BufferKind::Readback);
+        if (!pipeline || !inputs[0].Valid() || !inputs[1].Valid() || !output || !readback)
+            return std::unexpected("パイプラインかバッファを作れない");
+
+        ID3D12GraphicsCommandList10* list = queue->Begin();
+        if (list == nullptr)
+            return std::unexpected("コマンドリストを始められない");
+
+        debugRing->RecordBegin(list);
+        gpu::RecordResidentUploads(list, inputs);
+        list->SetComputeRootSignature(rootSignature.Get());
+        list->SetPipelineState(pipeline.Get());
+        list->SetComputeRootUnorderedAccessView(0, output->GetGPUVirtualAddress());
+        const uint32_t constants[4] = {0, count, 1, 0};
+        list->SetComputeRoot32BitConstants(ROOT_LAYOUT.RootConstantIndex(), 4, constants, 0);
+        list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.DebugRingIndex(), debugRing->GpuAddress());
+        for (uint32_t i = 0; i < 2; ++i)
+            list->SetComputeRootShaderResourceView(ROOT_LAYOUT.SrvIndex(i), inputs[i].buffer->GetGPUVirtualAddress());
+
+        list->Dispatch((count + (CELLS_PER_GROUP * 8) - 1) / (CELLS_PER_GROUP * 8), 1, 1);
+        gpu::RecordCopyToReadback(list, output.Get(), readback.Get());
+        debugRing->RecordReadbackAndReset(list);
+        if (!queue->ExecuteAndWait())
+            return std::unexpected("GPU での実行に失敗");
+
+        if (debugRing->Drain().assertCount > 0)
+            return std::unexpected("GPU の FX_ASSERT が出た");
+
+        std::vector<int64_t> values((size_t)count * SLOPE_OUTPUTS);
+        if (!gpu::ReadBuffer(readback.Get(), std::as_writable_bytes(std::span(values))))
+            return std::unexpected("読み戻せない");
+
+        return values;
+    }
+
+    bool RunSlopes(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE queueType) {
+        const std::vector<int64_t> cases = MakeSlopeCases(53);
+        const auto gpuValues = RunSlopesOnGpu(device, queueType, cases);
+        if (!gpuValues) {
+            Log(Channel::Gpu, Level::Error, "gpu_placement_refine_test: FAILED ({})", gpuValues.error());
+            return false;
+        }
+
+        int mismatches = 0;
+        int slopes = 0;
+        int clamped = 0;
+        for (size_t i = 0; i < cases.size() / SLOPE_WORDS; ++i) {
+            const std::span<const int64_t> input = std::span(cases).subspan(i * SLOPE_WORDS, SLOPE_WORDS);
+            const int64_t surface = SfColumnSurfaceQ16(input[0], input[1], input[2]);
+            const int64_t slope = SfSurfaceSlopeQ16(input[3], surface, input[4], input[5] != 0);
+            const int64_t clamp = SfClampColumnSlopeQ16(input[1], input[6], (uint32_t)input[7]);
+            slopes += slope != 0 ? 1 : 0;
+            clamped += clamp != input[6] ? 1 : 0;
+            const std::array<int64_t, SLOPE_OUTPUTS> cpu = {surface, slope, clamp};
+            for (uint32_t value = 0; value < SLOPE_OUTPUTS; ++value) {
+                const int64_t gpu = (*gpuValues)[(i * SLOPE_OUTPUTS) + value];
+                if (cpu[value] == gpu)
+                    continue;
+
+                if (mismatches++ < MAX_REPORTED_MISMATCHES)
+                    Log(Channel::Gpu, Level::Error, "傾きの式の食い違い: 件 {} 値 {}: cpu {} gpu {}", i, value,
+                        cpu[value], gpu);
+            }
+        }
+
+        Log(Channel::Gpu, Level::Info, "傾きの式: {} 件(傾きが 0 でない {}・弱めた {})・食い違い {}",
+            cases.size() / SLOPE_WORDS, slopes, clamped, mismatches);
+
+        return mismatches == 0 && slopes > 0 && clamped > 0;
+    }
+
     bool RunVolume(ID3D12Device5* device, D3D12_COMMAND_LIST_TYPE queueType, uint64_t childVolumeMm3, uint64_t seed) {
         const std::vector<PlaceCell> cells = MakeCells(childVolumeMm3, seed);
         const auto gpuValues = RunOnGpu(device, queueType, cells, childVolumeMm3);
@@ -260,6 +408,7 @@ namespace {
         passed &= RunVolume(device->Get(), options->queueType, 250ull * 250 * 250, 11);
         passed &= RunVolume(device->Get(), options->queueType, 1000ull * 1000 * 1000, 23);
         passed &= RunVolume(device->Get(), options->queueType, 4000ull * 4000 * 4000, 37);
+        passed &= RunSlopes(device->Get(), options->queueType);
         if (!passed) {
             Log(Channel::Gpu, Level::Error, "gpu_placement_refine_test: FAILED(GPU と CPU が食い違う)");
             return 1;

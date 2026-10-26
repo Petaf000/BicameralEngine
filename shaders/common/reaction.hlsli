@@ -67,6 +67,10 @@ FX_CONST uint32_t RX_ENDOTHERMIC_HEAT_SHIFT = 3;
 
 // 物質の印(RxSpecies::flags)。RX_SPECIES_GAS = 気体のぶんに数える物質(condensed でも liquid でもない。気体の区画が流す物質。ADR-0256)
 FX_CONST uint32_t RX_SPECIES_GAS = 1u;
+// 凝縮相の置かれ方(T-1176。世界の木の細かくする段が読む。sim/reaction_table の相と solid_motion から。どれも無い凝縮相は無い)
+FX_CONST uint32_t RX_SPECIES_LIQUID = 2u;    // 液体(phase = "liquid")
+FX_CONST uint32_t RX_SPECIES_GRAIN = 4u;     // ばらける固体(solid_motion = "loose")
+FX_CONST uint32_t RX_SPECIES_ANCHORED = 8u;  // 据わる固体(書かない固体)
 
 // 望む進行度の上限。望む量は保存量ではないので飽和させてよく、この後で反応物の量に縮める
 FX_CONST uint64_t RX_EXTENT_SATURATION = FX_U64(0x40000000u, 0u);

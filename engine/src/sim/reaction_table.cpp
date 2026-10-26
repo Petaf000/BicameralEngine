@@ -118,6 +118,17 @@ namespace bicameral::sim {
                    FxDivS64(sensibleMicrojoules, static_cast<int64_t>(MICROJOULES_PER_JOULE));
         }
 
+        // 物質の印(RxSpecies::flags): 気体のぶんに数えるか(T-0622)・凝縮相の置かれ方(T-1176。細かくする段が読む)
+        uint32_t SpeciesFlags(const SpeciesDefinition& entry) {
+            if (entry.phase == SpeciesPhase::Gas)
+                return RX_SPECIES_GAS;
+
+            if (entry.phase == SpeciesPhase::Liquid)
+                return RX_SPECIES_LIQUID;
+
+            return entry.transport.solidMotion == SolidMotion::Loose ? RX_SPECIES_GRAIN : RX_SPECIES_ANCHORED;
+        }
+
         std::expected<void, std::string> BakeSpecies(const SpeciesDefinition& definition, const NameIndex& elements,
                                                      const ReactionTableDefinition& table, BakedReactionTable& baked) {
             const size_t elementCount = elements.size();
@@ -311,7 +322,7 @@ namespace bicameral::sim {
                 baked.speciesPhase.push_back(entry.phase);
                 baked.speciesTransport.push_back(entry.transport);
                 baked.speciesCondensed.push_back(entry.phase != SpeciesPhase::Gas ? 1 : 0);
-                baked.species.back().flags = entry.phase != SpeciesPhase::Gas ? 0u : RX_SPECIES_GAS;  // T-0622
+                baked.species.back().flags = SpeciesFlags(entry);  // T-0622・T-1176
                 baked.speciesRadiationAbsorption.push_back(entry.radiationAbsorption);
                 baked.speciesLight.push_back(BakeSpeciesLight(entry));
                 baked.speciesRefractionQ16.push_back(

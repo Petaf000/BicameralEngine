@@ -6,6 +6,9 @@
 //       (体積を表に置くのは、細かくする段で子の体積がレベルの表から来る形に合わせるため)
 //   t1: 親のセル((物質の数 + 3) × 8 バイト = 物を含む・x の傾き・z の傾き・物質ごとの量 mg)× セルの数
 //   u0: 子((物質の数 + 3) × 8 バイト = 寄せたか・凝縮相の量・空きの体積・物質ごとの量 mg)× 子 8 × セルの数
+// g_mode = 1 は傾きの式だけを確かめる(T-1176。SfColumnSurfaceQ16・SfSurfaceSlopeQ16・SfClampColumnSlopeQ16。1 スレッド = 1 件):
+//   t1: 1 件 8 語(int64: 下・ここ・上の詰まり・低い側の表面・高い側の表面・両側あるか・傾き・列の数)× g_cellCount
+//   u0: 1 件 3 語(int64: 列の表面・表面の傾き〔ここ = 列の表面〕・弱めた傾き〔詰まり = ここ〕)
 ByteAddressBuffer g_materials : register(t0);
 ByteAddressBuffer g_parents : register(t1);
 RWByteAddressBuffer g_children : register(u0);
@@ -13,7 +16,7 @@ RWByteAddressBuffer g_children : register(u0);
 cbuffer PlacementConstants : register(b0) {
     uint32_t g_materialCount;
     uint32_t g_cellCount;
-    uint32_t g_reserved0;
+    uint32_t g_mode;  // 0 = 置かれ方・1 = 傾きの式だけ
     uint32_t g_reserved1;
 };
 
@@ -28,7 +31,32 @@ static uint32_t s_parentBase;  // 今のスレッドの親のセルの番地(物
 static const uint32_t CELLS_PER_GROUP = 8;
 groupshared uint64_t gs_open[CELLS_PER_GROUP * 8];
 
+// 傾きの式 1 件(g_mode = 1)
+void CheckSlope(uint32_t index) {
+    const uint32_t address = index * 64;
+    const int64_t below = g_parents.Load<int64_t>(address);
+    const int64_t here = g_parents.Load<int64_t>(address + 8);
+    const int64_t above = g_parents.Load<int64_t>(address + 16);
+    const int64_t lowSide = g_parents.Load<int64_t>(address + 24);
+    const int64_t highSide = g_parents.Load<int64_t>(address + 32);
+    const bool bothSides = g_parents.Load<int64_t>(address + 40) != 0;
+    const int64_t slope = g_parents.Load<int64_t>(address + 48);
+    const uint32_t columns = (uint32_t)g_parents.Load<int64_t>(address + 56);
+    const int64_t surface = SfColumnSurfaceQ16(below, here, above);
+    g_children.Store<int64_t>(index * 24, surface);
+    g_children.Store<int64_t>((index * 24) + 8, SfSurfaceSlopeQ16(lowSide, surface, highSide, bothSides));
+    g_children.Store<int64_t>((index * 24) + 16, SfClampColumnSlopeQ16(here, slope, columns));
+}
+
 [numthreads(CELLS_PER_GROUP * 8, 1, 1)] void Main(uint32_t thread : SV_GroupIndex, uint3 group : SV_GroupID) {
+    if (g_mode == 1u) {
+        const uint32_t index = (group.x * CELLS_PER_GROUP * 8) + thread;
+        if (index < g_cellCount)
+            CheckSlope(index);
+
+        return;
+    }
+
     const uint32_t cellIndex = (group.x * CELLS_PER_GROUP) + (thread >> 3);
     const uint32_t j = thread & 7u;
     const bool active = cellIndex < g_cellCount;

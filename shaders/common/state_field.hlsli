@@ -322,6 +322,22 @@ FX_FN uint64_t SfSubstanceVolume(int64_t massMg, uint32_t densityKgPerM3) {
     return ((uint64_t)massMg * 1000u) / densityKgPerM3;
 }
 
+// 物質量(µmol。世界の木のセルの数)→ 体積(mm³)= 数 × モル体積(mm³/mol)÷ 10^6(T-1176。RxSpecies::molarVolume。0 は場所を取らない)
+FX_FN uint64_t SfAmountVolume(int64_t amountMicromol, uint32_t molarVolumeMm3PerMol) {
+    if (molarVolumeMm3PerMol == 0u || amountMicromol <= 0)
+        return 0;
+
+    return (uint64_t)FxMulDivS64(amountMicromol, (uint64_t)molarVolumeMm3PerMol, 1000000u);
+}
+
+// 物質の体積: モル体積を書いた物質(世界の木。量は µmol)はそちら、無ければ密度(量は mg。案 B の場面)
+FX_FN uint64_t SfMaterialVolume(int64_t amount, uint32_t densityKgPerM3, uint32_t molarVolumeMm3PerMol) {
+    if (molarVolumeMm3PerMol != 0u)
+        return SfAmountVolume(amount, molarVolumeMm3PerMol);
+
+    return SfSubstanceVolume(amount, densityKgPerM3);
+}
+
 // 沈み固まった体積の足し合わせ: 粒は粒の体積 ÷ 詰まり、液体は粒の孔を満たしてから上に重なる(大きい方)。気体は数えない
 struct SfSettleSum {
     uint64_t grainVolume;
@@ -338,9 +354,10 @@ FX_FN SfSettleSum SfMakeSettleSum() {
     return sum;
 }
 
-FX_FN SfSettleSum SfAddSettle(SfSettleSum sum, uint32_t kind, uint32_t densityKgPerM3, uint32_t packedFractionPct,
-                              int64_t massMg) {
-    const uint64_t volume = SfSubstanceVolume(massMg, densityKgPerM3);
+// 量は mg(密度)か µmol(モル体積。0 でなければこちら。T-1176)
+FX_FN SfSettleSum SfAddSettleOf(SfSettleSum sum, uint32_t kind, uint32_t densityKgPerM3, uint32_t packedFractionPct,
+                                uint32_t molarVolumeMm3PerMol, int64_t massMg) {
+    const uint64_t volume = SfMaterialVolume(massMg, densityKgPerM3, molarVolumeMm3PerMol);
     if (kind == SF_SETTLE_GRAIN) {
         const uint32_t packed = packedFractionPct == 0u ? 100u : packedFractionPct;
         sum.grainVolume += (volume * 100u) / packed;
@@ -353,6 +370,11 @@ FX_FN SfSettleSum SfAddSettle(SfSettleSum sum, uint32_t kind, uint32_t densityKg
         sum.anchored = true;
 
     return sum;
+}
+
+FX_FN SfSettleSum SfAddSettle(SfSettleSum sum, uint32_t kind, uint32_t densityKgPerM3, uint32_t packedFractionPct,
+                              int64_t massMg) {
+    return SfAddSettleOf(sum, kind, densityKgPerM3, packedFractionPct, 0u, massMg);
 }
 
 FX_FN uint64_t SfSettledVolume(SfSettleSum sum) {
@@ -380,32 +402,43 @@ FX_FN int64_t SfColumnSurfaceQ16(int64_t belowQ16, int64_t hereQ16, int64_t abov
 }
 
 // 表面の傾き(Q16。正の向きへ 1 セルで上がる高さ): 両側の差の小さい方・向きが違えば 0(MUSCL の minmod。山の頂や谷を作らない)。
-// 片側が無い(世界の端)なら 0
+// 片側が無い(世界の端)なら 0。
+// 表面は詰まり(0〜1)の 3 つの和 − 1 なので −1〜2、差は ±3(Q16 で 2^18 未満)。32bit で計算する: 64bit の引き算と同じ値どうしの比べ
+// (0 で止める・小さい方を選ぶ)を並べる形は HW の GPU で差の上の 32bit が壊れた(T-1078・T-1159。CLAUDE.md §4)ので、64bit の差を作らない(T-1176)
 FX_FN int64_t SfSurfaceSlopeQ16(int64_t lowSideQ16, int64_t hereQ16, int64_t highSideQ16, bool bothSides) {
     if (!bothSides)
         return 0;
 
-    const int64_t low = hereQ16 - lowSideQ16;
-    const int64_t high = highSideQ16 - hereQ16;
+    FX_ASSERT(lowSideQ16 >= -(1 << 20) && lowSideQ16 <= (1 << 20));
+    FX_ASSERT(hereQ16 >= -(1 << 20) && hereQ16 <= (1 << 20));
+    FX_ASSERT(highSideQ16 >= -(1 << 20) && highSideQ16 <= (1 << 20));
+    const int32_t here = (int32_t)hereQ16;
+    const int32_t low = here - (int32_t)lowSideQ16;
+    const int32_t high = (int32_t)highSideQ16 - here;
     if (low == 0 || high == 0 || (low > 0) != (high > 0))
         return 0;
 
-    const int64_t lowMagnitude = low < 0 ? -low : low;
-    const int64_t highMagnitude = high < 0 ? -high : high;
+    const int32_t lowMagnitude = low < 0 ? -low : low;
+    const int32_t highMagnitude = high < 0 ? -high : high;
 
-    return lowMagnitude < highMagnitude ? low : high;
+    return (int64_t)(lowMagnitude < highMagnitude ? low : high);
 }
 
-// 列の傾きを、n 列の詰まりが 0〜1 に収まるまで弱める(|g| ≤ min(r, 1 − r) × 2n ÷ (n − 1))
+// 列の傾きを、n 列の詰まりが 0〜1 に収まるまで弱める(|g| ≤ min(r, 1 − r) × 2n ÷ (n − 1))。
+// 詰まりは 0〜1・上限は 4 以下(2n ÷ (n − 1) ≤ 4)なので 32bit で(上と同じ理由。T-1176)。傾きは 32bit に収まる値で呼ぶ
 FX_FN int64_t SfClampColumnSlopeQ16(int64_t fullnessQ16, int64_t slopeQ16, uint32_t columns) {
-    const int64_t empty = SF_SETTLE_FULL_Q16 - fullnessQ16;
-    const int64_t room = fullnessQ16 < empty ? fullnessQ16 : empty;
-    const int64_t limit = (room * 2 * (int64_t)columns) / ((int64_t)columns - 1);
+    FX_ASSERT(fullnessQ16 >= 0 && fullnessQ16 <= SF_SETTLE_FULL_Q16);
+    FX_ASSERT(slopeQ16 >= -(int64_t)0x7FFFFFFF && slopeQ16 <= (int64_t)0x7FFFFFFF);
+    FX_ASSERT(columns >= 2u && columns < 16384u);
+    const int32_t fullness = (int32_t)fullnessQ16;
+    const int32_t empty = (int32_t)SF_SETTLE_FULL_Q16 - fullness;
+    const int32_t room = fullness < empty ? fullness : empty;
+    const int32_t limit = (room * 2 * (int32_t)columns) / ((int32_t)columns - 1);
+    const int32_t slope = (int32_t)slopeQ16;
+    if (slope > limit)
+        return (int64_t)limit;
 
-    if (slopeQ16 > limit)
-        return limit;
-
-    return slopeQ16 < -limit ? -limit : slopeQ16;
+    return (int64_t)(slope < -limit ? -limit : slope);
 }
 
 // 列 j(n 列の左から)の重み = 2n r + g (2j + 1 − n)(弱めた傾きで 0 以上)

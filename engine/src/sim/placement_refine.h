@@ -20,7 +20,8 @@ namespace bicameral::sim {
     struct PlaceMaterial {
         uint32_t kind = state_field::SF_SETTLE_GAS;  // SF_SETTLE_*
         uint32_t densityKgPerM3 = 0;
-        uint32_t packedFractionPct = 0;  // 粒の詰まり(%)。0 は 100
+        uint32_t packedFractionPct = 0;     // 粒の詰まり(%)。0 は 100
+        uint32_t molarVolumeMm3PerMol = 0;  // 0 でなければ量は µmol で、体積はこちらから(世界の木のセル。T-1176)
     };
 
     // 沈み固まった体積(mm³)と、据わる固体を含むか

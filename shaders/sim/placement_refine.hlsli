@@ -12,10 +12,15 @@
 //   PR_MATERIAL_COUNT      物質の数
 //   PR_MATERIAL(m)         物質 m の uint3(SF_SETTLE_* の種類・密度 kg/m³・粒の詰まり %)
 //   PR_PARENT_MASS(m)      親のセルの物質 m の量(mg。int64_t)
+//   PR_MATERIAL_MOLAR_VOLUME(m)  (任意)物質 m のモル体積(mm³/mol)。0 でなければ量は µmol で体積はこちらから(世界の木。T-1176)。既定は 0
 #ifndef BICAMERAL_PLACEMENT_REFINE_HLSLI
 #define BICAMERAL_PLACEMENT_REFINE_HLSLI
 
 #include "common/state_field.hlsli"
+
+#ifndef PR_MATERIAL_MOLAR_VOLUME
+#define PR_MATERIAL_MOLAR_VOLUME(m) 0u
+#endif
 
 // --- 親のセル 1 つの配り方(子 8 つで同じ)---
 struct PrCell {
@@ -57,7 +62,7 @@ int64_t PrSplitShare(int64_t massMg, PrSplit split, uint32_t column) {
 SfSettleSum PrAddMaterial(SfSettleSum sum, uint32_t m, int64_t massMg) {
     const uint3 material = PR_MATERIAL(m);
 
-    return SfAddSettle(sum, material.x, material.y, material.z, massMg);
+    return SfAddSettleOf(sum, material.x, material.y, material.z, PR_MATERIAL_MOLAR_VOLUME(m), massMg);
 }
 
 // --- 寄せるか・親の詰まり(blocked = 物を含む)---
@@ -154,7 +159,7 @@ PrChildWeights PrChildWeightsOf(PrCell cell, PrColumn column, uint32_t j) {
             continue;
 
         condensedMass += (uint64_t)mass;
-        condensedVolume += SfSubstanceVolume(mass, material.y);
+        condensedVolume += SfMaterialVolume(mass, material.y, PR_MATERIAL_MOLAR_VOLUME(m));
     }
 
     PrChildWeights weights;
