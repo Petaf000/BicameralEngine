@@ -342,28 +342,27 @@ void WalkAndPass(RcGpuParams params, RcStepConstants constants, RcLevelRay level
         uint64_t heldShort = 0;
         uint64_t heldLong = 0;
         const RcCellLight light = g_rcWork.Load<RcCellLight>(params.workLights + (cell * 24));
+        // 面の向こうに依らない分はセルごとに 1 回(6 面で同じ。面の量 = RcFaceEmissionRelative。T-1161)。
+        // 0 なら(参照と同じ温度・負の側で参照より暖かい物など)向こうのセルも読まない(どの面も 0)
+        const RcBands cellBands = RcCellEmissionRelative(temperature, params.referenceWord, light);
+        const bool emits = (cellBands.shortBand | cellBands.longBand) != 0;
         uint64_t emittedShort = 0;
         uint64_t emittedLong = 0;
-        for (uint32_t face = 0; face < RC_FACES; ++face) {
-            RcBands bands;
-            bands.shortBand = 0;
-            bands.longBand = 0;
-            if (hot) {
-                const int64_t step = (face & 1u) == 0 ? 1 : -1;
-                const uint32_t axis = face >> 1;
-                const int64_t acrossX = x + (axis == 0 ? step : 0);
-                const int64_t acrossY = y + (axis == 1 ? step : 0);
-                const int64_t acrossZ = z + (axis == 2 ? step : 0);
-                RcCellLight across;
-                across.depthShortQ32 = 0;
-                across.depthLongQ32 = 0;
-                across.reflectanceShortQ16 = 0;
-                across.reflectanceLongQ16 = 0;
-                if (grid.Contains(acrossX, acrossY, acrossZ))
-                    across = grid.Light(acrossX, acrossY, acrossZ);
+        for (uint32_t face = 0; face < RC_FACES && emits; ++face) {
+            const int64_t step = (face & 1u) == 0 ? 1 : -1;
+            const uint32_t axis = face >> 1;
+            const int64_t acrossX = x + (axis == 0 ? step : 0);
+            const int64_t acrossY = y + (axis == 1 ? step : 0);
+            const int64_t acrossZ = z + (axis == 2 ? step : 0);
+            RcCellLight across;
+            across.depthShortQ32 = 0;
+            across.depthLongQ32 = 0;
+            across.reflectanceShortQ16 = 0;
+            across.reflectanceLongQ16 = 0;
+            if (grid.Contains(acrossX, acrossY, acrossZ))
+                across = grid.Light(acrossX, acrossY, acrossZ);
 
-                bands = RcFaceEmissionRelative(temperature, params.referenceWord, light, across);
-            }
+            const RcBands bands = RcMaskAcross(cellBands, across);
 
             // 放つ面の量は使った後に RcClearFaces が 0 に戻すので、量のある面だけ書いて列に足す
             const uint32_t sourceFace = (cell * RC_FACES) + face;
