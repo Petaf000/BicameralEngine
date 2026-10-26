@@ -83,6 +83,17 @@ namespace bicameral::sim {
                 return std::unexpected(std::format("パイプラインを作れない: {}", RADIATION_SHADER_NAMES[pass]));
         }
 
+        // 段ごとの GPU 時間の印(測りの時だけ。1 刻み 42 個ほど × フレームの刻み)
+        if (m_options.radiationStageTiming) {
+            constexpr uint32_t STAMP_CAPACITY = 1u << 13;
+            auto stamps = gpu::StageStamps::Create(device, FRAME_SLOT_COUNT, STAMP_CAPACITY,
+                                                   static_cast<uint32_t>(ProbeRadiationStage::Count));
+            if (!stamps)
+                return std::unexpected(stamps.error());
+
+            m_radiationStamps.emplace(std::move(*stamps));
+        }
+
         const uint64_t vramBytes = m_cascade->VramBytes() + (m_cascadeNegative ? m_cascadeNegative->VramBytes() : 0);
         Log(Channel::Sim, Level::Info, "熱の放射の段: 64³・組 {}・外 {}・置き場 {} MiB", params.emitSlots,
             params.referenceMk == 0 ? std::string("0 K の空") : std::format("参照の温度 {} mK", params.referenceMk),

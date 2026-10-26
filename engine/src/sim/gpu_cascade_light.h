@@ -20,9 +20,11 @@
 #include <cstdint>
 #include <expected>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "gpu/com_ptr.h"
+#include "gpu/stage_stamps.h"
 #include "sim/cascade_light.h"
 #include "sim/gpu_multires.h"
 
@@ -68,8 +70,14 @@ namespace bicameral::sim {
         // 初めの持ち越しは表 0(刻み 0 から始める世界)。作業のバッファは既定のヒープへ写し、UAV の状態で返す
         [[nodiscard]] bool RecordUpload(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                                         const CascadeCarry& carry);
-        // 刻み tick: 表 tick & 1 を読み、表 1 − (tick & 1) へ書く
-        void RecordTick(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick);
+        // 刻み tick: 表 tick & 1 を読み、表 1 − (tick & 1) へ書く。
+        // stamps があれば起動ごとの後ろに段の印(firstStage + パイプラインの番号。StageName。測り用・T-1161)
+        void RecordTick(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick,
+                        gpu::StageStamps* stamps = nullptr, uint8_t firstStage = 0);
+
+        // 段の印の番号の数(パイプラインの数)と名前(測りのログ用)
+        static constexpr uint32_t STAGE_COUNT = 11;
+        [[nodiscard]] static std::string_view StageName(uint32_t stage);
 
         [[nodiscard]] ID3D12Resource* Work() const { return m_work.Get(); }
         [[nodiscard]] ID3D12Resource* State() const { return m_state.Get(); }
@@ -94,7 +102,7 @@ namespace bicameral::sim {
         bool RecordUploadWith(ID3D12GraphicsCommandList10* list, GpuMultires* nest, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                               const CascadeCarry& carry);
         void RecordTickWith(ID3D12GraphicsCommandList10* list, GpuMultires* nest, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
-                            uint64_t tick, uint32_t in);
+                            uint64_t tick, uint32_t in, gpu::StageStamps* stamps = nullptr, uint8_t firstStage = 0);
         static std::expected<GpuCascadeLight, std::string> CreateWith(ID3D12Device5* device,
                                                                       ID3D12RootSignature* rootSignature,
                                                                       const CascadeGrid& grid,

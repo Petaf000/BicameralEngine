@@ -44,6 +44,7 @@
 #include "gpu/debug_ring.h"
 #include "gpu/graph_trace.h"
 #include "gpu/readback_ring.h"
+#include "gpu/stage_stamps.h"
 #include "gpu/work_graph.h"
 #include "gpu/work_graph_stats.h"
 #include "sim/cascade_light.h"
@@ -172,6 +173,7 @@ namespace bicameral::sim {
         uint32_t radiationOverflow = 0;  // 溢れの印(側の OR。1 = 放つ面・2 = 袋・4 = 持ち越し。作ってからずっと残る)
         uint32_t radiationFaces = 0;     // 最後の刻みの放つ面の数(側の大きい方)
         uint32_t radiationBagPeak = 0;   // 段 1 つの袋の数の最大(作ってから。側の大きい方)
+        uint64_t radiationRays = 0;      // 最後の刻みの光線の本数(側と段の和。測り用・T-1161)
 
         // 伝導のグラフのノードごとのカウンタ(このフレームの全部の刻みの合計。T-0008)
         gpu::GraphStatsSnapshot graphStats;
@@ -265,6 +267,19 @@ namespace bicameral::sim {
         bool environmentReference = true;
     };
 
+    // 放射の段の段ごとの GPU 時間の印の番号(ProbeSimOptions::radiationStageTiming。測り用・T-1161)。
+    // 側ごとの距離ごとの段は PositiveFirst / NegativeFirst + GpuCascadeLight のパイプラインの番号(GpuCascadeLight::StageName)
+    enum class ProbeRadiationStage : uint8_t {
+        Start,         // 測りの始め(差を取らない)
+        Grid,          // RadiationGrid(セル → 両側の作業の光の値・温度)
+        Apply,         // RadiationApply(正 − 負をセルへ)
+        HashPositive,  // RadiationHash(正の側の持ち越し)
+        HashNegative,  // RadiationHash(負の側の持ち越し)
+        PositiveFirst,
+        NegativeFirst = PositiveFirst + GpuCascadeLight::STAGE_COUNT,
+        Count = NegativeFirst + GpuCascadeLight::STAGE_COUNT,
+    };
+
     // 表のどれかの物質が光の値を書いたか(書かない値はベイクが相の既定〔D-610〕にするので、既定と違えば書いた)。
     // 段を流す条件ではない(D-670)。書き忘れの警告・試験が使う
     [[nodiscard]] bool ProbeTableWritesLight(const BakedReactionTable& table);
@@ -307,6 +322,8 @@ namespace bicameral::sim {
         // 熱の放射の段(T-1154・D-670。既定は入れる)。段の順は CPU と同じ: 気体 → 液体 → 放射。
         // 参照の温度は作った時の表で決まる(表の差し替えで光の値は新しい表のものにするが、参照の温度は変えない)
         ProbeCascadeOptions cascadeRadiation;
+        // 放射の段の段ごとの GPU 時間を測る(T-1161。RadiationStageStamps で読む)。結果は変わらない(印とハッシュの段の間のバリアだけ)
+        bool radiationStageTiming = false;
     };
 
     // --- GPU で走らせる ---
@@ -324,6 +341,11 @@ namespace bicameral::sim {
                                                                          const ProbeSimOptions& options = {});
 
         // 1 刻みの単位の数(適用・伝導・ハッシュ + 重さの単位)
+        // 放射の段の段ごとの GPU 時間(ProbeSimOptions::radiationStageTiming の時だけ。番号は ProbeRadiationStage)
+        [[nodiscard]] const gpu::StageStamps* RadiationStageStamps() const {
+            return m_radiationStamps ? &*m_radiationStamps : nullptr;
+        }
+
         [[nodiscard]] uint32_t UnitsPerTick() const {
             return PROBE_FIXED_UNITS_PER_TICK + PhysicsUnitCount() + BusyUnitCount();
         }
@@ -528,7 +550,8 @@ namespace bicameral::sim {
         void BindRadiationViews(ID3D12GraphicsCommandList10* list, ID3D12Resource* first, ID3D12Resource* second,
                                 ID3D12Resource* third) const;
         void RecordRadiation(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick);
-        void RecordRadiationHash(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick) const;
+        void RecordRadiationHash(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick);
+        void MarkRadiation(ID3D12GraphicsCommandList10* list, ProbeRadiationStage stage);
         [[nodiscard]] std::expected<void, std::string> CheckLiquidTableSwap(const BakedReactionTable& table) const;
         // 表の差し替えで区画の作業場を作り直す(T-0670。sim/probe_sim_gas.cpp・probe_sim_liquid.cpp)。差し替えは持ち越す欄を写し、
         // 表の違う保存点へ戻す時は作り直すだけ(中身は保存点が写す)。どれも m_tableCopy が今の表のうちに呼ぶ
@@ -662,9 +685,10 @@ namespace bicameral::sim {
             m_cascade;  // 距離ごとの段(自分のルート署名。作業と状態のバッファ)。参照の温度の形では正の側
         // 参照の温度の形(D-671・T-1164)の負の側(参照 − 自分。作業と状態の並びは正の側と同じ。0 K の空の世界では無い)
         std::optional<GpuCascadeLight> m_cascadeNegative;
-        bool m_radiationOverflowLogged = false;          // 溢れを 1 度だけ Error に出す
-        ComPtr<ID3D12Resource> m_radiationLights;        // 物質の光の値(表ごと。段の間は u17 に結ぶ)
-        ComPtr<ID3D12Resource> m_radiationLightsUpload;  // その写しの元
+        bool m_radiationOverflowLogged = false;             // 溢れを 1 度だけ Error に出す
+        std::optional<gpu::StageStamps> m_radiationStamps;  // 段ごとの GPU 時間(測りの時だけ。T-1161)
+        ComPtr<ID3D12Resource> m_radiationLights;           // 物質の光の値(表ごと。段の間は u17 に結ぶ)
+        ComPtr<ID3D12Resource> m_radiationLightsUpload;     // その写しの元
         std::array<ComPtr<ID3D12PipelineState>, 3>
             m_radiationPipelines;  // RadiationGrid・RadiationApply・RadiationHash
 
