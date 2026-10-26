@@ -158,10 +158,28 @@ namespace {
 
     enum class TableKind : uint8_t { Plain, FuelGas, FuelGasWithoutMonoxide };
 
-    Tables MakeTables(TableKind kind) {
-        sim::BakedReactionTable table = kind == TableKind::Plain     ? test::MakeSunTable()
-                                        : kind == TableKind::FuelGas ? test::MakeSunTable(AddFuelGas)
-                                                                     : test::MakeSunTable(AddFuelGasWithoutMonoxide);
+    // 速さの係数 A を 2^splitLog2 で割る(反応を流れの小刻みに分ける研究 T-1186: 1 刻みを 2^splitLog2 個に分けて回す時の、
+    // 1/(60 × 2^splitLog2) s あたりの表。A = 仮数 × 10^指数 なので、仮数 × 5^k・指数 − k で割り切れる)
+    void DivideRates(sim::ReactionTableDefinition& definition, uint32_t splitLog2) {
+        for (sim::RuleDefinition& rule : definition.rules) {
+            for (uint32_t k = 0; k < splitLog2; ++k) {
+                EXPECT(rule.rate.preExponentialMantissa <= UINT64_MAX / 5);
+                rule.rate.preExponentialMantissa *= 5;
+                rule.rate.preExponentialExponent10 -= 1;
+            }
+        }
+    }
+
+    Tables MakeTables(TableKind kind, uint32_t splitLog2 = 0) {
+        const auto extend = [kind, splitLog2](sim::ReactionTableDefinition& definition) {
+            if (kind == TableKind::FuelGas)
+                AddFuelGas(definition);
+            else if (kind == TableKind::FuelGasWithoutMonoxide)
+                AddFuelGasWithoutMonoxide(definition);
+
+            DivideRates(definition, splitLog2);
+        };
+        sim::BakedReactionTable table = test::MakeSunTable(extend);
         const auto object = test::MakeObjectHeatTables(table, DEFAULT_DIFFUSIVITY_MM2_PER_S);
         EXPECT(object.has_value());
         if (!object)
@@ -404,15 +422,50 @@ namespace {
         uint64_t digest = 0;
     };
 
+    // 反応を流れの小刻みに分けた 1 刻み(T-1186): 物の熱の小刻み → (反応 → 流れの小刻み substeps ÷ splits)× splits。
+    // 刻みの番号は objectTick(= 刻み × splits)から 1 ずつ。物の表は 1 / splits の長さの表(DivideRates)
+    bool StepSplit(const test::OhCpuTable& table, const test::OhGasList& gases, test::OhWorld& world,
+                   test::OhShellFlow& flow, bool withFlow, bool lensOn, uint64_t objectTick, uint32_t splits) {
+        uint32_t heatSubsteps = 1;
+        for (const rx::OhObject& object : world.objects)
+            heatSubsteps = std::max(heatSubsteps, object.substeps);
+
+        for (uint32_t sub = 0; sub < heatSubsteps; ++sub)
+            test::StepObjectHeatSubstep(table, gases, world, lensOn, sub, objectTick);
+
+        const uint32_t substeps = flow.substeps;
+        EXPECT(substeps % splits == 0);
+        flow.substeps = substeps / splits;
+        bool ok = true;
+        for (uint32_t r = 0; r < splits; ++r) {
+            test::StepObjectHeatReactions(table, world, WORLD_SEED, objectTick + r);
+            if (withFlow)
+                ok = test::StepShellFlow(table, gases, world, 0, flow, objectTick + r) && ok;
+        }
+
+        flow.substeps = substeps;
+
+        return ok;
+    }
+
     // grid: 箱の細かさと紙の長さ・inWorld: 世界の流れのある場面(object_shell_nest.h)に置く(T-1144)
     Burn RunBurn(const Tables& tables, const Fuel& fuel, int32_t cellLevel, ShellMode mode, bool sleeping = true,
                  bool probe = false, uint32_t layers = 1, bool skeletonWalls = true, const Grid& grid = {},
-                 bool inWorld = false) {
+                 bool inWorld = false, const Tables* splitTables = nullptr, uint32_t splitLog2 = 0,
+                 uint32_t pressureSweeps = 24) {
         const test::OhCpuTable shared{.view = tables.table.View(),
                                       .objectSpecies = tables.object.species,
                                       .molarMasses = tables.table.molarMasses};
+        // 反応を分ける(T-1186): 物の刻みは 1 刻み = 2^splitLog2 個の小さい刻み(番号 tick × splits + r)。物の反応はその長さの表で
+        // splits 回、流れの小刻みを splits 個に分けて反応と交互に回す。世界(囲むセル)は今の表と刻みのまま
+        const uint32_t splits = 1u << splitLog2;
+        const Tables& objectTables = splitTables != nullptr ? *splitTables : tables;
+        const test::OhCpuTable objectShared{.view = objectTables.table.View(),
+                                            .objectSpecies = objectTables.object.species,
+                                            .molarMasses = objectTables.table.molarMasses};
         // 流れの小刻みは箱が細かいほど多く(1 小刻みに 1 ボクセルの上限が同じ 1.875 m/s になるように)
         test::OhShellFlow flow{.substeps = 4u << static_cast<uint32_t>(grid.bodyLevel - BODY_LEVEL),
+                               .pressureSweeps = pressureSweeps,
                                .skeletonWalls = skeletonWalls};
         const test::OhGasList& gases = tables.object.gases;
         test::OhWorld world = MakeWorld(tables.table, fuel, cellLevel, grid);
@@ -451,10 +504,17 @@ namespace {
             if (nest)
                 test::object_shell_nest::BeforeObject(tables.table, *nest, world, WORLD_SEED, tick);
 
-            test::StepObjectHeat(shared, gases, world, lensOn, WORLD_SEED, tick);
+            const uint64_t objectTick = static_cast<uint64_t>(tick) * splits;
+            if (splits == 1) {
+                test::StepObjectHeat(shared, gases, world, lensOn, WORLD_SEED, tick);
+                if (mode == ShellMode::Flow)
+                    burn.failed = burn.failed || !test::StepShellFlow(shared, gases, world, 0, flow, tick);
+            } else {
+                burn.failed = burn.failed || !StepSplit(objectShared, gases, world, flow, mode == ShellMode::Flow,
+                                                        lensOn, objectTick, splits);
+            }
+
             burn.voxelTicks += world.voxels.size();
-            if (mode == ShellMode::Flow)
-                burn.failed = burn.failed || !test::StepShellFlow(shared, gases, world, 0, flow, tick);
 
             if (probe) {
                 size_t hottestVoxel = 0;
@@ -495,7 +555,8 @@ namespace {
 
             if (mode != ShellMode::None && world.objects[0].shellLayers == 0 &&
                 hottest >= airKelvin + SHELL_MAKE_KELVIN) {
-                burn.failed = burn.failed || !test::AddObjectShell(shared, gases, world, 0, tick, layers);
+                burn.failed = burn.failed ||
+                              !test::AddObjectShell(objectShared, gases, world, 0, objectTick + splits - 1, layers);
                 test::ResetShellFlow(world, 0, flow);
                 ++burn.shellsMade;
             } else if (world.objects[0].shellLayers != 0 && hottest < airKelvin + SHELL_KEEP_KELVIN &&
@@ -511,7 +572,7 @@ namespace {
             }
 
             if (nest)
-                test::object_shell_nest::AfterObject(tables.table, shared, *nest, world, tick % 60 == 0);
+                test::object_shell_nest::AfterObject(tables.table, shared, *nest, world, true, tick);
 
             // 列に火が来た(燃える固体が 90 % を切った)
             for (uint32_t x = 0; x < columns; ++x) {
@@ -550,7 +611,7 @@ namespace {
             ++burn.shellsReturned;
 
         if (nest) {
-            test::object_shell_nest::AfterObject(tables.table, shared, *nest, world, true);
+            test::object_shell_nest::AfterObject(tables.table, shared, *nest, world, true, burn.ticks + 1);
             burn.conserved = burn.conserved && nest->balanced && nest->stored;
             burn.worldBalanced = nest->balanced;
             burn.worldStored = nest->stored;
@@ -638,12 +699,19 @@ int main(int argc, char** argv) {
         const Grid grid{.bodyLevel = std::atoi(argv[5]), .columns = static_cast<uint32_t>(std::atoi(argv[6]))};
         const bool inWorld = std::atoi(argv[7]) != 0;
         const bool monoxide = argc >= 9 && std::atoi(argv[8]) != 0;
+        // [反応を分ける 2 の何乗か](T-1186。0 = 今のまま 1 刻みに 1 度)
+        const auto splitLog2 = argc >= 10 ? static_cast<uint32_t>(std::atoi(argv[9])) : 0u;
+        // [圧力の赤黒の反復の回数](T-1186 の次の道の調べ。既定 24)
+        const auto sweeps = argc >= 11 ? static_cast<uint32_t>(std::atoi(argv[10])) : 24u;
+        const TableKind kind = monoxide ? TableKind::FuelGas : TableKind::FuelGasWithoutMonoxide;
+        const Tables split = MakeTables(kind, splitLog2);
         const Burn burn = RunBurn(monoxide ? fuelGas : noMonoxide, FUELS[fuelIndex], cellLevel, ShellMode::Flow, true,
-                                  false, layers, true, grid, inWorld);
-        char label[160];
-        std::snprintf(label, sizeof(label), "層 %u 段・箱 %.2f mm・骨格 %u 列・%s%s", layers,
+                                  false, layers, true, grid, inWorld, splitLog2 != 0 ? &split : nullptr, splitLog2,
+                                  sweeps);
+        char label[200];
+        std::snprintf(label, sizeof(label), "層 %u 段・箱 %.2f mm・骨格 %u 列・%s%s・反応 %u 分け・圧力 %u 回", layers,
                       7.8125 / (1 << (grid.bodyLevel - BODY_LEVEL)), grid.columns,
-                      inWorld ? "世界の流れ" : "閉じた 1 セル", monoxide ? "・CO あり" : "");
+                      inWorld ? "世界の流れ" : "閉じた 1 セル", monoxide ? "・CO あり" : "", 1u << splitLog2, sweeps);
         Print(FUELS[fuelIndex].name, label, cellLevel, burn);
 
         return burn.conserved && !burn.failed ? 0 : 1;

@@ -35,6 +35,7 @@ namespace bicameral::test::object_shell_nest {
         int32_t level = 0;
         bool stored = true;              // 世界へ書けた
         bool balanced = true;            // 世界の保存(Σ − 帳簿)が一定
+        uint64_t brokenTick = 0;         // 世界の保存が初めて崩れた刻み(崩れた欄を printf する。T-1185)
         int32_t hottestAboveKelvin = 0;  // 物の囲むセルの 1 つ上のセルの一番熱い温度(熱い気体が上へ去るか)
     };
 
@@ -130,15 +131,40 @@ namespace bicameral::test::object_shell_nest {
     }
 
     // 物の熱・層の流れ・層を作る / 返すで変わった囲むセルを世界へ書く。刻みの終わりに呼ぶ
+    // 世界の保存が崩れた欄を書く(エネルギー・元素・登録した保存量の欄。T-1185)
+    inline void PrintBrokenColumns(const sim::ConservedTotals& now, const sim::ConservedTotals& start, uint64_t tick) {
+        std::printf("  世界の Σ − 帳簿 が崩れた刻み %llu: エネルギー %s", static_cast<unsigned long long>(tick),
+                    now.energy == start.energy ? "同じ" : "違う");
+        for (size_t e = 0; e < now.elements.size(); ++e) {
+            if (!(now.elements[e] == start.elements[e]))
+                std::printf("・元素 %zu 違う", e);
+        }
+
+        for (size_t f = 0; f < now.fields.size(); ++f) {
+            if (!(now.fields[f] == start.fields[f]))
+                std::printf("・欄 %zu 違う", f);
+        }
+
+        std::printf("\n");
+    }
+
+    // world.before は書いた後の値に揃える(同じ刻みにもう一度呼んでも、前の差を帳簿に二度載せない。T-1185:
+    // 終わりに層を返す時の 2 回目の呼び出しが最後の刻みの差を二度載せ、世界の Σ − 帳簿 が崩れて見えた)
     inline void AfterObject(const sim::BakedReactionTable& table, const OhCpuTable& shared, ShellNest& world,
-                            const OhWorld& objects, bool checkBalance) {
+                            const OhWorld& objects, bool checkBalance, uint64_t tick) {
         const auto speciesCount = static_cast<uint32_t>(table.species.size());
         world.stored = object_heat_nest::StoreCells(world.nest, world.refs, objects, world.before, world.level,
                                                     speciesCount) &&
                        world.stored;
-        if (checkBalance)
-            world.balanced = world.balanced &&
-                             sim::ComputeConservedTotals(world.nest, table, world.level) == world.start;
+        world.before = objects.cells;
+        if (checkBalance && world.balanced) {
+            const sim::ConservedTotals now = sim::ComputeConservedTotals(world.nest, table, world.level);
+            if (!(now == world.start)) {
+                world.balanced = false;
+                world.brokenTick = tick;
+                PrintBrokenColumns(now, world.start, tick);
+            }
+        }
 
         std::array<uint32_t, 3> above = ObjectPlace(world.level);
         ++above[mr::WE_UP_AXIS];
