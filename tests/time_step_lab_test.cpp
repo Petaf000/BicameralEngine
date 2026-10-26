@@ -83,12 +83,28 @@ namespace {
     double windowMeters = 0.0;  // window=: 滑る窓の半径(m。T-1174。0 = 外す)
     double slopeMeters = 0.0;   // slope=: 窓の外の坂(1 段あたりの長さ m。0 = 枠ごとに 1 段 = 今)
     double pileMeters = 0.0;    // pilemeters=: 面で積もる分を広げて見る長さ(m。0 = 境のセル 1 つ = 今)
+    // T-1175: spread=1(積もる分を長い側の続きのセルへ広げる)・spreadcells=n・meanmeters=(望みを ±m の平均の変化で)・
+    // slack=n(窓の打ち切りを歩の残りが上限の 2^n 倍を超える時だけ)
+    bool spreadPile = false;
+    uint32_t spreadCells = 64;
+    uint32_t spreadShift = 0;
+    double meanMeters = 0.0;
+    uint32_t truncateSlack = 0;
+
+    std::string T1175Tag() {
+        return std::format("spread={}/{} mean={} slack={}", spreadPile ? 1 : 0, spreadShift, meanMeters, truncateSlack);
+    }
 
     TimeStepLabSetup WithWindow(TimeStepLabSetup setup, double cellMeters) {
         const double blockMeters = cellMeters * setup.blockCells;
         setup.windowBlocks = static_cast<uint32_t>(std::llround(windowMeters / blockMeters));
         setup.slopeBlocks = std::max<uint32_t>(1, static_cast<uint32_t>(std::llround(slopeMeters / blockMeters)));
         setup.pileCells = std::max<uint32_t>(1, static_cast<uint32_t>(std::llround(pileMeters / cellMeters)));
+        setup.spreadPile = spreadPile;
+        setup.spreadCells = spreadCells;
+        setup.spreadShift = spreadShift;
+        setup.meanCells = static_cast<uint32_t>(std::llround(meanMeters / blockMeters));
+        setup.truncateSlack = truncateSlack;
 
         return setup;
     }
@@ -646,11 +662,12 @@ namespace {
             "fixedEvents={} gpu={:.4f} "
             "fixedGpu={:.4f} "
             "tempMk={:.3f} "
-            "ppm={:.3f} carriedMk={:.3f} meanE={}",
+            "ppm={:.3f} carriedMk={:.3f} meanE={} {} spreads={}",
             scene.name, flowBlockMeters, windowMeters, slopeMeters, flowLook ? 1 : 0, flowArrival, flowBudget,
             static_cast<double>(chosen.run.state.cellSteps) / (static_cast<double>(trial.cellCount) * NIGHT_TICKS),
             chosen.run.state.events, fixed.run.state.events, FlowGpuSeconds(chosen.run.state),
-            FlowGpuSeconds(fixed.run.state), worst.temperatureMk, worst.dissolvedPpm, worst.carriedMk, exponents);
+            FlowGpuSeconds(fixed.run.state), worst.temperatureMk, worst.dissolvedPpm, worst.carriedMk, exponents,
+            T1175Tag(), chosen.run.state.spreads);
         Expect(fixed.run.conserved && chosen.run.conserved, "流れ: 保存");
         Expect(chosen.run.state.widestNeighborGap <= 1, "流れ: 隣どうしの e の差は 1 段まで");
     }
@@ -917,11 +934,13 @@ namespace {
                                   (static_cast<double>(setup.cellCount) * static_cast<double>(ticks));
             Log(Channel::Sim, Level::Info,
                 "GRAIN scene={} unit={} window={} slope={} budget={} cell={} tempMk={:.3f} ppm={:.3f} carriedMk={:.3f} "
-                "reacted={:.3f} solves={:.5f} events={} truncations={} gap={} conserved={} meanE={:.3f} seconds={:.2f}",
+                "reacted={:.3f} solves={:.5f} events={} truncations={} gap={} conserved={} meanE={:.3f} seconds={:.2f} "
+                "{} spreads={}",
                 name, grainUnitMeters, windowMeters, slopeMeters, grainBudget, dx, grain.worst.temperatureMk,
                 grain.worst.dissolvedPpm, grain.worst.carriedMk, grain.worst.reactedMillionth, solves,
                 grain.run.state.events, grain.run.state.truncations, grain.run.state.widestNeighborGap,
-                grain.run.conserved ? 1 : 0, meanExponent / std::max<size_t>(samples, 1), grain.run.seconds);
+                grain.run.conserved ? 1 : 0, meanExponent / std::max<size_t>(samples, 1), grain.run.seconds, T1175Tag(),
+                grain.run.state.spreads);
             Expect(grain.run.conserved, "細かさ(T-1174): 保存");
             Expect(grain.run.state.widestNeighborGap <= 1, "細かさ(T-1174): 隣どうしの e の差は 1 段まで");
         }
@@ -932,13 +951,23 @@ namespace {
             uint64_t withinOne = 0;
             uint64_t samples = 0;
             int32_t widest = 0;
+            double signedGap = 0.0;    // 細かい − 粗い(負 = 細かい方が短い)
+            uint64_t nearSamples = 0;  // どちらかの e が 3 以下(前線の近く)
+            uint64_t nearWithin = 0;
             for (size_t i = 0; i < runs[0].exponents.size(); ++i) {
                 for (size_t p = 0; p < runs[0].exponents[i].size(); ++p) {
-                    const int32_t gap = std::abs(runs[0].exponents[i][p] - runs[other].exponents[i][p]);
+                    const int32_t fine = runs[0].exponents[i][p];
+                    const int32_t coarse = runs[other].exponents[i][p];
+                    const int32_t gap = std::abs(fine - coarse);
                     meanGap += gap;
+                    signedGap += fine - coarse;
                     withinOne += gap <= 1 ? 1u : 0u;
                     widest = std::max(widest, gap);
                     ++samples;
+                    if (std::min(fine, coarse) <= 3) {
+                        ++nearSamples;
+                        nearWithin += gap <= 1 ? 1u : 0u;
+                    }
                 }
             }
 
@@ -959,11 +988,16 @@ namespace {
             Log(Channel::Sim, Level::Info,
                 "GRAINPAIR scene={} unit={} window={} slope={} pile={} budget={} arrival={} cells=0.5-{} "
                 "meanGap={:.3f} "
-                "withinOne={:.1f} widest={} profileGap={:.3f}",
+                "withinOne={:.1f} widest={} profileGap={:.3f} signedGap={:.3f} near={:.1f}%:{:.1f} far={:.1f} {}",
                 name, grainUnitMeters, windowMeters, slopeMeters, pileMeters, grainBudget, trialArrival,
                 GRAIN_CELL_METERS[other], meanGap / static_cast<double>(samples),
                 100.0 * static_cast<double>(withinOne) / samples, widest,
-                profileGap / static_cast<double>(std::max<size_t>(places, 1)));
+                profileGap / static_cast<double>(std::max<size_t>(places, 1)), signedGap / static_cast<double>(samples),
+                100.0 * static_cast<double>(nearSamples) / static_cast<double>(samples),
+                100.0 * static_cast<double>(nearWithin) / static_cast<double>(std::max<uint64_t>(nearSamples, 1)),
+                100.0 * static_cast<double>(withinOne - nearWithin) /
+                    static_cast<double>(std::max<uint64_t>(samples - nearSamples, 1)),
+                T1175Tag());
         }
     }
 
@@ -1040,6 +1074,16 @@ namespace {
                 slopeMeters = std::atof(value.c_str());
             else if (key == "pilemeters")
                 pileMeters = std::atof(value.c_str());
+            else if (key == "spread")
+                spreadPile = std::atoi(value.c_str()) != 0;
+            else if (key == "spreadshift")
+                spreadShift = static_cast<uint32_t>(std::atoi(value.c_str()));
+            else if (key == "spreadcells")
+                spreadCells = static_cast<uint32_t>(std::atoi(value.c_str()));
+            else if (key == "meanmeters")
+                meanMeters = std::atof(value.c_str());
+            else if (key == "slack")
+                truncateSlack = static_cast<uint32_t>(std::atoi(value.c_str()));
             else if (key == "grainunit")
                 grainUnitMeters = std::atof(value.c_str());
             else if (key == "grainbudget")
