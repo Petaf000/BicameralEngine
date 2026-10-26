@@ -7,7 +7,7 @@
 //         セルの変わった段・数え上げ(出る上限で縮めた数・一番速い面)を比べる。圧力の値を groupshared に置く形と作業場に置く形の両方。
 //   --measure(--measure-only は比べを飛ばす): 紙 24 列・A4(27 × 38)の層 4・6 段を、物 1 つと 46 個(RTX 3070 Ti の SM の数)で、
 //         暖機 30 刻みの後 20 刻みの 1 刻みの平均の GPU の時間を出す。
-//   圧力の反復の規則(T-1201): 比べは「0 から決まった 24 回」(T-1200 まで)と「温めた始まり + 収まるまで」(既定)の両方。
+//   圧力の反復の規則(T-1201): 比べは「0 から決まった 24 回」(T-1200 まで)・「0 から収まるまで」(既定)・「温めた始まり + 収まるまで」。
 //         測るのは 0 から決まった回数(--sweeps)・0 から収まるまで・温めた始まり + 収まるまで の 3 つ(--rule 0 / 1 / 3 で 1 つだけ)。
 // 引数は gpu_test_options.h と --measure / --measure-only / --sweeps N / --rule N。
 #include <cstdlib>
@@ -251,7 +251,7 @@ namespace {
         uint32_t passBase = 0;
         uint32_t sharedPotential = 0;
         uint32_t pressureSweeps = 1024;  // 圧力の赤黒の上限(CPU の OhShellFlow と同じ既定)
-        uint32_t pressureMode = 3;       // 1 = 収まったら止める・2 = 温めた始まり(shaders の OH_PRESSURE_*。T-1201)
+        uint32_t pressureMode = 1;       // 1 = 収まったら止める・2 = 温めた始まり(shaders の OH_PRESSURE_*。T-1201)
     };
 
     // 圧力の反復の規則(T-1201。CPU の OhShellFlow と GPU の g_pressureMode に同じものを渡す)
@@ -653,7 +653,8 @@ namespace {
         if (compare) {
             const std::array<Shape, 2> shapes = {Shape{"紙 24 列・層 2 段", 24, 3, 2},
                                                  Shape{"紙 24 列・層 4 段", 24, 3, 4}};
-            const std::array<PressureRule, 2> rules = {PressureRule{"0 から決まった 24 回", 24, 0},
+            const std::array<PressureRule, 3> rules = {PressureRule{"0 から決まった 24 回", 24, 0},
+                                                       PressureRule{"0 から収まるまで", 1024, 1},
                                                        PressureRule{"温めた始まり + 収まるまで", 1024, 3}};
             for (const PressureRule& rule : rules) {
                 for (const Shape& shape : shapes) {
@@ -685,6 +686,10 @@ namespace {
                     for (const uint32_t copies : {1u, SM_COUNT}) {
                         for (const bool sharedPotential : {true, false}) {
                             if (sharedPotential && outer > SHARED_VOXELS)
+                                continue;
+
+                            // 収まるまで解くと A4 の 46 個は 1 回の Dispatch が 1 秒を超えうる(TDR の 2 秒に近い)ので測らない
+                            if (rule.mode != 0 && copies != 1 && outer > SHARED_VOXELS)
                                 continue;
 
                             if (auto measured = Measure(context, shape, copies, sharedPotential, rule); !measured) {

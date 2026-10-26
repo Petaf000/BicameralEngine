@@ -8,7 +8,7 @@
 // 骨格のボクセル: 既定は壁(骨格に面する面は運動量を持たず、骨格の気体の膨らみ・縮みだけが圧力の射影で出入りする = 吹き出す多孔の壁)。
 // skeletonWalls = false なら骨格の中も気体として流れる(気体の割合 = 凝縮相の体積を除いた分。比べ)。
 // 真実: 面の運動量(OhShellFlow::momentum。層を作った時に 0 = 止まった空気、返す時に捨てる)。運動のエネルギーは数えない(音より遅い極限)。
-// 圧力の反復(T-1201): 既定は前の小刻みの圧力の値から解き始め(温めた始まり。層の状態)、1 回の赤黒で値が 1 つも変わらなければ止める
+// 圧力の反復(T-1201): 既定は毎小刻み 0 から解き始め(pressureWarmStart で前の小刻みの値から。層の状態)、1 回の赤黒で値が 1 つも変わらなければ止める
 //   (= 整数の反復の動かない点。上限 pressureSweeps)。止まった時の値はその整数の式の答えそのもの(決まった回数で打ち切らない。D-428)。
 //   回数は状態だけで決まるので決定的(GPU も同じ規則。T-1201)。pressureUntilQuiet = false・pressureWarmStart = false で T-1200 までの形(0 から決まった回数)。
 // 保存: 移すのは対の流れだけ(片側から引いた量を反対側に足す)なので、セル + ボクセル + 対の端数はビット単位で変わらない。
@@ -29,8 +29,9 @@ namespace bicameral::test {
         uint32_t pressureSweeps =
             1024;  // 圧力の赤黒の反復の上限(pressureUntilQuiet = false なら決まった回数。T-1200 までは 24)
         bool pressureUntilQuiet = true;  // 1 回の赤黒で圧力の値が 1 つも変わらなければ止める(T-1201)
-        bool pressureWarmStart = true;   // 前の小刻みの圧力の値から解き始める(T-1201。false = 毎小刻み 0 から)
-        std::vector<int64_t> potential;  // 圧力の解き始めの値(層の状態。層を作った時に 0、返す時に捨てる)
+        // 前の小刻みの圧力の値から解き始める(T-1201。既定 false = 毎小刻み 0 から。温めても回数は減らず 1〜2 割増えた)
+        bool pressureWarmStart = false;
+        std::vector<int64_t> potential;                // 圧力の解き始めの値(層の状態。層を作った時に 0、返す時に捨てる)
         std::array<std::vector<int64_t>, 3> momentum;  // 軸ごとの面(+ 向きが正。質量 × q)
         uint64_t limitedShares = 0;                    // 数えるだけ: 出る上限で縮めた(ボクセル × 小刻み)
         int64_t fastestQ16 = 0;                        // 数えるだけ: 一番速い面(Q16 ボクセル / 小刻み)
@@ -39,6 +40,11 @@ namespace bicameral::test {
         uint64_t pressureSweepsUsed = 0;
         uint32_t pressureMostSweeps = 0;
         uint64_t pressureCapped = 0;
+        // 調べるだけ(T-1201 の道 B): 赤黒の前に多重格子の V 字を何回(0 = しない)・その費用の和(細かい格子の赤黒 1 回 = 1000)
+        uint32_t pressureMultigridCycles = 0;
+        // 調べるだけ(T-1201): 「収まった」とみなす 1 回の赤黒の値の変わりの上限(0 = 1 つも変わらない。GPU は 0 だけ)
+        int64_t pressureQuietTolerance = 0;
+        uint64_t pressureMultigridWork = 0;
         // 調べるだけ(T-1201。0 = しない): 0 から解く時、この回数の時の値と止まった時の値の、面の速さの差の最大と速さの最大(Q16)
         uint32_t gapSweeps = 0;
         int64_t gapSpeedQ16 = 0;
@@ -108,6 +114,175 @@ namespace bicameral::test {
                 }
             }
         }
+    }
+
+    // --- 調べるだけ(T-1201 の道 B): 圧力の多重格子(2 × 2 × 2 をまとめた粗い格子・区分一定の戻し)---
+    // 粗い面の重み = まとめた細かい面の重みの和 ÷ 2(間の距離が 2 倍)。V 字の 1 回 = 前に赤黒 2 回 → 残りを粗い格子へ → 粗い格子を解く →
+    // 直しを足す → 後に赤黒 2 回。最後は細かい格子の赤黒を収まるまで(StepShellFlowSubstep)なので、答えは同じ整数の式の動かない点。
+    // 戻り値 = 費用(細かい格子の赤黒 1 回 = 1000。粗い格子は数の割合で数え、残りを求める 1 回も赤黒 1 回と数える)
+    struct OhMgLevel {
+        uint32_t size[3];
+        std::vector<std::array<uint64_t, 6>>
+            weight;  // ボクセルごと: −x・+x・−y・+y・−z・+z の面(箱の外の面は Ψ = 0 に向く)
+        std::vector<uint64_t> total;
+        std::vector<int64_t> rhs;  // 残り × 65536 の単位
+        std::vector<int64_t> value;
+
+        [[nodiscard]] size_t Count() const { return static_cast<size_t>(size[0]) * size[1] * size[2]; }
+
+        [[nodiscard]] size_t Index(uint32_t x, uint32_t y, uint32_t z) const {
+            return x + (static_cast<size_t>(size[0]) * (y + (static_cast<size_t>(size[1]) * z)));
+        }
+    };
+
+    // 隣の値の重みつきの和(箱の外は 0)
+    inline int64_t MgNeighbourSum(const OhMgLevel& level, uint32_t x, uint32_t y, uint32_t z) {
+        const size_t v = level.Index(x, y, z);
+        const uint32_t c[3] = {x, y, z};
+        int64_t sum = 0;
+        for (uint32_t a = 0; a < 3; ++a) {
+            uint32_t m[3] = {x, y, z};
+            uint32_t p[3] = {x, y, z};
+            if (c[a] > 0) {
+                --m[a];
+                sum += static_cast<int64_t>(level.weight[v][2 * a]) * level.value[level.Index(m[0], m[1], m[2])];
+            }
+
+            if (c[a] + 1 < level.size[a]) {
+                ++p[a];
+                sum += static_cast<int64_t>(level.weight[v][(2 * a) + 1]) * level.value[level.Index(p[0], p[1], p[2])];
+            }
+        }
+
+        return sum;
+    }
+
+    inline void MgSweep(OhMgLevel& level) {
+        namespace rx = bicameral::reaction;
+        for (uint32_t colour = 0; colour < 2; ++colour) {
+            for (uint32_t z = 0; z < level.size[2]; ++z) {
+                for (uint32_t y = 0; y < level.size[1]; ++y) {
+                    for (uint32_t x = 0; x < level.size[0]; ++x) {
+                        if (((x + y + z) & 1u) != colour)
+                            continue;
+
+                        const size_t v = level.Index(x, y, z);
+                        const int64_t sum = level.rhs[v] + MgNeighbourSum(level, x, y, z);
+                        level.value[v] = rx::OhMulDivToward0(sum, 1, std::max<uint64_t>(level.total[v], 1));
+                    }
+                }
+            }
+        }
+    }
+
+    // 細かい格子の残りと重みから粗い格子を作る
+    inline OhMgLevel MgCoarsen(const OhMgLevel& fine) {
+        OhMgLevel coarse;
+        for (uint32_t a = 0; a < 3; ++a)
+            coarse.size[a] = (fine.size[a] + 1) / 2;
+
+        const size_t count = coarse.Count();
+        coarse.weight.assign(count, {});
+        coarse.total.assign(count, 0);
+        coarse.rhs.assign(count, 0);
+        coarse.value.assign(count, 0);
+        for (uint32_t z = 0; z < fine.size[2]; ++z) {
+            for (uint32_t y = 0; y < fine.size[1]; ++y) {
+                for (uint32_t x = 0; x < fine.size[0]; ++x) {
+                    const size_t v = fine.Index(x, y, z);
+                    const size_t parent = coarse.Index(x / 2, y / 2, z / 2);
+                    const int64_t applied = (static_cast<int64_t>(fine.total[v]) * fine.value[v]) -
+                                            MgNeighbourSum(fine, x, y, z);
+                    coarse.rhs[parent] += fine.rhs[v] - applied;
+                    const uint32_t c[3] = {x, y, z};
+                    for (uint32_t a = 0; a < 3; ++a) {
+                        // まとまりの外へ向く面だけ(− 側は偶数の座標・+ 側は奇数の座標か箱の端)
+                        if ((c[a] & 1u) == 0)
+                            coarse.weight[parent][2 * a] += fine.weight[v][2 * a];
+
+                        if ((c[a] & 1u) == 1 || c[a] + 1 == fine.size[a])
+                            coarse.weight[parent][(2 * a) + 1] += fine.weight[v][(2 * a) + 1];
+                    }
+                }
+            }
+        }
+
+        for (size_t v = 0; v < count; ++v) {
+            for (uint64_t& w : coarse.weight[v]) {
+                w /= 2;
+                coarse.total[v] += w;
+            }
+        }
+
+        return coarse;
+    }
+
+    inline uint64_t MgCycle(OhMgLevel& level, uint64_t fineCount) {
+        const uint64_t count = level.Count();
+        uint64_t work = 0;
+        const bool coarsest = level.size[0] <= 2 && level.size[1] <= 2 && level.size[2] <= 2;
+        if (coarsest) {
+            for (uint32_t s = 0; s < 8; ++s)
+                MgSweep(level);
+
+            return (8 * 1000 * count) / fineCount;
+        }
+
+        MgSweep(level);
+        MgSweep(level);
+        OhMgLevel coarse = MgCoarsen(level);
+        work += (3 * 1000 * count) / fineCount;
+        work += MgCycle(coarse, fineCount);
+        for (uint32_t z = 0; z < level.size[2]; ++z) {
+            for (uint32_t y = 0; y < level.size[1]; ++y) {
+                for (uint32_t x = 0; x < level.size[0]; ++x)
+                    level.value[level.Index(x, y, z)] += coarse.value[coarse.Index(x / 2, y / 2, z / 2)];
+            }
+        }
+
+        MgSweep(level);
+        MgSweep(level);
+
+        return work + ((2 * 1000 * count) / fineCount);
+    }
+
+    inline uint64_t PressureMultigrid(const OhFlowBox& box, const std::array<std::vector<uint64_t>, 3>& weight,
+                                      const std::vector<int64_t>& residual, uint32_t cycles,
+                                      std::vector<int64_t>& potential) {
+        OhMgLevel fine;
+        for (uint32_t a = 0; a < 3; ++a)
+            fine.size[a] = box.size[a];
+
+        const size_t count = fine.Count();
+        fine.weight.assign(count, {});
+        fine.total.assign(count, 0);
+        fine.rhs.assign(count, 0);
+        fine.value = potential;
+        for (uint32_t z = 0; z < box.size[2]; ++z) {
+            for (uint32_t y = 0; y < box.size[1]; ++y) {
+                for (uint32_t x = 0; x < box.size[0]; ++x) {
+                    const uint32_t c[3] = {x, y, z};
+                    const size_t v = box.Voxel(c);
+                    for (uint32_t a = 0; a < 3; ++a) {
+                        uint32_t plus[3] = {x, y, z};
+                        ++plus[a];
+                        fine.weight[v][2 * a] = weight[a][box.Face(a, c)];
+                        fine.weight[v][(2 * a) + 1] = weight[a][box.Face(a, plus)];
+                        fine.total[v] += fine.weight[v][2 * a] + fine.weight[v][(2 * a) + 1];
+                    }
+
+                    fine.rhs[v] = residual[v] * 65536;
+                }
+            }
+        }
+
+        uint64_t work = 0;
+        for (uint32_t cycle = 0; cycle < cycles; ++cycle)
+            work += MgCycle(fine, count);
+
+        potential = fine.value;
+
+        return work;
     }
 
     // 1 つの流れの小刻み。戻り値 = 量が負・枠があふれなかった
@@ -268,6 +443,10 @@ namespace bicameral::test {
         if (flow.pressureWarmStart && flow.potential.size() == count)
             potential = flow.potential;
 
+        if (flow.pressureMultigridCycles != 0)
+            flow.pressureMultigridWork += PressureMultigrid(box, weight, residual, flow.pressureMultigridCycles,
+                                                            potential);
+
         std::vector<int64_t> atGap;
         uint32_t used = 0;
         bool quiet = false;
@@ -301,7 +480,7 @@ namespace bicameral::test {
                             }
 
                             const int64_t value = rx::OhMulDivToward0(sum, 1, std::max<uint64_t>(total, 1));
-                            moved = moved || value != potential[v];
+                            moved = moved || std::abs(value - potential[v]) > flow.pressureQuietTolerance;
                             potential[v] = value;
                         }
                     }
