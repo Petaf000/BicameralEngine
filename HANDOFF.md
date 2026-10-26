@@ -1,6 +1,6 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-26(本体の作業役 9 回目・wt6 T-1164・wt2 T-1191 を main へ・ユーザーの答え D-677〜D-682 の記録)
+最終更新: 2026-10-26(本体の作業役 9 回目・wt6 T-1164・wt2 T-1191・wt4 T-1112 を main へ・ユーザーの答え D-677〜D-682 の記録)
 
 ## この仕事でしたこと(2026-10-26・本体の作業役・9 回目: wt6 t-1164・wt2 t-1191 のマージ・答えの記録)
 - **マージ(--no-ff・衝突なし)**: wt6 278c9469(T-1164: 放射の持ち越しを鍵で引く密な表・刻みの偶奇で 2 つ〔ADR-0484〕・D-670・D-671 の既定・GPU の正負 2 側・combustion_test の地面 300 K)→ push c97d803f。
@@ -12,8 +12,8 @@
 - **ユーザーの答え(2026-10-26 22:17)を記録**: D-677(層の圧力は収まるまで・上限 1,024 を既定。**T-1202 の多重格子で燃える物 1 つの費用を D-667 の見込みの桁へ戻すのが必須**。ROADMAP に T-1202 の行)・
   D-678(ADR-0481 の 5 = (a)。T-1210 着手可)・D-679(Q173 閉じた: 粒の詰まりは任意・既定 60 % と警告。T-1188 で)・D-680(ADR-0480・ADR-0485 Accepted・support_mixed の線 5 %)・
   D-681(combustion_test の地面 300 K・参照の温度は高さ 0)・D-682(T-1160 の 3 点。**ADR-0486 は wt3 のマージ後に Accepted にする**)。
-- **残り(2 時間の区切りで止めた)**: wt4 t-1112-cell-window-gpu(470e3203。perf.md の衝突は両方残す。試験 time_step_choose_dump・gpu_time_step_choose・time_step_tree)→
-  wt3 t-1160-phase-energy(cd764aac。入れたら ADR-0486 Accepted)→ wt5 t-1200-shell-gpu(308a4ead。入れたら T-1201 の判断待ちを D-677 で閉じる)の順。
+- wt4 470e3203(T-1112 Done: セルの窓を選ぶ段を GPU に・ADR-0487)→ push。衝突は docs/perf.md の表の 1 行だけ(両方残した)。試験 time_step_choose_dump・gpu_time_step_choose・time_step_tree(release)合格。
+- **残り(2 時間の区切りで止めた)**: wt3 t-1160-phase-energy(cd764aac。入れたら ADR-0486 Accepted)→ wt5 t-1200-shell-gpu(308a4ead。入れたら T-1201 の判断待ちを D-677 で閉じる)の順。
 - 次の番号は **D-683・ADR-0479・T-1189・Q174**(本体)。
 
 (前の版の最終更新: 2026-10-26(本体の作業役 8 回目・T-1176 の CPU と傾きの式・wt3 T-1209・wt4 T-1089 を main へ))
