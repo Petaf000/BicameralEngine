@@ -271,14 +271,19 @@ namespace bicameral::sim {
                 if (temperature == 0 || (!relative && temperature < work.params->quietBelowMk))
                     continue;
 
+                // 面の向こうに依らない分はセルごとに 1 回(6 面で同じ。面の量 = RcFaceEmissionRelative。T-1161)
+                const uint32_t referenceWord = work.params->referenceMk |
+                                               (work.params->negativePart ? rx::RC_REFERENCE_NEGATIVE : 0u);
+                const rx::RcBands cellBands = rx::RcCellEmissionRelative(temperature, referenceWord,
+                                                                         grid.lights[index]);
+                if (cellBands.shortBand == 0 && cellBands.longBand == 0)
+                    continue;
+
                 const Cell3 cell = CellOf(grid, index);
                 const bool active = !work.params->thermalInSlots ||
                                     rx::RcEmitSlotActive(work.constants, cell[0], cell[1], cell[2]);
                 for (uint32_t face = 0; face < rx::RC_FACES; ++face) {
-                    const uint32_t referenceWord = work.params->referenceMk |
-                                                   (work.params->negativePart ? rx::RC_REFERENCE_NEGATIVE : 0u);
-                    const rx::RcBands bands = rx::RcFaceEmissionRelative(temperature, referenceWord, grid.lights[index],
-                                                                         LightAcross(grid, cell, face));
+                    const rx::RcBands bands = rx::RcMaskAcross(cellBands, LightAcross(grid, cell, face));
                     if (bands.shortBand == 0 && bands.longBand == 0)
                         continue;
 
