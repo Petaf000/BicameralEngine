@@ -1021,6 +1021,40 @@ namespace bicameral::sim {
             return solved;
         }
 
+        // --- 刻みを選ぶ段を見る口(T-1112。結果に効かない)---
+        struct ChooseWatch {
+            std::vector<uint16_t> before;
+            std::vector<uint8_t> windowCaps;
+        };
+
+        ChooseWatch WatchBefore(const TimeTreeSetup& setup, const TimeTreeWorld& world) {
+            ChooseWatch watch{.before = PackTimeTreeUnits(world)};
+            const bool window = setup.windowLevel0Cells > 0 && setup.select != TimeTreeSelect::Jump;
+            const std::vector<int32_t> caps = window ? WindowCaps(setup, world) : std::vector<int32_t>{};
+            for (const uint32_t unit : world.layout.units)
+                watch.windowCaps.push_back(static_cast<uint8_t>(window ? caps[unit] : setup.maxExponent));
+
+            return watch;
+        }
+
+        void WatchAfter(const TimeTreeSetup& setup, const TimeTreeWorld& world, const ChooseWatch& watch,
+                        const std::vector<int32_t>& next) {
+            const uint64_t tick = world.steps.tick;
+            std::vector<int32_t> chosen;
+            chosen.reserve(world.layout.units.size());
+            for (const uint32_t unit : world.layout.units)
+                chosen.push_back(next[unit]);
+
+            const std::vector<uint16_t> after = PackTimeTreeUnits(world);
+            const TimeTreeChooseView view{.tick = tick,
+                                          .cap = std::min(TsAlignedCap(tick), setup.maxExponent),
+                                          .before = watch.before,
+                                          .windowCaps = watch.windowCaps,
+                                          .next = chosen,
+                                          .after = after};
+            (*setup.chooseObserver)(view);
+        }
+
         void ProcessEvent(const TimeTreeSetup& setup, TimeTreeWorld& world) {
             TimeTreeSteps& steps = world.steps;
             const uint64_t tick = steps.tick;
@@ -1046,9 +1080,14 @@ namespace bicameral::sim {
             }
 
             const bool retake = (setup.select == TimeTreeSelect::Retake || jump) && setup.rule != TimeStepRule::Fixed;
+            ChooseWatch watch;
+            if (setup.chooseObserver != nullptr)
+                watch = WatchBefore(setup, world);
+
             std::vector<SolvedSpan> solved;
+            std::vector<int32_t> next;
             do {
-                const std::vector<int32_t> next = ChooseExponents(setup, world, tick);
+                next = ChooseExponents(setup, world, tick);
                 solved = SolveSpans(setup, world, next);
             } while (retake && MarkRetakes(setup, world, solved));
 
@@ -1065,6 +1104,9 @@ namespace bicameral::sim {
                     steps.widestNeighborGap = std::max(steps.widestNeighborGap,
                                                        std::abs(steps.exponent[unit] - steps.exponent[neighbor]));
             }
+
+            if (setup.chooseObserver != nullptr)
+                WatchAfter(setup, world, watch, next);
 
             ++steps.events;
         }
@@ -1242,6 +1284,109 @@ namespace bicameral::sim {
         return world.steps.exponent[TimeTreeUnitOf(world, slot, index)];
     }
 
+    // --- 詰めた歩の記録(T-1112)---
+
+    namespace {
+
+        // 1 単位を詰める(入らなければ false)
+        bool PackUnit(const TimeTreeSteps& steps, uint32_t unit, uint16_t& packed) {
+            const int32_t exponent = steps.exponent[unit];
+            const int32_t desired = steps.desired[unit];
+            if (exponent < 0 || exponent > 15 || desired < 0 || desired > 15 || steps.open[unit] > 1 ||
+                steps.touched[unit] > 1)
+                return false;
+
+            uint32_t bits = static_cast<uint32_t>(exponent) |
+                            (static_cast<uint32_t>(desired) << TIME_TREE_RECORD_DESIRED_SHIFT) |
+                            (steps.open[unit] != 0 ? TIME_TREE_RECORD_OPEN : 0u) |
+                            (steps.touched[unit] != 0 ? TIME_TREE_RECORD_TOUCHED : 0u);
+            const uint64_t start = steps.start[unit];
+            const uint64_t end = steps.end[unit];
+            const uint64_t length = Ticks(exponent);
+            if (start == 0 && end == 0 && steps.open[unit] == 0)
+                bits |= TIME_TREE_RECORD_FRESH;
+            else if (end != start + length || start % length != 0)
+                return false;
+            else if (end == steps.tick)
+                bits |= TIME_TREE_RECORD_ENDS_NOW;
+            else if (start != (steps.tick & ~(length - 1)) || steps.tick >= end)
+                return false;
+
+            packed = static_cast<uint16_t>(bits);
+
+            return true;
+        }
+
+    }  // namespace
+
+    std::vector<uint16_t> PackTimeTreeUnits(const TimeTreeWorld& world) {
+        std::vector<uint16_t> packed(world.layout.units.size());
+        for (size_t u = 0; u < packed.size(); ++u) {
+            if (!PackUnit(world.steps, world.layout.units[u], packed[u]))
+                return {};
+        }
+
+        return packed;
+    }
+
+    bool UnpackTimeTreeUnits(TimeTreeWorld& world, std::span<const uint16_t> packed) {
+        TimeTreeSteps& steps = world.steps;
+        if (packed.size() != world.layout.units.size())
+            return false;
+
+        for (size_t u = 0; u < packed.size(); ++u) {
+            const uint32_t unit = world.layout.units[u];
+            const uint32_t bits = packed[u];
+            const auto exponent = static_cast<int32_t>(bits & TIME_TREE_RECORD_EXPONENT_MASK);
+            const uint64_t length = Ticks(exponent);
+            steps.exponent[unit] = exponent;
+            steps.desired[unit] = static_cast<int32_t>((bits >> TIME_TREE_RECORD_DESIRED_SHIFT) &
+                                                       TIME_TREE_RECORD_EXPONENT_MASK);
+            steps.open[unit] = (bits & TIME_TREE_RECORD_OPEN) != 0 ? 1 : 0;
+            steps.touched[unit] = (bits & TIME_TREE_RECORD_TOUCHED) != 0 ? 1 : 0;
+            if ((bits & TIME_TREE_RECORD_FRESH) != 0)
+                steps.start[unit] = 0;
+            else if ((bits & TIME_TREE_RECORD_ENDS_NOW) != 0)
+                steps.start[unit] = steps.tick - length;
+            else
+                steps.start[unit] = steps.tick & ~(length - 1);
+
+            steps.end[unit] = (bits & TIME_TREE_RECORD_FRESH) != 0 ? 0 : steps.start[unit] + length;
+        }
+
+        return true;
+    }
+
+    TimeTreeChooseTables MakeTimeTreeChooseTables(const TimeTreeSetup& setup, const TimeTreeLayout& layout) {
+        TimeTreeChooseTables tables;
+        const bool matesFree = std::ranges::all_of(layout.units,
+                                                   [&](uint32_t unit) { return layout.mates[unit].empty(); });
+        tables.supported = setup.windowLevel0Cells > 0 && setup.select == TimeTreeSelect::Previous &&
+                           !setup.frontBuffer && setup.frontBufferUnits == 0 && setup.maxExponent <= 14 && matesFree;
+        tables.units = static_cast<uint32_t>(layout.units.size());
+        tables.gridSize = layout.window.size;
+        tables.radius = layout.window.radius;
+        tables.maxExponent = setup.maxExponent;
+
+        std::vector<uint32_t> order(layout.unitOf.size(), NO_TIME_TREE_UNIT);
+        for (uint32_t u = 0; u < tables.units; ++u)
+            order[layout.units[u]] = u;
+
+        tables.gridUnits.reserve(layout.window.unitOf.size());
+        for (const uint32_t unit : layout.window.unitOf)
+            tables.gridUnits.push_back(unit == NO_TIME_TREE_UNIT ? NO_TIME_TREE_UNIT : order[unit]);
+
+        tables.neighborStarts.push_back(0);
+        for (const uint32_t unit : layout.units) {
+            for (const uint32_t neighbor : layout.neighbors[unit])
+                tables.neighbors.push_back(order[neighbor]);
+
+            tables.neighborStarts.push_back(static_cast<uint32_t>(tables.neighbors.size()));
+        }
+
+        return tables;
+    }
+
     TimeTreeRecordBytes MeasureTimeTreeRecords(const TimeTreeWorld& world) {
         constexpr uint64_t UNIT_BYTES = 1 + 1 + 1 + 8;  // e・望みの e・歩の途中/触った・始めた刻み(終わり = 始め + 2^e)
         constexpr uint64_t CELL_RECORD_BYTES = 16;      // 反応・地面(区間は枠の歩と同じ。打ち切ると枠も閉じる)
@@ -1266,6 +1411,7 @@ namespace bicameral::sim {
         }
 
         bytes.held = bytes.minimal + bytes.cells * CELL_DELTA_BYTES;
+        bytes.packed = bytes.minimal - (bytes.units * (UNIT_BYTES - sizeof(uint16_t)));
 
         return bytes;
     }

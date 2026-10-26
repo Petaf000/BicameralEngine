@@ -50,6 +50,19 @@ namespace bicameral::sim {
 
     using TimeTreeSpanObserver = std::function<void(const TimeTreeSpanSolve&)>;
 
+    // 刻みを選ぶ段を見る口(T-1112。GPU の試験が同じ入力から GPU で選び直して比べる)。どれも layout.units の順。
+    // 出来事ごとに 1 回(歩を閉じた後〔before〕→ 窓の上限・選んだ e → 列を解いて書いた後〔after〕)
+    struct TimeTreeChooseView {
+        uint64_t tick = 0;
+        int32_t cap = 0;  // この刻みで始めてよい最も長い e(世界の時計にそろえる上限と maxExponent の小さい方)
+        std::span<const uint16_t> before;     // 選ぶ前の詰めた記録(PackTimeTreeUnits)
+        std::span<const uint8_t> windowCaps;  // 窓の上限(窓の内の望みの e の最小)
+        std::span<const int32_t> next;        // 選んだ e(-1 = 歩の途中のまま)
+        std::span<const uint16_t> after;      // 出来事の後の詰めた記録
+    };
+
+    using TimeTreeChooseObserver = std::function<void(const TimeTreeChooseView&)>;
+
     struct TimeTreeSetup {
         // --- 熱(どれもレベルによらない数。面の係数だけレベル k で × 4^k)---
         uint64_t capacityQ32 = 0;          // セルの熱容量(2^-32 × そのレベルの単位 / mK)
@@ -107,7 +120,8 @@ namespace bicameral::sim {
         uint32_t unitEdgeCells = 1;
 
         // --- 見る口(結果に効かない)---
-        const TimeTreeSpanObserver* spanObserver = nullptr;  // 列の解き(T-1111)
+        const TimeTreeSpanObserver* spanObserver = nullptr;      // 列の解き(T-1111)
+        const TimeTreeChooseObserver* chooseObserver = nullptr;  // 刻みを選ぶ段(T-1112)
     };
 
     // 面 1 つ(a = 細かい側か、同じレベルなら − 側。b = 相手)。係数は a の単位 / 刻み
@@ -260,10 +274,44 @@ namespace bicameral::sim {
     struct TimeTreeRecordBytes {
         uint64_t minimal = 0;
         uint64_t held = 0;
-        uint64_t cells = 0;  // 刻むセルの数
-        uint64_t units = 0;  // 刻みを選ぶ単位の数(T-1089)
+        uint64_t cells = 0;   // 刻むセルの数
+        uint64_t units = 0;   // 刻みを選ぶ単位の数(T-1089)
+        uint64_t packed = 0;  // 最小のうち単位の見出しを詰めた記録(2 B。PackTimeTreeUnits)にした大きさ(T-1112)
     };
     TimeTreeRecordBytes MeasureTimeTreeRecords(const TimeTreeWorld& world);
+
+    // --- 詰めた歩の記録(T-1112。GPU の刻みを選ぶ段とセーブの形)---
+    // 単位ごとの記録を 2 B に詰める。歩の始めは必ず 2^e の倍数の刻み(始める時の e は世界の時計にそろえる上限まで。T-1089)なので、
+    // 始め・終わりは e と今の刻みから出せる: 今の刻みで終わる歩なら 始め = 今 − 2^e、ほかは 始め = 今を 2^e に切り下げた値。終わり = 始め + 2^e。
+    // ビット: 0〜3 e・4〜7 望みの e・8 歩の途中・9 触った・10 今の刻みで終わる・11 まだ歩を始めていない(始め = 終わり = 0)。
+    // e・望みの e は 0〜15(maxExponent ≤ 14 なら望みは e + 1 ≤ 15 に収まる)
+    inline constexpr uint32_t TIME_TREE_RECORD_EXPONENT_MASK = 0xFu;
+    inline constexpr uint32_t TIME_TREE_RECORD_DESIRED_SHIFT = 4;
+    inline constexpr uint32_t TIME_TREE_RECORD_OPEN = 1u << 8;
+    inline constexpr uint32_t TIME_TREE_RECORD_TOUCHED = 1u << 9;
+    inline constexpr uint32_t TIME_TREE_RECORD_ENDS_NOW = 1u << 10;
+    inline constexpr uint32_t TIME_TREE_RECORD_FRESH = 1u << 11;
+
+    // 今の歩の記録を詰める(layout.units の順)。どれかの単位が詰めた形に入らなければ空
+    std::vector<uint16_t> PackTimeTreeUnits(const TimeTreeWorld& world);
+
+    // 詰めた記録から単位ごとの e・望み・印・始め・終わりを戻す(今の刻み steps.tick を使う)。数が合わなければ false
+    bool UnpackTimeTreeUnits(TimeTreeWorld& world, std::span<const uint16_t> packed);
+
+    // 刻みを選ぶ段の GPU 版(sim/gpu_time_tree_choose。T-1112)が読む木の形の表。どれも layout.units の並びの番号
+    struct TimeTreeChooseTables {
+        bool supported =
+            false;  // GPU 版の範囲(窓・隣の差 1 段だけ: 退く道・緩衝・揃える相手・取り直しなし・maxExponent ≤ 14)
+        uint32_t units = 0;
+        std::array<uint32_t, 3> gridSize{};  // 窓の格子(TimeTreeWindowGrid)
+        uint32_t radius = 0;
+        int32_t maxExponent = 0;
+        std::vector<uint32_t> gridUnits;       // 格子のセル(x が最も速い)→ 単位の並びの番号(無ければ NO_TIME_TREE_UNIT)
+        std::vector<uint32_t> neighborStarts;  // 単位ごとの隣の始まり(units + 1 個)
+        std::vector<uint32_t> neighbors;       // 面でつながる単位の並びの番号
+    };
+
+    TimeTreeChooseTables MakeTimeTreeChooseTables(const TimeTreeSetup& setup, const TimeTreeLayout& layout);
 
     // --- 1 出来事の列を 1 本の系にまとめる(T-1141。GPU の早送りで起動の数と固定費を減らす)---
     // 同じ刻みに解く列どうしは面を持たない(列の外は値 0 を固定した面)ので、節を並べただけの系(塊の対角)は列ごとに解いたのと

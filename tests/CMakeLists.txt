@@ -907,6 +907,15 @@ set_tests_properties(gpu_time_step_event PROPERTIES FIXTURES_REQUIRED time_step_
 bicameral_add_gpu_test_case(gpu_time_step_event_cost gpu_time_step_span_test gpu --queue compute --no-gbv --continuous
                             --spans ${CMAKE_CURRENT_BINARY_DIR}/time_step_events.bin)
 set_tests_properties(gpu_time_step_event_cost PROPERTIES FIXTURES_REQUIRED time_step_events)
+# 刻みを選ぶ段(窓・隣の差 1 段)の GPU 版と CPU のビット一致(T-1112)。入力と CPU の答えは time_step_tree_test の choose-dump が火事から書く
+# (1 刻みずつと一気にで詰めた歩の記録が出来事ごとにビット一致も見る)。計測は job.py run -Preset release -Exe gpu_time_step_choose_test -- --choices <ファイル> --no-gbv --measure
+bicameral_add_gpu_test(gpu_time_step_choose_test)
+target_link_libraries(gpu_time_step_choose_test PRIVATE bicameral_sim)
+add_test(NAME time_step_choose_dump COMMAND time_step_tree_test choose-dump shape=fine every=16 dump=${CMAKE_CURRENT_BINARY_DIR}/time_step_choices.bin)
+set_tests_properties(time_step_choose_dump PROPERTIES TIMEOUT 900 FIXTURES_SETUP time_step_choices)
+bicameral_add_gpu_test_case(gpu_time_step_choose gpu_time_step_choose_test gpu --queue compute --no-gbv
+                            --choices ${CMAKE_CURRENT_BINARY_DIR}/time_step_choices.bin)
+set_tests_properties(gpu_time_step_choose PROPERTIES FIXTURES_REQUIRED time_step_choices)
 
 # 計測は job.py run -Preset release -Exe gpu_gas_projection_test -- --no-gbv --measure --edge 32
 bicameral_add_gpu_test(gpu_gas_projection_test)
