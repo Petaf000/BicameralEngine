@@ -71,3 +71,4 @@
 ## 作業ログ
 - 2026-10-26 wt3: チケットを作った。共通の核 phase_layer.hlsli と 1 列の試験 phase_layer_test(phase_layer。通過)・測り(上の表)・ADR-0486(一旦の決定)・T-1176 との合わせ方・場面と線の案・T-1211 / T-1218 / T-1219 に分けた。
   世界(仮の世界・世界の木)へはまだつないでいない(GPU のビット一致も T-1211)。
+- 2026-10-26 wt3: main(c97d803f)の上に rebase し直し、release のビルド(警告 0)・phase_layer・probe_phase_porous_stone・float_check の 5 本を通した(probe_phase は DISABLED のまま)。clang-format と archmap --check もずれ無し。
