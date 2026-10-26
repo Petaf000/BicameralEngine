@@ -446,12 +446,14 @@ namespace {
     std::optional<uint32_t> movingSpeedOverride;
     std::shared_ptr<FlowStats> currentStats;  // 走っている場面の段の数え(刻みの後の操作から読む。T-1003 の測り)
     bool movingByCellOverride = false;
-    uint32_t dragScaleOverride = 1000;  // 引きずりの倍率(‰。T-1003 の根の測り。引数 drag=<‰>)
-    bool sideDragOverride = false;      // 層の横の面の Kozeny–Carman(T-1136 の 1 本目の計画)。引数 sidedrag
-    bool restsOnLayerOverride = false;  // 2 本目の見直し 1(T-1137)。引数 keeplayer2
-    bool keepLayerOverride = false;     // 層は落ちても層のまま(T-1137 の 2 本目)。引数 keeplayer(twostate も入る)
-    bool twoStatesOverride = false;     // 粒を層と舞う粒の 2 つの状態で持つ(T-1136・D-659 の研究)。引数 twostate
-    bool spillOverride = false;         // 横へ動く層は下に層があれば層のまま(T-1138 の見直し)。引数 spill
+    uint32_t dragScaleOverride = 1000;    // 引きずりの倍率(‰。T-1003 の根の測り。引数 drag=<‰>)
+    bool sideDragOverride = false;        // 層の横の面の Kozeny–Carman(T-1136 の 1 本目の計画)。引数 sidedrag
+    bool restsOnLayerOverride = false;    // 2 本目の見直し 1(T-1137)。引数 keeplayer2
+    bool keepLayerOverride = false;       // 層は落ちても層のまま(T-1137 の 2 本目)。引数 keeplayer(twostate も入る)
+    bool twoStatesOverride = false;       // 粒を層と舞う粒の 2 つの状態で持つ(T-1136・D-659 の研究)。引数 twostate
+    bool spillOverride = false;           // 横へ動く層は下に層があれば層のまま(T-1138 の見直し)。引数 spill
+    bool onSurfaceOverride = false;       // 横へ動く層は向かう列の層の表面に置く(T-1138 の見直し 2)。引数 onsurface
+    bool surfaceOnLayerOverride = false;  // 見直し 2 の 2: 表面のセルの床は下に層があればよい。引数 onsurface2
     bool splitOverride =
         false;  // 層と舞う粒に別々の運動量の置き場(T-1138・D-668。④ の場面を GrainTwoState に)。引数 split(twostate も入る)
     bool restLayerOverride = false;        // 積もった層を解く間は障害物に(T-1043 の 2 回目。打ち切り)。引数 layer
@@ -535,6 +537,8 @@ namespace {
         flowOptions.grainLayerKeepsFalling = keepLayerOverride;
         flowOptions.grainLayerRestsOnLayer = restsOnLayerOverride;
         flowOptions.grainLayerSpillsOnLayer = spillOverride;
+        flowOptions.grainLayerPlacesOnSurface = onSurfaceOverride;
+        flowOptions.grainLayerSurfaceOnLayer = surfaceOnLayerOverride;
 
         const FlowStages flow = MakeFlowStages(flowOptions);
         currentStats = flow.stats;
@@ -576,9 +580,13 @@ namespace {
         if (twoStatesOverride)
             std::printf(
                 "    2 つの状態(T-1136): 舞う粒 → 層 %llu mg・層 → 舞う粒 %llu mg・運ぶ段で層 → 舞う粒 %llu mg・"
-                "舞う粒の面 %llu(累計)\n",
+                "舞う粒の面 %llu・表面へ置いた層 %llu mg(運ぶ段の層 → 舞う粒のうち上へ出た %llu "
+                "mg・表面の空きが足りない %llu mg)(累計)\n",
                 (unsigned long long)run.stats.settledGrainMg, (unsigned long long)run.stats.liftedGrainMg,
-                (unsigned long long)run.stats.convertedGrainMg, (unsigned long long)run.stats.suspendedFaces);
+                (unsigned long long)run.stats.convertedGrainMg, (unsigned long long)run.stats.suspendedFaces,
+                (unsigned long long)run.stats.surfacePlacedGrainMg,
+                (unsigned long long)run.stats.convertedUpwardGrainMg,
+                (unsigned long long)run.stats.convertedBesideSurfaceGrainMg);
     }
 
     // 1 mm/s 以上で動く粒の質量の割合(‰。面の粒の質量で重み)
@@ -1476,6 +1484,10 @@ int main(int argc, char** argv) {
             twoStatesOverride = splitOverride = true;
         else if (word == "spill")
             spillOverride = true;
+        else if (word == "onsurface")
+            onSurfaceOverride = true;
+        else if (word == "onsurface2")
+            onSurfaceOverride = surfaceOnLayerOverride = true;
         else if (word == "probe")
             probeOverride = true;
         else if (word == "sidedrag")

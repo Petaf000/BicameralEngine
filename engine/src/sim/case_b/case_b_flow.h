@@ -180,6 +180,13 @@ namespace bicameral::sim::case_b {
         // (崩れた砂は斜面の表面を層として流れ落ちる。舞う粒になるのは上へ出た層と、下に層の無い所へこぼれた層だけ)。
         // 押し合い・摩擦の支えは今のまま(下のセルが層で詰まった時だけ)
         bool grainLayerSpillsOnLayer = false;
+        // 見直し 2(T-1138。grainLayerKeepsFalling と GrainTwoState の時だけ): 横へ動く層の行き先は向かう列の層の表面
+        // (向かうセルの床が支えられていない時、その下のセルの床が支えられ空きがあれば、そこへ層のまま置く。D-664 の置かれ方と同じ考え)。
+        // 舞う粒になるのは、上へ出た層と、向かう列の表面が 2 つ以上下(崖)か空きの無い所へこぼれた層だけ
+        bool grainLayerPlacesOnSurface = false;
+        // 見直し 2 の 2(grainLayerPlacesOnSurface の時だけ): 表面のセルの床は「下のセルに層が少しでもある」でよい
+        // (崩れている列は詰まりが少し緩み、詰まり切った層の鎖で数える支えが切れて、横へ動く層の大半が舞う粒になった)
+        bool grainLayerSurfaceOnLayer = false;
     };
 
     // 1 つのセルの状態式の結果(刻みの初めの中身から)
@@ -246,8 +253,11 @@ namespace bicameral::sim::case_b {
         uint64_t liftedGrainMg = 0;   // 層 → 舞う粒(床が支えられていないセル。刻みの累計)
 
         // --- 層と舞う粒の置き場を分けた時(T-1138)---
-        uint64_t suspendedFaces = 0;    // 舞う粒を層と別の速さで解いた面(刻みの累計)
-        uint64_t convertedGrainMg = 0;  // 運ぶ段で層から舞う粒になった質量(縁からこぼれる・上へ出る。刻みの累計)
+        uint64_t suspendedFaces = 0;          // 舞う粒を層と別の速さで解いた面(刻みの累計)
+        uint64_t convertedGrainMg = 0;        // 運ぶ段で層から舞う粒になった質量(縁からこぼれる・上へ出る。刻みの累計)
+        uint64_t convertedUpwardGrainMg = 0;  // そのうち上の面を越えて上へ出た層(刻みの累計。見直し 2 の切り分け)
+        uint64_t convertedBesideSurfaceGrainMg = 0;  // そのうち表面のセルの空きが足りず舞う粒になった層(同上)
+        uint64_t surfacePlacedGrainMg = 0;  // 運ぶ段で向かう列の 1 つ下の表面へ置いた層の質量(見直し 2。刻みの累計)
     };
 
     struct FlowStages {

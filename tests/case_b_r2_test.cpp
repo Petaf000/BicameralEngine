@@ -25,8 +25,10 @@ namespace {
     using namespace bicameral::sim::case_b;
 
     int failureCount = 0;
-    bool restsOnLayerOverride = false;  // 2 本目の見直し 1(T-1137)。引数のどこかに keeplayer2
-    bool keepLayerOverride = false;     // 層は落ちても層のまま(T-1137 の 2 本目)。引数のどこかに keeplayer
+    bool restsOnLayerOverride = false;    // 2 本目の見直し 1(T-1137)。引数のどこかに keeplayer2
+    bool keepLayerOverride = false;       // 層は落ちても層のまま(T-1137 の 2 本目)。引数のどこかに keeplayer
+    bool onSurfaceOverride = false;       // 横へ動く層は列の表面に置く(T-1138 の見直し 2)。引数 onsurface
+    bool surfaceOnLayerOverride = false;  // 見直し 2 の 2(床は下に層があればよい)。引数 onsurface2
     bool twoStatesOverride = false;  // 粒を層と舞う粒の 2 つの状態で持つ(T-1136・D-659 の研究)。引数のどこかに twostate
     bool splitOverride =
         false;  // 層と舞う粒に別々の運動量の置き場(T-1138。④ の場面を GrainTwoState に)。引数のどこかに split
@@ -210,7 +212,9 @@ namespace {
         const FlowStages flow = MakeFlowStages({.drag = drag,
                                                 .grainTwoStates = twoStatesOverride,
                                                 .grainLayerKeepsFalling = keepLayerOverride,
-                                                .grainLayerRestsOnLayer = restsOnLayerOverride});
+                                                .grainLayerRestsOnLayer = restsOnLayerOverride,
+                                                .grainLayerPlacesOnSurface = onSurfaceOverride,
+                                                .grainLayerSurfaceOnLayer = surfaceOnLayerOverride});
         const PressureSolver solver = MakeImplicitGridSolver(CYCLES, TOLERANCE_NL);
         run.grainHeightUm.push_back(GrainHeightUm(run.box));
         run.recording = RunScene(run.box, flow.stages, solver, seconds * ticksPerSecond, regions, [&](Box& box) {
@@ -567,7 +571,9 @@ namespace {
                                                 .splitSurfaceLayer = splitSurfaceLayer,
                                                 .grainTwoStates = twoStatesOverride,
                                                 .grainLayerKeepsFalling = keepLayerOverride,
-                                                .grainLayerRestsOnLayer = restsOnLayerOverride});
+                                                .grainLayerRestsOnLayer = restsOnLayerOverride,
+                                                .grainLayerPlacesOnSurface = onSurfaceOverride,
+                                                .grainLayerSurfaceOnLayer = surfaceOnLayerOverride});
         const PressureSolver solver = MakeImplicitGridSolver(CYCLES, TOLERANCE_NL);
         run.liquidHeightUm.push_back(LiquidHeightUm(run.box));
         run.recording = RunScene(run.box, flow.stages, solver, seconds * ticksPerSecond, regions, [&](Box& box) {
@@ -747,6 +753,10 @@ int main(int argc, char** argv) {
             twoStatesOverride = keepLayerOverride = true;
         else if (std::string(argv[index]) == "split")
             twoStatesOverride = splitOverride = true;
+        else if (std::string(argv[index]) == "onsurface")
+            onSurfaceOverride = true;
+        else if (std::string(argv[index]) == "onsurface2")
+            onSurfaceOverride = surfaceOnLayerOverride = true;
         else
             argv[kept++] = argv[index];
     }
