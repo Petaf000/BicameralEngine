@@ -1,6 +1,22 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-26(本体の作業役・Q167〜Q172 の答えの記録 D-663〜D-668・T-1157)
+最終更新: 2026-10-26(本体の作業役・wt4・wt2・wt5 の 3 本を main へ・番号の訂正)
+
+## この仕事でしたこと(2026-10-26・本体の作業役・3 本のマージ)
+- **wt4 t-1063-rt2-budget の c38ac3c2 を --no-ff**(衝突なし): R-T2 の GPU(T-1111 長い刻みの GPU 版・T-1109 CyclesFor・T-1141 1 出来事を 1 本の系に・T-1152 費用の式と起動時の測り ProbeTimeTreeSolveCost・T-1140 GPU の時計)・ADR-0472 Accepted。T-1152 の判断待ち 1 つ(起動時の測りで GPU の時計を上げるか。仮 = 上げる・heatNs 0.4 秒・0 で取り消せる)はチケットに。wt4 はこの後に T-1153・T-1169・T-1170 を積んでいる(先頭 7fdae61c。次のマージで)。
+  - T-0691 の GfRestKineticExcess(gas_flow.hlsli・gas_reference.cpp)はこのマージで変わっていない。GPU の熱の列(t-0813)はこのブランチに入っていないので関係なし。t-0813 のマージの時の注(GPU の列へも足す)はそのまま。
+  - 試験(release): time_step_lab 24 s・time_step_tree 1418 s・time_step_span_dump・time_step_event_merge 176 s・gpu_time_step_span・gpu_time_step_event・gpu_time_step_event_cost 合格。
+- **wt2 t-0872-rb2-fracture の c7c91837 を --no-ff**(衝突は docs/perf.md の表の行だけ・両方残した): 支え T-1120(混ざるセル・ADR-0470 Proposed)・T-1086(D-649 の既定)・T-1067(割れかけの所を 0.25 m に下りる道・CPU)・T-1104(混ざる系の GPU・支えのレベルの逆を直した)・T-1087(閉じた領域)。分けた T-1133・T-1134(Todo)。T-1067 の判断待ち 1 つ(細かくする線・戻す線。仮 = 分ける 1/2・戻す 1/4 未満が 120 刻み続いた後・周り 1 セル。SupportFractureOptions の値)。
+  - 試験(release): equilibrium 606 s・warm_start_save・equilibrium_block・support_law 177 s・support_mixed 94 s・support_fracture 571 s・_window 630 s・_thick 300 s・_refine 36 s・_settle 110 s・gpu_equilibrium_block 合格。
+- **wt5 t-1064-object-heat-gpu の d11d9a55 を --no-ff**(衝突は docs/perf.md の表の行だけ): 物の熱 T-1097 の切り分け・放射の吸い込みの頭打ちの直し OhAbsorptanceQ16(ADR-0434 の紙の「焦点のボクセルが燃え切る」は記録に下げた・燃え続ける 1 s 以上は残す)・T-1077 の GPU と多重解像度(① 一様のブロックを頁に広げる・② 起きている物の一覧。残り ③ ハッシュとセーブ)。T-1142(= ROADMAP の T-1158 の 1 段目)は Open。
+  - **注(今は許す)**: 物の熱のルート署名が 63/64 語(足す余地 1 語)・tests の object_heat_nest_scene.h が sim/multires_nest_internal.h を include している(試験の中だけ)。
+  - 試験(release): object_heat・object_heat_nest 49 s・grass_wake・multires・multires_state・multires_edge・gpu_object_heat・gpu_object_heat_nest 合格(multires の 3 本は 3 本を合わせた main で)。
+- 3 本とも release 警告 0・archmap OK・push 済み。**合わせた確かめ**(3 本の後の main・release): multires・reaction_package・standard_packages・probe_gas 546 s・radiation_scene 249 s 合格。
+- **番号の訂正**: 前の記録の「次は T-1163」は誤り。司令塔が作業役に配った番号: wt6 T-1163〜T-1165・ADR-0478 / wt3 T-1166〜T-1168・ADR-0471 / wt4 T-1153・T-1169・T-1170・T-1173〜T-1175・ADR-0477 / wt2 T-1135・T-1171・T-1172・ADR-0476 / wt5 T-1143・T-1144・ADR-0473。
+- **マージしていないブランチ(この後)**: wt3 t-1105-air-agitation(T-1136)・wt6 t-1113-radiation-all(T-1113)・wt4 の c38ac3c2 より後(T-1153・T-1169・T-1170)・wt2・wt5 のマージした点より後の分。
+- 次の番号は **D-669・ADR-0479・T-1176・Q173**。T-1159 はこの仕事では着手していない。
+
+(前の版の最終更新: 2026-10-26 本体の作業役・Q167〜Q172 の答えの記録 D-663〜D-668・T-1157)
 
 - **ユーザーの答え(2026-10-26 05:00 頃・すべておすすめ)**: Q167 → D-663(運ぶ欄は移した質量に比例・案 B の運動量の式の時に)・Q168 → D-664(細かくする時は置かれ方で配る)・
   Q169 → D-665(混ざるセルだけ相ごとのエネルギー・probe_phase を現実の値で決め直す)・Q170 → D-666(状態で細かくするを測り、超える所だけ面の皮)・
@@ -11,7 +27,7 @@
   CPU リファレンス sim/placement_refine(wt3 の SettleColumn・SettlePictureCell と乱数の絵でビット一致・3 次元の保存)・欄の細かくするへの口 `MultiresNest::refinePlacement`。
   今の世界はどの欄にも印が無く口も無いので結果は変わらない(multires の CPU の試験がそのまま通る)。**未確認**: 新しい式の DXC(include するシェーダーがまだ無い)・GPU のビット一致 → T-1159。
   残り(木のセルの中身を置かれ方で・隣のブロックの読み方・GPU・2-2・2-3・2-5・影)は T-1159。wt3 の t-1105-air-agitation をマージする時は、場面の作り方の SettleColumn・SettlePictureCell を sim/placement_refine に置き換える(同じ答え)。
-- 次の番号は **D-669・ADR-0479・T-1163・Q173**。
+- ~~次の番号は **D-669・ADR-0479・T-1163・Q173**~~(誤り。上で直した)。
 
 (前の版の最終更新: 2026-10-26 本体の作業役・T-1132 土台の変更要求の束・ADR-0469)
 
