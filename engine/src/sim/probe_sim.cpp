@@ -78,6 +78,10 @@ namespace bicameral::sim {
         static_assert(sizeof(D3D12_NODE_GPU_INPUT) <= PROBE_ACTIVE_LIST_HEADER_BYTES);
         constexpr uint32_t MAX_LOGGED_DEBUG_MESSAGES = 8;
 
+        // 放射の段の状態の頭(側 1 つ)と、両側を並べた読み戻しの大きさ(T-1164)
+        constexpr uint64_t RADIATION_HEADER_BYTES = uint64_t{reaction::RC_GPU_HEADER_WORDS} * 8;
+        constexpr uint64_t RADIATION_HEADER_READBACK_BYTES = 2 * RADIATION_HEADER_BYTES;
+
         // 伝導のグラフのカウンタの番号と上限(probe_sim.hlsli の PROBE_STATS_* と同じ順。T-0008)。
         // WakeBlocks の出力は構造で 7 まで・ConductBlock は出力しない(一覧へは UAV で足す)ので、出力の「近い」は見ない。
         // 活性の一覧は全部のブロックが活性でも溢れない大きさなので、満杯のときだけ知らせる
@@ -549,7 +553,9 @@ namespace bicameral::sim {
             frame.timestampReadback = gpu::CreateBuffer(device, uint64_t{TIMESTAMPS_PER_SLOT} * 8,
                                                         gpu::BufferKind::Readback);
             frame.hashReadback = gpu::CreateBuffer(device, PROBE_HASH_BYTES, gpu::BufferKind::Readback);
-            if (!frame.input || !frame.timestampReadback || !frame.hashReadback)
+            frame.radiationHeaderReadback = gpu::CreateBuffer(device, RADIATION_HEADER_READBACK_BYTES,
+                                                              gpu::BufferKind::Readback);
+            if (!frame.input || !frame.timestampReadback || !frame.hashReadback || !frame.radiationHeaderReadback)
                 return false;
 
             void* mapped = nullptr;
@@ -613,6 +619,7 @@ namespace bicameral::sim {
         const bool sameLiquid = (m_liquidWork == nullptr) == (source.m_liquidWork == nullptr) &&
                                 std::memcmp(&m_liquidHeader, &source.m_liquidHeader, sizeof(ProbeLiquidHeader)) == 0;
         const bool sameRadiation = m_cascade.has_value() == source.m_cascade.has_value() &&
+                                   m_cascadeNegative.has_value() == source.m_cascadeNegative.has_value() &&
                                    (!m_cascade ||
                                     m_cascade->PersistentStateBytes() == source.m_cascade->PersistentStateBytes());
         if (!sameGas || !sameLiquid || !sameRadiation)
@@ -951,7 +958,7 @@ namespace bicameral::sim {
                 RecordLiquid(list);
             }
 
-            // 放射(表が光の値を書いた時だけ。T-1154): 液体の後(CPU の (1d))。変わったセルのブロックは気体と同じく起こす
+            // 放射(いつも。T-1154・D-670): 液体の後(CPU の (1d))。変わったセルのブロックは気体と同じく起こす
             if (m_cascade) {
                 list->ResourceBarrier(1, &allUavs);
                 RecordRadiation(list, input, tick);
@@ -993,38 +1000,49 @@ namespace bicameral::sim {
     // --- 熱の放射の段(T-1154。作るのと表は sim/probe_sim_radiation.cpp)---
 
     // 段の間だけ u15〜u17(気体の区画の結び先)を借りる。段の後で BindRootViews が結び直す
-    void ProbeSim::BindRadiationViews(ID3D12GraphicsCommandList10* list) const {
-        list->SetComputeRootUnorderedAccessView(UAV_GAS_STATE, m_cascade->Work()->GetGPUVirtualAddress());
-        list->SetComputeRootUnorderedAccessView(UAV_GAS_WORK, m_cascade->State()->GetGPUVirtualAddress());
-        list->SetComputeRootUnorderedAccessView(UAV_GAS_CELLS, m_radiationLights->GetGPUVirtualAddress());
+    void ProbeSim::BindRadiationViews(ID3D12GraphicsCommandList10* list, ID3D12Resource* first, ID3D12Resource* second,
+                                      ID3D12Resource* third) const {
+        list->SetComputeRootUnorderedAccessView(UAV_GAS_STATE, first->GetGPUVirtualAddress());
+        list->SetComputeRootUnorderedAccessView(UAV_GAS_WORK, second->GetGPUVirtualAddress());
+        list->SetComputeRootUnorderedAccessView(UAV_GAS_CELLS, third->GetGPUVirtualAddress());
     }
 
-    // 写し(セル → 光の値・温度)→ 距離ごとの段の 1 刻み(自分のルート署名)→ セルへ当てる(このルート署名に戻して)
+    // 写し(セル → 光の値・温度。参照の温度の形では両側の作業へ)→ 距離ごとの段の 1 刻み(側ごと。自分のルート署名)
+    // → セルへ当てる(このルート署名に戻して。正 − 負)
     void ProbeSim::RecordRadiation(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick) {
         const D3D12_RESOURCE_BARRIER allUavs = gpu::UavBarrier(nullptr);
-        BindRadiationViews(list);
+        const GpuCascadeLight& negative = m_cascadeNegative ? *m_cascadeNegative : *m_cascade;
+        BindRadiationViews(list, m_cascade->Work(), negative.Work(), m_radiationLights.Get());
         list->SetPipelineState(m_radiationPipelines[0].Get());
         list->Dispatch(LINEAR_CELL_GROUPS, 1, 1);
         list->ResourceBarrier(1, &allUavs);
 
         m_cascade->RecordTick(list, m_debugRing.GpuAddress(), tick);
+        if (m_cascadeNegative)
+            m_cascadeNegative->RecordTick(list, m_debugRing.GpuAddress(), tick);
 
         BindRootArguments(list, input);
         SetUnitConstants(list, tick, m_speciesCount);
-        BindRadiationViews(list);
+        BindRadiationViews(list, m_cascade->Work(), m_cascade->State(), negative.State());
         list->SetPipelineState(m_radiationPipelines[1].Get());
         list->Dispatch(LINEAR_CELL_GROUPS, 1, 1);
         list->ResourceBarrier(1, &allUavs);
         BindRootViews(list, input);
     }
 
-    // 状態のハッシュの単位: 次の刻みへの持ち越しの寄与を足す(単位の引数 = 歩幅のスレッドの数)
+    // 状態のハッシュの単位: 次の刻みへの持ち越しの寄与を足す(側ごと。単位の引数 = 歩幅のスレッドの数)
     void ProbeSim::RecordRadiationHash(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick) const {
-        constexpr uint32_t HASH_GROUPS = 256;
-        BindRadiationViews(list);
+        constexpr uint32_t HASH_GROUPS = 2048;  // 持ち越しの表の全部の鍵(セル × 12)を掃く(T-1164)
         SetUnitConstants(list, tick, HASH_GROUPS * PROBE_LINEAR_GROUP_SIZE);
         list->SetPipelineState(m_radiationPipelines[2].Get());
-        list->Dispatch(HASH_GROUPS, 1, 1);
+        for (const std::optional<GpuCascadeLight>* side : {&m_cascade, &m_cascadeNegative}) {
+            if (!side->has_value())
+                continue;
+
+            BindRadiationViews(list, (*side)->Work(), (*side)->State(), m_radiationLights.Get());
+            list->Dispatch(HASH_GROUPS, 1, 1);
+        }
+
         SetUnitConstants(list, tick, 0);
         BindRootViews(list, input);
     }
@@ -1249,6 +1267,7 @@ namespace bicameral::sim {
         m_debugRing.RecordReadbackAndReset(list, slot);
         m_graphStats.RecordReadbackAndReset(list, slot);
         m_graphTrace.RecordReadbackAndReset(list, slot);
+        RecordRadiationHeaderReadback(list, slot);
 
         if (hasHash) {
             gpu::RecordCopyToReadback(list, m_hashes.Get(), m_slots[slot].hashReadback.Get());
@@ -1304,6 +1323,7 @@ namespace bicameral::sim {
         result.firstUnit = frame.firstUnit;
         result.hashes = ReadHashes(frame);
         result.debugAssertCount = m_debugRing.Drain(MAX_LOGGED_DEBUG_MESSAGES, slot).assertCount;
+        ReadRadiationHeader(frame, result);
 
         // ノードのカウンタ: 要約は Trace、上限に当たった・近づいたものは Warning(gpu/work_graph_stats.h)
         auto graphStats = m_graphStats.Read(slot);
@@ -1322,6 +1342,55 @@ namespace bicameral::sim {
             Log(Channel::WorkGraph, Level::Warning, "{}", trace.error());
 
         return result;
+    }
+
+    // 放射の段の状態の頭(側ごと)を slot の読み戻しへ(溢れの印・放つ面の数・袋の最大。T-1164)
+    void ProbeSim::RecordRadiationHeaderReadback(ID3D12GraphicsCommandList10* list, uint32_t slot) const {
+        uint64_t offset = 0;
+        for (const std::optional<GpuCascadeLight>* side : {&m_cascade, &m_cascadeNegative}) {
+            if (!side->has_value())
+                continue;
+
+            ID3D12Resource* state = (*side)->State();
+            const D3D12_RESOURCE_BARRIER toCopy = gpu::Transition(state, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                                  D3D12_RESOURCE_STATE_COPY_SOURCE);
+            list->ResourceBarrier(1, &toCopy);
+            list->CopyBufferRegion(m_slots[slot].radiationHeaderReadback.Get(), offset, state, 0,
+                                   RADIATION_HEADER_BYTES);
+            const D3D12_RESOURCE_BARRIER toUav = gpu::Transition(state, D3D12_RESOURCE_STATE_COPY_SOURCE,
+                                                                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            list->ResourceBarrier(1, &toUav);
+            offset += RADIATION_HEADER_BYTES;
+        }
+    }
+
+    // 溢れは release でも Error に出す(GPU の assert は debug だけ。溢れると結果が順番で変わり、決定性が崩れる)
+    void ProbeSim::ReadRadiationHeader(const FrameSlot& frame, ProbeFrameReadback& result) {
+        if (!m_cascade)
+            return;
+
+        std::array<uint64_t, 2 * reaction::RC_GPU_HEADER_WORDS> words{};
+        if (!gpu::ReadBuffer(frame.radiationHeaderReadback.Get(), std::as_writable_bytes(std::span(words))))
+            return;
+
+        const size_t sides = m_cascadeNegative ? 2 : 1;
+        for (size_t side = 0; side < sides; ++side) {
+            const uint64_t* header = words.data() + (side * reaction::RC_GPU_HEADER_WORDS);
+            result.radiationOverflow |= static_cast<uint32_t>(header[reaction::RC_GPU_OVERFLOW]);
+            result.radiationFaces = std::max(result.radiationFaces,
+                                             static_cast<uint32_t>(header[reaction::RC_GPU_FACE_COUNT]));
+            result.radiationBagPeak = std::max(result.radiationBagPeak,
+                                               static_cast<uint32_t>(header[reaction::RC_GPU_BAG_PEAK]));
+        }
+
+        if (result.radiationOverflow == 0 || m_radiationOverflowLogged)
+            return;
+
+        m_radiationOverflowLogged = true;
+        Log(Channel::Sim, Level::Error,
+            "熱の放射の段の置き場が溢れた(印 {}。1 = 放つ面・2 = 袋・4 = 持ち越し。放つ面 {}・袋の最大 {})。"
+            "溢れた刻みから結果が順番で変わる",
+            result.radiationOverflow, result.radiationFaces, result.radiationBagPeak);
     }
 
     // このフレームで終えた刻み t ごとに、表の (t + 1) 番目の S(t + 1) のハッシュ
@@ -1646,6 +1715,8 @@ namespace bicameral::sim {
         m_caches.reserve(m_cells.size());
         for (const reaction::RxCell& cell : m_cells)
             m_caches.push_back(ProbeMakeCache(table.View(), cell));
+
+        m_environmentMk = ProbeCascadeReferenceMk({}, table);  // 放射の段の外の温度(D-671。作った時の表)
     }
 
     void ProbeReference::Advance(uint64_t tick, std::span<const ProbeCommand> commands,

@@ -8,7 +8,8 @@
 //
 // データの流れ: CPU の CascadeGrid・CascadeParams・初めの持ち越し → 作業のバッファ(u4。既定のヒープへ写す)
 //   → 刻みごとに RecordTick(1 刻みの全部の段。持ち越しは GPU の中で次の刻みへ)→ RecordReadback → Read(CascadeTickResult の形)
-// 照り返しの持ち越しは疎な表(セル・面・帯の鍵と量)で刻みをまたぐ(D-619。セーブとハッシュに入れる形は CPU と同じ CascadeCarry に読める)。
+// 照り返しと組を待つ光の持ち越しは (セル・面・帯) の鍵で引く密な表 2 つ(刻みの偶奇)で刻みをまたぐ(D-619。溢れない。T-1164・ADR-0484。
+// セーブとハッシュに入れる形は CPU と同じ CascadeCarry に読める)。
 //
 // 使い方:
 //   auto light = GpuCascadeLight::Create(device, nest, grid, params, {});
@@ -31,13 +32,14 @@ namespace bicameral::sim {
     struct GpuCascadeCapacity {
         uint32_t faces = 1u << 15;  // 1 刻みに放つ面の数
         uint32_t bags = 1u << 20;   // 袋の表 1 つの番地(2 の冪。段 1 つの袋の数の 2 倍ほど)
-        uint32_t carry = 1u << 18;  // 照り返しの持ち越しの (セル・面・帯) の数
+        uint32_t carry =
+            1u << 18;  // RecordUpload で写す初めの持ち越しの数の上限(刻みの中の持ち越しは鍵で引く密な表なので溢れない)
     };
 
     struct GpuCascadeTickResult {
         CascadeTickResult result;  // CPU と同じ形(持ち越しはセル・面・帯の順に並べ直す)
         uint32_t activeFaces = 0;  // 段 0 で放った面の数
-        uint32_t overflow = 0;     // 1 = 放つ面・2 = 袋・4 = 持ち越しが溢れた
+        uint32_t overflow = 0;     // 1 = 放つ面・2 = 袋が溢れた
         uint32_t bagPeak = 0;      // 段 1 つの袋の数の最大(作ってから)
     };
 

@@ -216,7 +216,6 @@ bicameral_add_shader(sim/cascade_light.hlsl PROFILE cs_6_8 ENTRY RcResetBags NAM
 bicameral_add_shader(sim/probe_radiation.hlsl PROFILE cs_6_8 ENTRY RadiationGrid NAME probe_radiation_grid)  # 仮の世界の GPU の放射: セル → 光の値・温度(T-1154)
 bicameral_add_shader(sim/probe_radiation.hlsl PROFILE cs_6_8 ENTRY RadiationApply NAME probe_radiation_apply)  # 仮の世界の GPU の放射: セルへ当てる(T-1154)
 bicameral_add_shader(sim/probe_radiation.hlsl PROFILE cs_6_8 ENTRY RadiationHash NAME probe_radiation_hash)  # 仮の世界の GPU の放射: 持ち越しのハッシュ(T-1154)
-bicameral_add_shader(sim/cascade_light.hlsl PROFILE cs_6_8 ENTRY RcCarryOut NAME cascade_light_carry_out)  # 距離ごとの段の GPU: 照り返しを疎な表へ(T-0959)
 # 物の熱(物の箱のボクセルの熱と反応・セルとの対の面の 4 つの口・ブロックごとに眠らせる。T-1064・T-1098・ADR-0434・ADR-0459。呼ぶ順は tests/gpu_object_heat_test.cpp)
 bicameral_add_shader(sim/object_heat.hlsl PROFILE cs_6_8 ENTRY OhWakeBlocks NAME object_heat_wake)
 bicameral_add_shader(sim/object_heat.hlsl PROFILE cs_6_8 ENTRY OhPrepare NAME object_heat_prepare)

@@ -168,6 +168,11 @@ namespace bicameral::sim {
         // --- デバッグ ---
         uint32_t debugAssertCount = 0;  // シェーダーの assert の数(中身はログに出る)
 
+        // 熱の放射の段の置き場(T-1164。release でも見える。段が無ければ 0)。溢れた刻みからは結果が原子的な取り合いの順で変わる
+        uint32_t radiationOverflow = 0;  // 溢れの印(側の OR。1 = 放つ面・2 = 袋・4 = 持ち越し。作ってからずっと残る)
+        uint32_t radiationFaces = 0;     // 最後の刻みの放つ面の数(側の大きい方)
+        uint32_t radiationBagPeak = 0;   // 段 1 つの袋の数の最大(作ってから。側の大きい方)
+
         // 伝導のグラフのノードごとのカウンタ(このフレームの全部の刻みの合計。T-0008)
         gpu::GraphStatsSnapshot graphStats;
         uint32_t graphFindingCount = 0;  // 上限に当たった・近づいたものの数(中身は Warning でログに出る)
@@ -245,21 +250,27 @@ namespace bicameral::sim {
     };
 
     // 重さの試験(R-LOOP-2)。世界の結果には入らない
-    // 熱の放射の段の既定(T-1113・D-646・D-658): 世界の中の光の距離ごとの段(RC。sim/cascade_light)で、熱の放射と照り返しを運び、
+    // 熱の放射の段の既定(T-1113・D-646・D-658・D-670): 世界の中の光の距離ごとの段(RC。sim/cascade_light)で、熱の放射と照り返しを運び、
     // 吸った・放った量をセルのエネルギーへ当てる。段は 気体 → 液体 → **放射** → 伝導と反応 の位置(23 §3.5)。
-    // 表のどの物質も光の値(light_absorption_*・light_reflectance_*・radiation_absorption_mm2_per_mol)を書いていなければ流さない
-    // (ProbeTableWritesLight。仮〔ユーザー未確認〕: 書いた表では書かない固体・液体は D-610 の灰色。T-1113 のチケット)。
-    // CPU(ProbeReference::SetCascadeRadiation)と GPU(ProbeSimOptions::cascadeRadiation。T-1154)に同じ値を渡すと毎刻みビット一致する
-    // 世界の外の扱い(T-1155・T-1164): params.referenceMk が 0 なら外は 0 K の空(今の既定)。0 でなければ参照の温度との差だけを運ぶ
-    // (ADR-0461。StepCascadeLightRelative。外 = 参照の温度の物。同じ温度の所は何も放たないので、参照の温度の世界は眠れる)。
-    // 参照の温度の形は今は CPU リファレンスだけ(GPU の仮の世界は作る時に断る。T-1164)
+    // **いつも流す**(D-670): 光の値を書かない固体・液体は D-610 の灰色、気体は透明(ベイクが相の既定にする)。
+    // CPU(ProbeReference::SetCascadeRadiation)と GPU(ProbeSimOptions::cascadeRadiation。T-1154)に同じ値を渡すと毎刻みビット一致する。
+    // 世界の外(D-671・ADR-0478・T-1164): 既定は「周りの環境の温度の物」= 参照の温度との差だけを運ぶ形(ADR-0461。StepCascadeLightRelative)。
+    // 参照の温度は作った時の表の基準の大気の高さ 0 の温度(ProbeCascadeReferenceMk)。同じ温度の所は何も放たないので、環境の温度で
+    // 釣り合った世界は眠る。基準の大気を書かない表は 0 = 外は 0 K の空(ADR-0478 の決定 3)。
+    // 上の外は空との交換の口(ADR-0474)だが、空の値(天候の層)を書く口がまだ無いので空 = 参照の温度 = 口は何もしない(仮の世界にはつないでいない)
     struct ProbeCascadeOptions {
         bool enabled = true;
         CascadeParams params;  // 既定は D-658 の形(15 組・熱も待つ)
+        // true(既定): params.referenceMk を表の基準の大気の温度で置き換える。false: params.referenceMk のまま(0 = 0 K の空。試験・測り用)
+        bool environmentReference = true;
     };
 
-    // 表のどれかの物質が光の値を書いたか(書かない値はベイクが相の既定〔D-610〕にするので、既定と違えば書いた)。放射の段を流す条件
+    // 表のどれかの物質が光の値を書いたか(書かない値はベイクが相の既定〔D-610〕にするので、既定と違えば書いた)。
+    // 段を流す条件ではない(D-670)。書き忘れの警告・試験が使う
     [[nodiscard]] bool ProbeTableWritesLight(const BakedReactionTable& table);
+
+    // 放射の段の参照の温度(mK): environmentReference なら表の基準の大気の高さ 0 の温度(書かない表は 0)、でなければ params.referenceMk
+    [[nodiscard]] uint32_t ProbeCascadeReferenceMk(const ProbeCascadeOptions& options, const BakedReactionTable& table);
 
     struct ProbeSimOptions {
         // 1 刻みに足す繰り返しの合計(0 なら重さの単位は無し。上限 PROBE_BUSY_ITERATIONS_LIMIT)
@@ -293,8 +304,8 @@ namespace bicameral::sim {
         // (段の順も CPU と同じ: 気体 → 液体)。区画のある世界では、気体と同じく表の差し替え・保存点・写しの早送りを断る(T-0620)
         ProbeLiquidOptions liquid;
 
-        // 熱の放射の段(T-1154。既定は入れる。表が光の値を書いていなければ作らない)。段の順は CPU と同じ: 気体 → 液体 → 放射。
-        // 段を流すかは作った時の表で決まる(表の差し替えで光の値は新しい表のものにするが、流す・流さないは変えない)
+        // 熱の放射の段(T-1154・D-670。既定は入れる)。段の順は CPU と同じ: 気体 → 液体 → 放射。
+        // 参照の温度は作った時の表で決まる(表の差し替えで光の値は新しい表のものにするが、参照の温度は変えない)
         ProbeCascadeOptions cascadeRadiation;
     };
 
@@ -424,6 +435,8 @@ namespace bicameral::sim {
             // --- 読み戻し ---
             ComPtr<ID3D12Resource> timestampReadback;  // (MAX_UNITS_PER_FRAME + 2) × 8 バイト
             ComPtr<ID3D12Resource> hashReadback;       // PROBE_HASH_BYTES
+            ComPtr<ID3D12Resource>
+                radiationHeaderReadback;  // 放射の段の状態の頭(側ごとに RC_GPU_HEADER_WORDS 語。T-1164)
 
             // 反応表を差し替えたフレームの、表のアップロードと差し替える前の表(このリストを GPU が終えるまで持つ。T-0139)
             std::vector<ComPtr<ID3D12Resource>> keepAlive;
@@ -511,7 +524,9 @@ namespace bicameral::sim {
         void RecordRadiationLights(ID3D12GraphicsCommandList10* list) const;
         [[nodiscard]] bool RecordRadiationTableSwap(ID3D12GraphicsCommandList10* list, FrameSlot& frame,
                                                     const BakedReactionTable& table);
-        void BindRadiationViews(ID3D12GraphicsCommandList10* list) const;
+        // 段の間だけ u15〜u17 を借りる(段ごとに結ぶものが違う: probe_radiation.hlsl の頭)
+        void BindRadiationViews(ID3D12GraphicsCommandList10* list, ID3D12Resource* first, ID3D12Resource* second,
+                                ID3D12Resource* third) const;
         void RecordRadiation(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick);
         void RecordRadiationHash(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick) const;
         [[nodiscard]] std::expected<void, std::string> CheckLiquidTableSwap(const BakedReactionTable& table) const;
@@ -547,6 +562,8 @@ namespace bicameral::sim {
 
         // --- 読み戻し ---
         void RecordReadbacks(ID3D12GraphicsCommandList10* list, uint32_t slot, bool hasHash) const;
+        void RecordRadiationHeaderReadback(ID3D12GraphicsCommandList10* list, uint32_t slot) const;
+        void ReadRadiationHeader(const FrameSlot& frame, ProbeFrameReadback& result);
 
         // --- 巻き戻し(sim/probe_save_point.cpp)---
         // 保存点に写す世界の部分。generationBytes > 0 のもの(セル・熱)は S(tick) の世代だけを写し、戻すときは 2 世代に写す
@@ -640,8 +657,12 @@ namespace bicameral::sim {
         std::array<ComPtr<ID3D12PipelineState>, 11>
             m_liquidPipelines;  // LiquidRead〜LiquidSettleCells(呼ぶ順)・LiquidHash
 
-        // --- 熱の放射の段(T-1154。shaders/sim/probe_radiation.hlsl + cascade_light.hlsl。表が光の値を書かなければ無い)---
-        std::optional<GpuCascadeLight> m_cascade;        // 距離ごとの段(自分のルート署名。作業と状態のバッファ)
+        // --- 熱の放射の段(T-1154・D-670。shaders/sim/probe_radiation.hlsl + cascade_light.hlsl。切った時・物質の無い表では無い)---
+        std::optional<GpuCascadeLight>
+            m_cascade;  // 距離ごとの段(自分のルート署名。作業と状態のバッファ)。参照の温度の形では正の側
+        // 参照の温度の形(D-671・T-1164)の負の側(参照 − 自分。作業と状態の並びは正の側と同じ。0 K の空の世界では無い)
+        std::optional<GpuCascadeLight> m_cascadeNegative;
+        bool m_radiationOverflowLogged = false;          // 溢れを 1 度だけ Error に出す
         ComPtr<ID3D12Resource> m_radiationLights;        // 物質の光の値(表ごと。段の間は u17 に結ぶ)
         ComPtr<ID3D12Resource> m_radiationLightsUpload;  // その写しの元
         std::array<ComPtr<ID3D12PipelineState>, 3>
@@ -711,7 +732,7 @@ namespace bicameral::sim {
 
     // 最後の Advance の放射の段(RC)で起きたこと。量は 2^−16 mJ(RC_ENERGY_SHIFT)
     struct ProbeCascadeReport {
-        bool ran = false;                // 段を流した(表が光の値を書いている)
+        bool ran = false;                // 段を流した(表に物質がある。D-670)
         uint64_t emitted = 0;            // セルから引いた(熱で放った。待たせた分も含む)
         uint64_t absorbed = 0;           // セルへ足した
         uint64_t escaped = 0;            // 世界の外へ出た(帳簿の出。参照の温度の形では 正 − 負 の mod 2^64)
@@ -770,8 +791,11 @@ namespace bicameral::sim {
         void EnableRadiation(const ProbeRadiationOptions& options) { m_radiation = options; }
         [[nodiscard]] const ProbeRadiationReport& LastRadiationReport() const { return m_radiationReport; }
 
-        // 熱の放射の既定の段(RC。T-1113)。既定で入っている。持ち越し(照り返し・組を待つ光)はハッシュに入る(D-619)
+        // 熱の放射の既定の段(RC。T-1113)。既定で入っている。持ち越し(照り返し・組を待つ光)はハッシュに入る(D-619)。
+        // 参照の温度は作った時の表で決める(GPU と同じ。ProbeCascadeReferenceMk)
         void SetCascadeRadiation(const ProbeCascadeOptions& options) { m_cascade = options; }
+        // 今の参照の温度(mK。0 = 外は 0 K の空)
+        [[nodiscard]] uint32_t CascadeReferenceMk() const;
         [[nodiscard]] const ProbeCascadeOptions& CascadeRadiation() const { return m_cascade; }
         [[nodiscard]] const ProbeCascadeReport& LastCascadeReport() const { return m_cascadeReport; }
         [[nodiscard]] const CascadeCarry& CascadeRadiationCarry() const { return m_cascadeCarry; }
@@ -824,6 +848,7 @@ namespace bicameral::sim {
         std::optional<ProbeRadiationOptions> m_radiation;  // 放射の段(T-0585。無ければ流さない)
         ProbeRadiationReport m_radiationReport;
         ProbeCascadeOptions m_cascade;  // 熱の放射の既定の段(T-1113)
+        uint32_t m_environmentMk = 0;   // 作った時の表の基準の大気の高さ 0 の温度(書かない表は 0。D-671)
         ProbeCascadeReport m_cascadeReport;
         CascadeCarry m_cascadeCarry;               // 次の刻みへの持ち越し(照り返し・組を待つ光)
         CascadeCarry m_cascadeCarryNegative;       // 参照の温度との差の負の側の持ち越し(T-1164)

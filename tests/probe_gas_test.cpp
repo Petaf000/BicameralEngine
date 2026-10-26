@@ -3,7 +3,9 @@
 // 確かめること:
 //   1. 静かな大気: 区画を基準の大気で満たすと、何刻み進めてもセルはビット単位で変わらず、運動量は 0(陽解法・投影とも)
 //   2. 燃える木箱: 閉じた区画の底の木箱が燃え、煙(CO2)と熱が上へ運ばれる。気体を流さない世界(伝導だけ)より熱の重心が高い
-//   3. 保存: 毎刻み、元素の数・エネルギー(セル + 運動エネルギーのぶん − 帳簿)・運動量(− 帳簿)がビット単位で一定
+//   3. 保存: 毎刻み、元素の数・エネルギー(セル + 運動エネルギーのぶん − 帳簿)・運動量(− 帳簿)がビット単位で一定。
+//      燃える木箱の世界は熱の放射の段を切って比べる(段の出入りは世界の外と持ち越しにあり、この和に入らない。放射の保存は probe_radiation が見る。
+//      D-670 で放射の段をいつも流すようにした後〔T-1113〕、ここだけ切っていなかった。T-1164)
 //   4. 決定性: 2 回の実行で、セルと気体の欄のハッシュが一致(陽解法・投影とも)
 //   5. ブランクの世界(基準の大気が無い)では区画を作れない(何も読まずに動く世界は今までどおり。D-455)
 //   6. 成分の数の上限なし(T-0591): 地球の空気(N2・O2・Ar・CO2)+ 燃えてできる H2O・CO の 6 種の区画で 2〜4 が成り立つ。
@@ -331,6 +333,7 @@ namespace {
             return result;
 
         ProbeReference reference(table, MakeWorld(table, *field, true, steam));
+        reference.SetCascadeRadiation({.enabled = false});  // 気体の段の保存を見る(頭の 3)
         if (flow)
             EXPECT(reference.EnableGas(MakeOptions(pressure)).has_value());
 
@@ -489,6 +492,7 @@ namespace {
             return last;
 
         ProbeReference reference(table, MakeWorld(table, *field, true));
+        reference.SetCascadeRadiation({.enabled = false});  // RunFire と同じ(頭の 3)
         EXPECT(reference.EnableGas(MakeOptions(pressure)).has_value());
         const char* name = pressure == ProbeGasPressure::Explicit ? "陽解法" : "投影";
         for (uint64_t tick = 0; tick < SMOKE_TICKS; ++tick) {

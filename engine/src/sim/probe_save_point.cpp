@@ -91,6 +91,9 @@ namespace bicameral::sim {
         if (m_cascade)
             bytes += m_cascade->VramBytes();
 
+        if (m_cascadeNegative)
+            bytes += m_cascadeNegative->VramBytes();
+
         rng::for_each(m_activeLists, add);
         rng::for_each(m_extractions, add);
         rng::for_each(m_reactionTable, add);
@@ -144,6 +147,10 @@ namespace bicameral::sim {
         // 熱の放射の段(T-1154): 刻みをまたぐのは状態のバッファの頭(帳簿・放った・吸った・持ち越しの表)だけ。作業は毎刻み作り直す
         if (m_cascade)
             regions.push_back({.resource = m_cascade->State(), .bytes = m_cascade->PersistentStateBytes()});
+
+        if (m_cascadeNegative)
+            regions.push_back(
+                {.resource = m_cascadeNegative->State(), .bytes = m_cascadeNegative->PersistentStateBytes()});
 
         return regions;
     }

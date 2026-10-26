@@ -14,7 +14,9 @@
 // 物理の単位の GPU 時間(タイムスタンプ)をログに出す(docs/perf.md)。
 // --gravity-swap(T-0444・環境の値のホットリロード): 刻み GRAVITY_SWAP_TICK に、環境の重力だけ月にした表へ差し替える
 //   (ProbeTableSwap + 表の印のコマンド。窓のホットリロードと同じ道)。CPU は同じ刻みの Step の前に PhysicsWorld::SetGravity。
-// 引数: gpu_test_options.h(--warp)と --ticks n(進める刻み。既定 240)・--gravity-swap
+// --radiation(T-1164): 熱の放射の段を既定のまま(GPU・CPU とも)流す。窓のサンプルの世界(物理 + 放射)と同じ組み合わせの決定性を見る。
+//   放射が世界のエネルギーを変えるので「増え = つつき + 物理の熱」は見ない。放射の段の置き場が溢れていないことを見る
+// 引数: gpu_test_options.h(--warp)と --ticks n(進める刻み。既定 240)・--gravity-swap・--radiation
 #include <algorithm>
 #include <charconv>
 #include <format>
@@ -51,7 +53,16 @@ namespace {
             false;                 // --broadphase-compute: 広域の選別を Compute で(既定は ProbeSim と同じ Work Graph)
         bool noise = true;         // 2 回目に別のキューの雑音と重い単位を流すか(WARP では重すぎるので流さない)
         bool gravitySwap = false;  // --gravity-swap: 刻み GRAVITY_SWAP_TICK に重力を月にした表へ差し替える(T-0444)
+        bool radiation = false;    // --radiation: 熱の放射の段を既定のまま流す(T-1164)
     };
+
+    // 熱の放射の段の形(--radiation なら既定、でなければ切る。GPU と CPU で同じ)
+    ProbeCascadeOptions CascadeFor(bool radiation) {
+        if (radiation)
+            return {};
+
+        return {.enabled = false};
+    }
 
     constexpr uint64_t GRAVITY_SWAP_TICK = 60;     // 1 回目と 2 回目の押しの間
     constexpr uint32_t MOON_GRAVITY = 1620000;     // µm/s²
@@ -122,13 +133,14 @@ namespace {
     // swapped: 刻み GRAVITY_SWAP_TICK から当てる表(nullptr なら差し替えない)。重力は表の環境の値から(ProbeSim と同じ)。
     // セルは ProbeReference(同じ表・同じコマンド)に、前の刻みの物理の熱の入口を刻みの初めに足して進める(T-0561)
     Expected RunReference(const BakedReactionTable& table, const PhysicsScene& scene, uint64_t ticks,
-                          const BakedReactionTable* swapped) {
+                          const BakedReactionTable* swapped, bool radiation) {
         Expected expected;
         PhysicsWorld world(scene,
                            PhysicsParametersFor(StandardWorldPhysics()));  // サンプルの世界と同じ標準の重力(D-480)
         ProbeReference reference(table);
-        // 物理の熱の帳簿(増え = つつき + 物理の熱)を見る試験なので、熱の放射の段は GPU・CPU とも切る(physics_heat と同じ。T-1154)
-        reference.SetCascadeRadiation({.enabled = false});
+        // 物理の熱の帳簿(増え = つつき + 物理の熱)を見る試験なので、熱の放射の段は GPU・CPU とも切る(physics_heat と同じ。T-1154)。
+        // --radiation では既定のまま(T-1164)
+        reference.SetCascadeRadiation(CascadeFor(radiation));
         const std::vector<ProbeCommand> commands = MakePushCommands();
         std::vector<physics::PxHeatEntry> heat;  // 前の刻みの物理の熱の入口
         for (uint64_t tick = 0; tick < ticks; ++tick) {
@@ -176,7 +188,8 @@ namespace {
         std::vector<uint32_t> bodyView;      // 最後の抽出の物の欄
         GpuPhysicsStats stats;
         uint32_t debugAssertCount = 0;
-        uint64_t physicsUnitTicks = 0;  // 物理の単位のタイムスタンプの刻みの合計
+        uint32_t radiationOverflow = 0;  // 熱の放射の段の溢れの印(T-1164)
+        uint64_t physicsUnitTicks = 0;   // 物理の単位のタイムスタンプの刻みの合計
         uint32_t physicsUnits = 0;
         double microsecondsPerTimestamp = 0.0;
     };
@@ -204,6 +217,7 @@ namespace {
         run.hashes.insert(run.hashes.end(), readback.hashes.begin(), readback.hashes.end());
         run.events.insert(run.events.end(), readback.events.begin(), readback.events.end());
         run.debugAssertCount += readback.debugAssertCount;
+        run.radiationOverflow |= readback.radiationOverflow;
         for (size_t index = 0; index < readback.unitGpuTicks.size(); ++index) {
             if ((readback.firstUnit + index) % unitsPerTick != PROBE_UNIT_PHYSICS)
                 continue;
@@ -271,7 +285,7 @@ namespace {
                                                 .physicsScene = &scene,
                                                 .physicsOptions = {.broadphaseGraph = !m_config.computeBroadphase},
                                                 .physicsParameters = PhysicsParametersFor(StandardWorldPhysics()),
-                                                .cascadeRadiation = {.enabled = false}});
+                                                .cascadeRadiation = CascadeFor(m_config.radiation)});
 
             // 雑音: 別の優先度の高い direct のキューで重い仕事を流す(窓の描画のように、物理の途中に割り込ませる)
             auto noiseQueue = gpu::Queue::Create(m_device, D3D12_COMMAND_LIST_TYPE_DIRECT, L"PhysicsProbeTestNoise",
@@ -533,6 +547,7 @@ namespace {
         TestConfig config{.ticks = TakeTicks(arguments, 240)};
         config.computeBroadphase = TakeFlag(arguments, "--broadphase-compute");
         config.gravitySwap = TakeFlag(arguments, "--gravity-swap");
+        config.radiation = TakeFlag(arguments, "--radiation");
         options = test::ParseGpuTestOptions(std::span(arguments));
         if (!options || config.ticks <= PUSHES.back().tick)
             return std::nullopt;
@@ -543,7 +558,8 @@ namespace {
     }
 
     // 2 回の実行を CPU と比べて、失敗の数を返す
-    int Judge(const Run& first, const Run& second, const Expected& expected, uint64_t ticks) {
+    int Judge(const Run& first, const Run& second, const Expected& expected, const TestConfig& config) {
+        const uint64_t ticks = config.ticks;
         const uint32_t mismatches = CountHashMismatches(first, expected);
         const uint32_t secondMismatches = CountHashMismatches(second, expected);
         const uint32_t cellMismatches = CountCellMismatches(first, expected);
@@ -577,8 +593,9 @@ namespace {
                        "刻みごとの物のハッシュが CPU リファレンスとビット一致");
         failures.Check(cellMismatches == 0 && first.hashes.size() == expected.cellStates.size(),
                        "刻みごとのセル(ハッシュ・エネルギー・つつき・物理の熱)が CPU リファレンスとビット一致");
-        failures.Check(EnergyBalances(first) && EnergyBalances(second),
-                       "GPU の世界のエネルギーの増え = つつき + 物理の熱(毎刻み)");
+        failures.Check(config.radiation || (EnergyBalances(first) && EnergyBalances(second)),
+                       "GPU の世界のエネルギーの増え = つつき + 物理の熱(毎刻み。放射を流す時は見ない)");
+        failures.Check(first.radiationOverflow == 0 && second.radiationOverflow == 0, "熱の放射の段の置き場が溢れない");
         failures.Check(
             ledgerBalances && first.heatLedger.returnedMilliJoules == expected.heatLedger.returnedMilliJoules &&
                 first.heatLedger.remainder == expected.heatLedger.remainder,
@@ -606,7 +623,8 @@ int main(int argc, char** argv) {
     const auto table = BakeReactionTable(MakeCombustionTestTable());
     if (!config || !options || !table) {
         Log(Channel::Sim, Level::Error,
-            "使い方: gpu_probe_physics_test [--warp] [--ticks n(> {})] [--broadphase-compute] [--gravity-swap]",
+            "使い方: gpu_probe_physics_test [--warp] [--ticks n(> {})] [--broadphase-compute] [--gravity-swap] "
+            "[--radiation]",
             PUSHES.back().tick);
         bicameral::SingletonFinalizer::Finalize();
 
@@ -635,10 +653,10 @@ int main(int argc, char** argv) {
     if (swapped != nullptr)
         Log(Channel::Sim, Level::Info, "刻み {} に重力 {} µm/s² の表へ差し替える", GRAVITY_SWAP_TICK, MOON_GRAVITY);
 
-    const Expected expected = RunReference(*table, scene, config->ticks, swapped);
+    const Expected expected = RunReference(*table, scene, config->ticks, swapped, config->radiation);
     const Run first = GpuRun(device->Get(), *config, false).Execute(*table, scene, swapped);
     const Run second = GpuRun(device->Get(), *config, true).Execute(*table, scene, swapped);
-    const int failures = Judge(first, second, expected, config->ticks);
+    const int failures = Judge(first, second, expected, *config);
 
     const bool passed = failures == 0 && test::PassesValidation(*device, "gpu_probe_physics_test");
     bicameral::SingletonFinalizer::Finalize();
