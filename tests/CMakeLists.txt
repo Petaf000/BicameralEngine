@@ -840,6 +840,8 @@ set_tests_properties(gpu_probe_fire PROPERTIES DISABLED TRUE)
 bicameral_add_gpu_test(gpu_probe_gas_test)
 target_link_libraries(gpu_probe_gas_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_probe_gas gpu_probe_gas_test gpu --no-gbv)
+# CPU リファレンスも熱の放射の段を流す(D-670。試験の表の環境 300 K で正と負の 2 側。T-1164)ので 300 秒を超える(2026-10-26: 6 場面で 207 秒)
+set_tests_properties(gpu_probe_gas PROPERTIES TIMEOUT 900)
 bicameral_add_gpu_test_case(gpu_probe_gas_warp gpu_probe_gas_test warp --warp)
 # 仮の世界の GPU の刻みに液体の区画(T-0613): 池に溜まる・堤を消すと抜ける・ダムの水が押し寄せる・移流なしが CPU リファレンス(probe_liquid)と毎刻みビット一致
 # 表面の細かい形の整数の関数を GPU で(R-T1・T-0879): 当たりと開き具合が CPU と 1 値ずつビット一致・費用

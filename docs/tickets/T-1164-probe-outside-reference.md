@@ -1,10 +1,10 @@
-# T-1164 仮の世界の放射の段の「世界の外」を参照の温度にする(CPU は済み・GPU と既定は残り)
+# T-1164 仮の世界の放射の段の「世界の外」を参照の温度にする(既定にした・GPU の 2 側も)
 
-- Status: Doing(2026-10-26 wt6: CPU リファレンスに値で選べる形・試験・測り。GPU の仮の世界と既定にするのは残り)
+- Status: Doing(2026-10-26 wt6 第 2 回: 既定 = 環境の温度の物〔D-671〕・いつも流す〔D-670〕・GPU の正と負の 2 側。GPU の試験の結果待ちは下の作業ログ)
 - 種類: 工学
 - PC: 必須
 - マイルストーン: 列 4(T-1155 の「世界の外の扱い」から分けた)
-- 設計: docs/design/23-radiation.md §3.2・§3.3 / 決定: **ADR-0478(Proposed)**・ADR-0461・ADR-0474・D-468
+- 設計: docs/design/23-radiation.md §3.2・§3.3 / 決定: **ADR-0478(Accepted)**・D-670・D-671・D-676・ADR-0461・ADR-0474・D-468
 
 ## 目的
 世界の外が 0 K の空なので、室温の面のブロックが毎刻み起きて眠らない(T-1154 の残り)。外を参照の温度の物にし、釣り合った世界を眠らせる。
@@ -16,6 +16,21 @@
 - 保存: Σ セルのエネルギー × 2^16 + Σ 正の持ち越し − Σ 負の持ち越し + Σ(外へ 正 − 負)+ Σ 丸め − Σ つつき × 2^16 が毎刻み一定(probe_radiation の 6)。
 - GPU の仮の世界(ProbeSim)は参照の温度の形を作る時に断る(「T-1164」の誤り)。
 - RcFaceEmissionRelative(共通の hlsli)は、参照と同じ温度の面を黒体の量を求めずに 0 で抜く(結果は同じ値。釣り合った世界の CPU の費用 790 → 下の測り)。
+
+## 既定にした形(2026-10-26 wt6 第 2 回。D-670・D-671・D-676)
+- **いつも流す(D-670)**: CPU(StepCascadeRadiation)・GPU(CreateRadiation)とも ProbeTableWritesLight の条件を外した。物質の無い表(speciesLight が空)だけ流さない(流しても同じ結果)。
+  ProbeTableWritesLight は残す(書き忘れの警告・試験用)。
+- **外 = 環境の温度の物(D-671)**: `ProbeCascadeOptions::environmentReference`(既定 true)なら参照の温度 = **作った時の表の基準の大気の高さ 0 の温度**
+  (ProbeCascadeReferenceMk。SampleAtmosphere(…, 0))。基準の大気を書かない表は 0 = 0 K の空(ADR-0478 の決定 3)。false なら params.referenceMk のまま(試験・測り)。
+  表の差し替えでは参照の温度を変えない(CPU・GPU とも作った時の表。ProbeReference::m_environmentMk)。
+- **GPU の 2 側**: 参照の温度が 0 でなければ GpuCascadeLight を 2 つ(m_cascade = 正・m_cascadeNegative = 負。作業と状態の並びが同じことを作る時に確かめる)。
+  RadiationGrid は両側の作業へ同じ光の値と温度を書き(正の側の参照の語が 0 でない時)、段は側ごとに 1 刻み、RadiationApply は
+  正(吸った − 放った)− 負(吸った − 放った)を (正.吸った + 負.放った) − (正.放った + 負.吸った) の形で 32bit の上下に分けて引き、繰り上がりも手で回して丸める
+  (T-1078・T-1159 の約束)。RadiationHash は側ごとに 1 回(負の側は面 | 8。CPU と同じ)。保存点・写しの早送りは負の側の状態の頭も写す。置き場は 265 MiB × 2。
+- **空との交換の口**: 仮の世界にはつないでいない。空の値(天候の層)を書く口がまだ無く、空 = 参照の温度なので口は何もしない(ADR-0478 の決定 2)。
+  口の向きは毎刻み 4 方向すべて(D-676): SkyPortParams::rotateDirections の既定は false のまま(sky_port.h で確かめた。sky_port の試験が通る)。
+- **試験の表の環境は 288.15 K**(combustion_test → earth_environment の ISA)、初めの世界は 300 K。なので既定の試験の世界は「環境より 11.85 K 暖かい世界」になり、
+  何もしない世界も外へ冷え続けて眠らない(正しい振る舞い)。300 K の環境にした表では何もしない世界が全部眠る(probe_radiation の 7)。
 
 ## 測り(2026-10-26 wt6・CPU・release。`probe_radiation_test --measure-outside 300`。300 刻みの平均)
 | 場面 | 外 | 予定したブロック(平均・最後) | 放射で変わったセル/刻み | 光線/刻み | CPU ms/刻み |
@@ -30,13 +45,29 @@
 - 火の世界の起きたブロックは火そのもの(気体・反応)で決まり、外の扱いではほぼ変わらない。変わるのは「何もしない所」。
 
 ## 残り
-- [ ] GPU の仮の世界(probe_sim_radiation・probe_radiation.hlsl): 段を 2 つ(正・負。GpuCascadeLight を 2 つか、状態のバッファを側ごとに)・当てる段で差を取る・負の側の持ち越しのハッシュ。
-  置き場は今 265 MiB/側(負の側は参照より冷たい物だけなので小さくできる見込み)。
-- [ ] 既定にする(ADR-0478 が決まったら): 参照の温度を世界の値(パッケージの環境の温度)から。書かない世界は 0(今のまま)。
-- [ ] 空との交換の口を仮の世界につなぐ(口は木〔MultiresNest〕を読むので、仮の世界では 64³ の写しを読む形が要る。空 = 参照なら何もしないので既定の世界では不要)。
+- [x] GPU の仮の世界の 2 側(上の「既定にした形」)。負の側の置き場を小さくする(参照より冷たい物だけ)のは測ってから。
+- [x] 既定にする(D-671)。
+- [ ] 空との交換の口を仮の世界につなぐ(口は木〔MultiresNest〕を読むので、仮の世界では 64³ の写しを読む形が要る。空の値を書く口〔天候の層・05〕ができた時に。
+  空 = 参照なら何もしないので今の既定の世界では不要)。
 - [ ] 夜の地面(空が参照より冷たい)の測り: 木の世界(T-1155)で口とつなぐ時に。
 - 土台に足りないもの: 口と RC の吸った分を当てる段・帳簿の行(ADR-0469 の芯 4。T-1161)。今は仮の世界の段が直接足す(T-1113 と同じ)。
 
+## 取り直しの表(2026-10-26 wt6 第 2 回。既定を変えて値の変わった試験)
+| 試験 | 前の基準 | 新しい基準 | なぜ変わったか |
+|---|---|---|---|
+| probe_radiation の 1(TestNoLight) | 光の値を書かない表では段が流れず、段を切った世界と毎刻み同じハッシュ | 段が毎刻み流れ・保存が一定・0 K 以下のセル 0・段を切った世界とハッシュが違う | D-670(いつも流す。書かない木箱は D-610 の灰色で放つ) |
+| probe_radiation の 1〜5(TestDefault) | 外 = 0 K の空 | 外 = 試験の表の環境 288.15 K(関係の判定〔保存・決定的・向かいの壁が熱い〕は同じ。値の判定は無い) | D-671 |
+| probe_radiation の 6(TestOutside) | 既定の値(0 K の空)と referenceMk = 300 K | 決めた値として渡す(environmentReference = false)。判定は同じ | 既定が環境の温度になったので、決めた値の形を明示 |
+| probe_radiation の 7(新) | — | 試験の表の参照の温度 = 基準の大気の高さ 0(288.15 K)・書かない表は 0・**環境 300 K の表で何もしない 300 K の世界は既定のまま全部眠る**(変わったセル 0・光線 0・予定したブロックが放射なしと毎刻み同じ)・火の世界の保存と決定性・決めた値 300 K とハッシュが同じ | D-671 の確かめ |
+| probe_gas の 3(燃える木箱の保存。8 か所) | 放射の段を切らずに比べていた(T-1113 で段が既定になってから、段の出入り〔外へ・持ち越し〕がこの和に入らず落ちる。**main でも落ちる見込み・未確認**: T-1113 の合格の一覧に probe_gas が無い) | 燃える木箱の世界(RunFire・断面の表示)だけ放射の段を切る(physics_heat と同じ。放射の保存は probe_radiation が見る) | T-1113(既定にした時の取り残し)。今回 D-670 で全部の世界に効くので直した |
+- **値を書いた基準で変わったものは無い**: reaction_package_scene・reaction_replay_table・blank_world・physics_heat・probe_liquid・rest_return・probe_phase_porous_stone・play_metric・slope_check・reaction_species_remap は直さずに通った
+  (試験の表は前から光の値を書いていて段が流れていた。外の温度だけが 0 K → 288.15 K に変わり、判定は関係か段を切った比べ)。
+- GPU と CPU を毎刻み比べる試験(gpu_probe_* など)は、既定が両方で同じに変わるので基準は無い(2 側の形のビット一致の確かめになる)。
+
 ## 作業ログ
+- 2026-10-26(wt6 第 2 回): いつも流す(D-670)・外 = 環境の温度の物(D-671)・GPU の 2 側。CPU: probe_radiation(7 を足した)・reaction_package_scene・reaction_replay_table・blank_world・physics_heat・
+  probe_liquid・rest_return・probe_phase_porous_stone・play_metric・slope_check・reaction_species_remap・replay_file・cascade_light・cascade_light_swing・sky_port・cascade_tree_grid が通った。
+  probe_gas は保存の取り残しを直した(上の表)。GPU: gpu_probe_sim・gpu_probe_place・gpu_probe_rewind_regions・gpu_world_copy・gpu_cascade_light・gpu_probe_blank が CPU とビット一致
+  (試験の表の参照の温度 288.15 K = 2 側の形)。release・警告 0・archmap --check OK。
 - 2026-10-26(wt6): 試験 cascade_tree_grid・probe_radiation・cascade_light・cascade_light_swing・sky_port・gpu_cascade_light・gpu_sun_column・gpu_probe_sim が通った(release・警告 0)。
 - 2026-10-26(wt6): CPU リファレンスに参照の温度の形・probe_radiation の 6(眠る・保存・決定的)・--measure-outside。ADR-0478(Proposed)。
