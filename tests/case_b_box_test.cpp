@@ -588,7 +588,7 @@ namespace {
         std::vector<int64_t> column(box.materials.size(), 0);
         column[MaterialIndex(box, "stone")] = 7;
         column[MaterialIndex(box, "sand")] = 5;
-        const auto even = SettleColumn(box.materials, column, 2, CellVolumeMm3(box));
+        const auto even = PlaceSettleColumn(ScenePlaceMaterials(box.materials), column, 2, CellVolumeMm3(box));
         EXPECT(even[0][MaterialIndex(box, "stone")] == 4 && even[1][MaterialIndex(box, "stone")] == 3);
         EXPECT(even[0][MaterialIndex(box, "sand")] == 3 && even[1][MaterialIndex(box, "sand")] == 2);
     }

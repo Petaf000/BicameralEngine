@@ -253,6 +253,32 @@ namespace {
                     (long long)(totalMass == 0 ? 0 : movingMass * 1000 / totalMass), where.c_str());
     }
 
+    // 列 x のセルの様子(T-1166。引数 probe): 下から 詰まり・据わる固体・粒・層・上の面の粒の速さ
+    void PrintColumn(const Box& box, uint32_t x) {
+        const View view = BuildView(box);
+        const uint32_t slot = MomentumSlot(box.config.layout, Phase::Grain);
+        std::string text;
+        for (uint32_t y = 0; y < box.config.sizeY; ++y) {
+            const uint32_t cell = CellIndex(box, x, y, 0);
+            const CellView& cellView = view.cells[cell];
+            const int64_t grain = cellView.phaseMassMg[2];
+            const int64_t layer = box.grainLayerMg.empty()
+                                      ? -1
+                                      : box.grainLayerMg[(cell * box.materials.size()) + MaterialIndex(box, "sand")];
+            const std::optional<uint32_t> above = Neighbor(box, cell, 1);
+            const int64_t aboveGrain = above.has_value() ? view.cells[*above].phaseMassMg[2] : 0;
+            const int64_t faceMass = (grain + aboveGrain + 1) / 2;
+            const int64_t momentum = above.has_value() ? box.faceMomentum[1][FaceIndex(box, cell, slot)] : 0;
+            const int64_t speed = faceMass == 0 ? 0 : momentum / faceMass;
+            text += std::format("[y{} 詰 {}‰ 固 {}‰ 粒 {} kg 層 {} kg 上 {} mm/s] ", y,
+                                ((uint64_t)cellView.grainPackedQ16 * 1000) >> 16,
+                                ((uint64_t)cellView.fixedQ16 * 1000) >> 16, grain / 1000000,
+                                layer < 0 ? -1 : layer / 1000000, (speed * 1000) / (1 << 20));
+        }
+
+        std::printf("    列 %u: %s\n", x, text.c_str());
+    }
+
     // --- 速さの出どころの測り(T-1137。引数 probe)---
     // 段(陰の圧力・降伏・運ぶ・当てる)の前後で面の粒の速さ(運動量 ÷ 面の粒の質量)を比べ、段ごとに一番速さを上げた面を覚える。
     // 面の粒の質量で 2 つに分ける(1 kg 以上 = 山の粒・未満 = 舞う粒のかす)。運動量だけあって質量 0 の面も数える
@@ -727,6 +753,9 @@ namespace {
                                    .hash = run.recording.HashChain()};
         std::printf("    高さ(cm。列ごと)%s\n", Profile(heights).c_str());
         PrintFastFaces(run.box);
+        if (probeOverride)
+            PrintColumn(run.box, run.box.config.sizeX / 2 - 1);
+
         std::printf("    斜面の芯(頂上の 90 %%〜10 %%)の角度 %u°・動く面 %u / %u\n", result.core,
                     run.recording.samples.back().movingFaces, run.recording.samples.back().totalFaces);
         const char* size = level == 0 ? "0.5" : (level == 1 ? "0.25" : "2");

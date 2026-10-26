@@ -1,7 +1,8 @@
 // case_b_scene.cpp — 案 B の試作の場面(B1。T-0867)。何をするかは case_b_scene.h。
 // 場面の絵は描く道具(Canvas。四角を塗る)で作る(サイフォンの頂上の高さのように、形を引数で変えられるように)。
-// 細かくする口(SettleColumn。T-1106): 0.5 m の絵から 0.25 m の箱を作る時、詰まり 1/10〜9/10 の表面のセルの粒を 4 つの子に同じ詰まりで配ると、
+// 細かくする口(T-1106): 0.5 m の絵から 0.25 m の箱を作る時、詰まり 1/10〜9/10 の表面のセルの粒を 4 つの子に同じ詰まりで配ると、
 // 上の子が「支えの無い詰まり切らないセル」になって初めから落ち、空気の重い流れを作った(T-1105)。粒と液体は下の子から詰めて配る。
+// 寄せ方は多重解像度と同じ sim::PlaceRefineCell(D-664。T-1166 で試作の SettleColumn・SettlePictureCell から置き換えた。答えは同じ)。
 #include "sim/case_b/case_b_scene.h"
 
 #include <algorithm>
@@ -116,46 +117,17 @@ namespace bicameral::sim::case_b {
             return (uint64_t)massMg * 1000 / material.densityKgPerM3;
         }
 
-        // 沈み固まった体積(mm³): 粒は粒の体積 ÷ 詰まり、液体は粒の孔を満たしてから上に重なる。気体は数えない
-        uint64_t SettledVolumeMm3(std::span<const Material> materials, std::span<const int64_t> massMg) {
-            uint64_t grainSettled = 0;
-            uint64_t condensed = 0;
-            for (uint32_t index = 0; index < materials.size(); ++index) {
-                const Material& material = materials[index];
-                const uint64_t volume = SubstanceVolumeMm3(material, massMg[index]);
-                if (material.phase == Phase::Grain) {
-                    const uint32_t packed = material.packedFractionPct == 0 ? 100 : material.packedFractionPct;
-                    grainSettled += volume * 100 / packed;
-                }
-
-                if (material.phase != Phase::Gas)
-                    condensed += volume;
-            }
-
-            return std::max(grainSettled, condensed);
-        }
-
-        // 列の和を childCount 個の子に同じ数で(端数は一番下の子へ)
-        void SpreadEvenly(int64_t total, uint32_t index, std::vector<std::vector<int64_t>>& children) {
-            const auto count = (int64_t)children.size();
-            for (std::vector<int64_t>& child : children)
-                child[index] = total / count;
-
-            children.front()[index] += total % count;
-        }
-
-        constexpr int64_t FULL_Q16 = 65536;
-
         // 細かくする時(T-1106)の絵の 1 セル: 子 childCount 個(n × n)に同じ数で配った時の子 1 つの量(StoreCell と同じ丸め)× 子の数 = 親の量と、
-        // 沈み固まった詰まり(Q16。1 = 子の体積の和)。寄せるのは液体・粒だけのセル(物・据わる固体・舞う粒・凝縮相が無い・詰まり切ったは寄せない)
+        // 沈み固まった詰まり(Q16。1 = 子の体積の和。隣の傾きを読む。据わる固体・物 = 1・舞う粒 = 0)。寄せるか・寄せ方は
+        // sim::PlaceRefineCell(D-664 の置かれ方で配る。T-1166 で wt3 の SettlePictureCell から置き換えた。答えは同じ)
         struct PictureSettle {
-            bool settles = false;
-            int64_t fullnessQ16 = 0;  // 隣の傾きを読む詰まり(据わる固体・物 = 1・舞う粒 = 0)
+            bool blocked = false;     // 物を含む(寄せない)
+            int64_t fullnessQ16 = 0;  // SfSettleFullnessQ16
             std::vector<int64_t> massMg;
         };
 
-        PictureSettle ReadPictureCell(const Box& box, const LegendEntry& entry, uint32_t childCount,
-                                      uint64_t childVolumeMm3) {
+        PictureSettle ReadPictureCell(const Box& box, std::span<const PlaceMaterial> places, const LegendEntry& entry,
+                                      uint32_t childCount, uint64_t childVolumeMm3) {
             PictureSettle cell;
             cell.massMg.assign(box.materials.size(), 0);
             if (entry.suspended)
@@ -171,82 +143,29 @@ namespace bicameral::sim::case_b {
                 cell.massMg[index] = (int64_t)(volume * material.densityKgPerM3 / 1000 * childCount);
             }
 
-            const bool fixed = entry.bodyPct > 0 || rng::any_of(entry.condensed, [&](const VolumeFill& volume) {
-                                   return box.materials[MaterialIndex(box, volume.material)].phase == Phase::Fixed;
-                               });
-            if (fixed) {
-                cell.fullnessQ16 = FULL_Q16;
-                return cell;
-            }
-
-            const uint64_t capacity = childVolumeMm3 * childCount;
-            const uint64_t settled = SettledVolumeMm3(box.materials, cell.massMg);
-            cell.fullnessQ16 = (int64_t)std::min<uint64_t>(settled * FULL_Q16 / capacity, FULL_Q16);
-            cell.settles = settled > 0 && settled < capacity;
+            cell.blocked = entry.bodyPct > 0;
+            const state_field::SfSettleSum sum = PlaceSettleSum(places, cell.massMg);
+            cell.fullnessQ16 = state_field::SfSettleFullnessQ16(
+                state_field::SfSettledVolume(sum), childVolumeMm3 * childCount, sum.anchored || cell.blocked);
 
             return cell;
         }
 
-        // 絵の列 x の、段 y のまわり(y − 1〜y + 1)の表面の高さ(段 y の下の端から。Q16 の絵のセル)。絵の外は下 = 詰まり切る・上 = 空
-        int64_t LocalSurfaceQ16(std::span<const PictureSettle> cells, uint32_t width, uint32_t x, uint32_t y) {
-            const auto rows = (int64_t)(cells.size() / width);
-            int64_t sum = 0;
-            for (int64_t row = (int64_t)y - 1; row <= (int64_t)y + 1; ++row) {
-                if (row < 0)
-                    sum += FULL_Q16;
-                else if (row < rows)
-                    sum += cells[(size_t)row * width + x].fullnessQ16;
-            }
+        // 絵のセル (x, y) の表面の傾き(Q16。右へ絵の 1 セルで上がる高さ。y − 1〜y + 1 の詰まりの和・minmod)。絵の外は下 = 詰まり切る・上 = 空
+        int64_t PictureSlopeQ16(std::span<const PictureSettle> cells, uint32_t width, uint32_t x, uint32_t y) {
+            const auto rows = (uint32_t)(cells.size() / width);
+            const auto surface = [&](uint32_t column) {
+                const int64_t below = y == 0 ? state_field::SF_SETTLE_FULL_Q16
+                                             : cells[((size_t)(y - 1) * width) + column].fullnessQ16;
+                const int64_t above = y + 1 >= rows ? 0 : cells[((size_t)(y + 1) * width) + column].fullnessQ16;
 
-            return sum - FULL_Q16;
-        }
+                return state_field::SfColumnSurfaceQ16(below, cells[((size_t)y * width) + column].fullnessQ16, above);
+            };
 
-        // 絵のセル (x, y) の表面の傾き(Q16。右へ絵の 1 セルで上がる高さ)。両側の差の小さい方・向きが違えば 0(MUSCL の minmod。山の頂や谷を作らない)
-        int64_t SurfaceSlopeQ16(std::span<const PictureSettle> cells, uint32_t width, uint32_t x, uint32_t y) {
             if (x == 0 || x + 1 >= width)
                 return 0;
 
-            const int64_t here = LocalSurfaceQ16(cells, width, x, y);
-            const int64_t left = here - LocalSurfaceQ16(cells, width, x - 1, y);
-            const int64_t right = LocalSurfaceQ16(cells, width, x + 1, y) - here;
-            if (left == 0 || right == 0 || (left > 0) != (right > 0))
-                return 0;
-
-            return std::abs(left) < std::abs(right) ? left : right;
-        }
-
-        // 絵の 1 セルの量を、横に並ぶ n 列の子へ表面の傾きに沿って分け(列 j の重み = 2n r + g (2j + 1 − n))、列ごとに下から詰める(SettleColumn)。
-        // 傾きは列の詰まりが 0〜1 に収まるまで弱める(|g| ≤ min(r, 1 − r) × 2n ÷ (n − 1))。量は絵のセルの中でビット単位で保つ(端数は右の列へ)。
-        // 戻り値は [列(左から)][段(下から)][物質]
-        std::vector<std::vector<std::vector<int64_t>>> SettlePictureCell(std::span<const Material> materials,
-                                                                         const PictureSettle& cell, int64_t slopeQ16,
-                                                                         uint32_t n, uint64_t childVolumeMm3) {
-            const int64_t fullness = cell.fullnessQ16;
-            const int64_t limit = std::min(fullness, FULL_Q16 - fullness) * 2 * n / (n - 1);
-            const int64_t slope = std::clamp(slopeQ16, -limit, limit);
-            std::vector<int64_t> weight(n, 0);
-            int64_t weightSum = 0;
-            for (uint32_t j = 0; j < n; ++j) {
-                weight[j] = (2 * (int64_t)n * fullness) + (slope * ((2 * (int64_t)j) + 1 - (int64_t)n));
-                weightSum += weight[j];
-            }
-
-            std::vector<std::vector<int64_t>> columns(n, std::vector<int64_t>(materials.size(), 0));
-            for (uint32_t index = 0; index < materials.size(); ++index) {
-                int64_t given = 0;
-                for (uint32_t j = 0; j + 1 < n; ++j) {
-                    columns[j][index] = fx::FxMulDivS64(cell.massMg[index], (uint64_t)weight[j], (uint64_t)weightSum);
-                    given += columns[j][index];
-                }
-
-                columns[n - 1][index] = cell.massMg[index] - given;
-            }
-
-            std::vector<std::vector<std::vector<int64_t>>> children;
-            for (const std::vector<int64_t>& column : columns)
-                children.push_back(SettleColumn(materials, column, n, childVolumeMm3));
-
-            return children;
+            return state_field::SfSurfaceSlopeQ16(surface(x - 1), surface(x), surface(x + 1), true);
         }
 
         // 子のセルに凝縮相を書き、残りの空きに凡例の圧力の気体(AddPictureCell と同じ式)・熱
@@ -278,29 +197,34 @@ namespace bicameral::sim::case_b {
                                std::vector<uint8_t>& written) {
             const uint32_t width = SceneWidth(scene);
             const uint32_t height = SceneHeight(scene);
+            const std::vector<PlaceMaterial> places = ScenePlaceMaterials(box.materials);
             std::vector<PictureSettle> cells;
             cells.reserve((size_t)width * height);
             for (uint32_t y = 0; y < height; ++y) {
                 for (uint32_t x = 0; x < width; ++x) {
                     const LegendEntry& entry = *FindLegend(scene, scene.rows[height - 1 - y][x]);
-                    cells.push_back(ReadPictureCell(box, entry, fine * fine, cellVolumeMm3));
+                    cells.push_back(ReadPictureCell(box, places, entry, fine * fine, cellVolumeMm3));
                 }
             }
 
             for (uint32_t y = 0; y < height; ++y) {
                 for (uint32_t x = 0; x < width; ++x) {
-                    const PictureSettle& cell = cells[(size_t)y * width + x];
-                    if (!cell.settles)
+                    const PictureSettle& cell = cells[((size_t)y * width) + x];
+                    // 箱は 2 次元(z の子は 1 つ)。子の番号は PlacedChildren::ChildIndex(列, 0, 段)
+                    const PlaceCell place = {.massMg = cell.massMg,
+                                             .slopeXQ16 = PictureSlopeQ16(cells, width, x, y),
+                                             .slopeZQ16 = 0,
+                                             .blocked = cell.blocked};
+                    const PlacedChildren children = PlaceRefineCell(places, place, fine, 1, cellVolumeMm3);
+                    if (!children.settled)
                         continue;
 
                     const LegendEntry& entry = *FindLegend(scene, scene.rows[height - 1 - y][x]);
-                    const int64_t slope = SurfaceSlopeQ16(cells, width, x, y);
-                    const auto children = SettlePictureCell(box.materials, cell, slope, fine, cellVolumeMm3);
                     for (uint32_t j = 0; j < fine; ++j) {
                         for (uint32_t row = 0; row < fine; ++row) {
                             const uint32_t child = CellIndex(box, (x * fine) + j, (y * fine) + row, 0);
-                            WriteSettledChild(box, child, entry, children[j][row], cellVolumeMm3,
-                                              scene.temperatureMilliKelvin);
+                            WriteSettledChild(box, child, entry, children.massMg[children.ChildIndex(j, 0, row)],
+                                              cellVolumeMm3, scene.temperatureMilliKelvin);
                             written[child] = 1;
                         }
                     }
@@ -369,39 +293,20 @@ namespace bicameral::sim::case_b {
         return (uint32_t)scene.rows.size();
     }
 
-    std::vector<std::vector<int64_t>> SettleColumn(std::span<const Material> materials,
-                                                   std::span<const int64_t> columnMassMg, uint32_t childCount,
-                                                   uint64_t childVolumeMm3) {
-        std::vector<std::vector<int64_t>> children(childCount, std::vector<int64_t>(materials.size(), 0));
-        if (childCount == 0)
-            return children;
-
-        const bool fixed = rng::any_of(
-            rng::iota_view<uint32_t, uint32_t>(0, (uint32_t)materials.size()),
-            [&](uint32_t index) { return materials[index].phase == Phase::Fixed && columnMassMg[index] > 0; });
-        const uint64_t settled = SettledVolumeMm3(materials, columnMassMg);
-        const bool settles = !fixed && settled > 0 && settled < childVolumeMm3 * childCount;
-
-        // 一番上の詰まった子(その下の子は沈み固まった体積 = 子の体積)
-        const uint32_t top = settles ? (uint32_t)((settled - 1) / childVolumeMm3) : 0;
-        for (uint32_t index = 0; index < materials.size(); ++index) {
-            const Phase phase = materials[index].phase;
-            const int64_t total = columnMassMg[index];
-            if (!settles || phase == Phase::Gas || phase == Phase::Fixed) {
-                SpreadEvenly(total, index, children);
-                continue;
-            }
-
-            int64_t given = 0;
-            for (uint32_t child = 0; child < top; ++child) {
-                children[child][index] = fx::FxMulDivS64(total, childVolumeMm3, settled);
-                given += children[child][index];
-            }
-
-            children[top][index] = total - given;
+    std::vector<PlaceMaterial> ScenePlaceMaterials(std::span<const Material> materials) {
+        std::vector<PlaceMaterial> places;
+        places.reserve(materials.size());
+        for (const Material& material : materials) {
+            const uint32_t kind = material.phase == Phase::Gas      ? state_field::SF_SETTLE_GAS
+                                  : material.phase == Phase::Liquid ? state_field::SF_SETTLE_LIQUID
+                                  : material.phase == Phase::Grain  ? state_field::SF_SETTLE_GRAIN
+                                                                    : state_field::SF_SETTLE_ANCHORED;
+            places.push_back({.kind = kind,
+                              .densityKgPerM3 = material.densityKgPerM3,
+                              .packedFractionPct = material.packedFractionPct});
         }
 
-        return children;
+        return places;
     }
 
     std::expected<Box, std::string> BuildScene(const Scene& scene, int32_t level, MomentumLayout layout,

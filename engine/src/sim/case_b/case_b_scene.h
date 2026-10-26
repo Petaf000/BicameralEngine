@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "sim/case_b/case_b_box.h"
+#include "sim/placement_refine.h"
 
 namespace bicameral::sim::case_b {
 
@@ -84,13 +85,9 @@ namespace bicameral::sim::case_b {
                                                              MomentumLayout layout = MomentumLayout::PerPhase,
                                                              Diagnostics* diagnostics = nullptr);
 
-    // 細かくする口(T-1106): 親の 1 列(重さの向きに並ぶ childCount 個の子。下から)へ配る質量(物質ごとの列の和。mg)を、重さで沈んだ位置に置く。
-    // 子を下から「沈み固まった体積」(粒は粒の体積 ÷ 詰まり。液体は粒の孔を満たし、溢れた分が上に重なる)で満たし、組成(物質の比)はどの子も同じ。
-    // 据わる固体を含む列・沈み固まった体積が列の体積以上の列・気体は寄せない(同じ数で配る。端数は一番下の子へ)。
-    // 物質ごとの列の和はビット単位で保つ(寄せた物質の端数は一番上の詰まった子へ)。戻り値は [子(下から)][物質]
-    [[nodiscard]] std::vector<std::vector<int64_t>> SettleColumn(std::span<const Material> materials,
-                                                                 std::span<const int64_t> columnMassMg,
-                                                                 uint32_t childCount, uint64_t childVolumeMm3);
+    // 細かくする口(T-1106)の物質: 箱の物質を、置かれ方で配る式(sim/placement_refine。D-664)の物質へ写す(気体・液体・粒・据わる固体)。
+    // 寄せ方は sim::PlaceSettleColumn・PlaceRefineCell(T-1166 で試作の SettleColumn・SettlePictureCell から置き換えた。答えは同じ)
+    [[nodiscard]] std::vector<PlaceMaterial> ScenePlaceMaterials(std::span<const Material> materials);
 
     // 場面の見る範囲を、レベル level の箱のセルで。名前が無ければ std::nullopt
     [[nodiscard]] std::optional<BoxRegion> FindRegion(const Scene& scene, std::string_view name, int32_t level);
