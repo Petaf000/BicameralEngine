@@ -1,5 +1,9 @@
 # NEXT.md — 次にやること(上から順に)
 
+**2026-10-26 本体の作業役(7 回目): time_step_tree 合格・clang-format の全体の検査(ずれ 6 を直した)・archmap OK・wt5 035fd1c6・wt2 96e4e152・wt3 656b99bf・wt4 b669fcdf を main へ(試験 25 本合格・push)。T-1176 は設計の詰めだけ(チケットの 1〜10)。**
+次: T-1176 のコード(チケットの「設計の詰め」の順。最初に SfSurfaceSlopeQ16・SfClampColumnSlopeQ16 の GPU の試験と、置かれ方を既定 on にした時に変わる多重解像度の試験を数える)・wt6 t-1164 はまだマージしない(決定性と費用)・multires_sparse_test の 6 件(wt3)・time_step_tree を main で 1 回。
+次の番号は **D-677・ADR-0479・T-1188・Q173**(本体)。司令塔が作業役に配る次は T-1218・ADR-0489(COMMANDER。wt2 T-1206〜T-1208・wt3 T-1209〜T-1211・wt4 T-1212〜T-1214・wt6 T-1215〜T-1217 は配り済み)。
+
 **2026-10-26 本体の作業役(6 回目): main の試験と push・wt2 7e70fa35・wt4 777b6ae1(ADR-0477 Accepted = D-669)・wt3 5a4cc737・wt5 4f3c948f を main へ・QUESTIONS の古い判断待ち 40 本を閉じた。**
 次: wt4 T-1175(窓の細かさ)・wt5 T-1143・T-1144・wt3 T-1136/T-1138 の 2 本目と T-1177・wt2 T-1134 の残り・T-1171・wt6 T-1164・T-1161 のマージ。T-1176(木の細かくする段)。archmap の全体の --check を PC が軽い時に。
 残る古い判断待ち: Q93 ②・Q105・Q148。次の番号は **D-677・ADR-0479・T-1188・Q173**。

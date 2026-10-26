@@ -1,6 +1,18 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-26(本体の作業役・試験と push・wt2・wt4・wt3・wt5 の 4 本を main へ・QUESTIONS の棚卸し)
+最終更新: 2026-10-26(本体の作業役 7 回目・整形・wt5・wt2・wt3・wt4 の 4 本を main へ・T-1176 の設計の詰め)
+
+## この仕事でしたこと(2026-10-26・本体の作業役・7 回目: time_step_tree の確かめ・整形・4 本のマージ・T-1176 の設計の詰め)
+- **前の作業役の残り**: time_step_tree(main・release)合格 1053 s。clang-format(CI と同じ 23・--dry-run --Werror)を全体で: ずれ 5 ファイルを整形・
+  生成物 shaders/common/radiation_directions.hlsli は tools/radiation_directions/generate.py が clang-format off / on で囲むように直して作り直した(値は同じ。28ff11ec)。archmap --check OK(225 本。Linux 側で数秒で終わった)。
+- **マージ(--no-ff・衝突なし)**: wt5 035fd1c6(T-1185 Done・T-1186 打ち切り・T-1143 に D-673 で出ない現象)・wt2 96e4e152(T-1171 R-B3 Done・ADR-0480 Proposed 粗さで閉じる・D-675)・
+  wt3 656b99bf(T-1167 Done・T-1177 Done = SF_FLAG_BREAKDOWN と内訳の欄・ADR-0481 Proposed)・wt4 b669fcdf(T-1175 Done・窓を列と木の既定に・D-672 確定。ADR-0477 は Accepted のまま)。
+- 4 本の後の試験(release・警告 0): CPU 21 本(object_heat・object_heat_nest・grass_wake・object_shell 704 s・case_b_box・case_b_r2・support_law・support_mixed・support_fracture 435 s・_window 813 s・_thick 554 s・_refine・_refine_scenes・_settle・support_cost・multires_state・field_storage・placement_refine・time_step_lab・time_step_span_dump・time_step_event_merge)・GPU 2 本(gpu_time_step_span・gpu_time_step_event)合格 → push。time_step_tree は wt4 で通っている(main では PC が空いた時に 1 回)
+- 記録: ROADMAP(T-1175・T-1152 の D-672・T-1089/T-1112 の申し送り・T-1191〜T-1193・T-0939 の注・D-663 の行に T-1186 の残りの道)・20 §9.3 の注(ADR-0480)・T-1144(運ぶ欄の帳簿を消した)・T-1166(582 m/s は T-1167 で直した)・COMMANDER(wt2・wt3・wt4 の追加の番号。次は T-1215・ADR-0488)。
+- **T-1176 は設計の詰めだけ**(チケットの「設計の詰め」1〜10: 木のセルは濃度なので数の空間で器 = V0・µmol と molarVolume・相の印を RxSpecies::flags へ・端数は SAME・D-674 の熱容量の重み・隣の 15 セル・GPU の形・影は SAME)。コードは次の作業役。
+- 次の番号は **D-677・ADR-0479・T-1188・Q173**(本体の範囲。この仕事では使っていない)。
+
+(前の版の最終更新: 2026-10-26(本体の作業役・試験と push・wt2・wt4・wt3・wt5 の 4 本を main へ・QUESTIONS の棚卸し))
 
 ## この仕事でしたこと(2026-10-26・本体の作業役・4 本のマージと棚卸し)
 - **main の試験と push**: wt6 のマージ(t-1163・t-1113)と D-669〜D-676 の後の main を release で(警告 0): CPU 10 本(probe_radiation・reaction_package_scene・blank_world・physics_heat・probe_liquid・rest_return・slope_check・cascade_tree_grid・cascade_light 616 s・sky_port)・
@@ -465,6 +477,8 @@ main に入っていないブランチは 21 本(ahead = main に無いコミッ
 - `python3 tools/archmap/archmap.py --check` は Linux 側で動く。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
+- **multires_sparse_test が main でも 6 件落ちる(2026-10-26 wt3 の報告・main の 14:51 のビルド)**: 要約の束の値の比べ。wt3 の変更より前から。調べは wt3 の次の作業役。
+- **wt6 t-1164-outside-default はマージしていない**: window_replay_play・_rewind・_peek が S(33) で回ごとにハッシュが変わる・gpu_play_metric 41 → 203 秒。wt6 の次の作業役が main の実行ファイルで window_replay_record → play を流して main でも落ちるか確かめる(main で落ちたらここに書く)。
 - **サンプルの世界と ⑤ の場面では、写しと遊びの指標が過渡期のため使えない(D-521。多重解像度の世界へ移るまで)**: t-0724 で仮の世界を世界いっぱいにすると 1 刻みが約 85 ms でフレームの予算を超え、写しが 1 刻みも進まない(D-468)ので、写しで進む窓の試験 3 組(window_copy_*・window_regions_copy_*・window_metrics_*)を DISABLED にする(戻す条件は tests/CMakeLists.txt と ADR-0342。t-0724 のマージで入る)。t-0724 はホットリロードの窓の試験 4 本が CheckRegionTableSwap で落ちるので、T-0670 を上に入れてからマージする。
 - **気体・液体の区画の残り**: 刻みの終わりの熱が負のセルは 0(T-0676。probe_gas の EXPECT(0))。強い爆発の 1 小刻みの中だけ熱が一時的に負になる(T-0691。D-508 で案を決めた・土台の設計の後)。気体の市松は燃える木箱の下半分に残る(T-0658)。**投影 × 最速 × 小さい空きのセルは外側の反復が発散する(T-0689・止めた)ので使わない**(probe_gas の既定は陽解法)。区画で分かれた世界の最速の投影は 1 刻みで釣り合いきらない(T-0688)。多重解像度の木は空きを読まない(T-0668・止めた)。
 - **debug で覗き窓を開くと世界(物理)が起動ごとに違った(T-0239。回避済み)**: -Od のシミュのシェーダー(局所メモリが大きい)を同じキューで設定すると後ろの物理が壊れうる(ドライバの中の仕組みは未確認。T-0098 と同じ仲間)。debug でもシミュのシェーダーを -O3 で作る(ADR-0079)。PIX で 1 行ずつ追う時の `BICAMERAL_SIM_SHADER_OD=ON` のビルドでは食い違うことがある。release で食い違ったら・局所メモリの大きいシミュのシェーダーを足した後に戻ったら、チケットの打ち切り条件から。**FX_ASSERT の「fixed.hlsli:N」はどのファイルの assert でも fixed.hlsli と出る(行番号は呼んだ所の __LINE__)**。
