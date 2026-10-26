@@ -40,6 +40,8 @@ GPU の放射の段(仮の世界。T-1154・T-1164 の正負 2 側)が 1 刻み�
 | 火・放射なし | — | — | 164.4 | 170.2 |
 - 前の T-1164 の測り(gpu_play_metric の sealed_fire_out・外 288.15 K)1407.6 µs と、この試験の 288.15 K の 1432〜1442 µs はほぼ同じ(印の分と場面の違い)。
 - 放つ面は組 1 つ分(D-658 の 15 組)、光線はフレームの最後の刻み。
+- 遊びの指標の早送り(gpu_play_metric_test の sealed_fire_out・印なし・今の既定〔試験の表の環境 300 K〕・5280 刻み): **957.0 µs/刻み**(T-1164 の 1407.6 µs は環境 288.15 K の時。外の温度が違うので直には比べない)。
+- 通った試験(release): cascade_light(11 を足した)・cascade_light_swing・cascade_tree_grid・probe_radiation・sky_port・sun_column・gpu_cascade_light・gpu_sun_column・gpu_probe_sim・gpu_probe_physics_radiation・gpu_play_metric・gpu_radiation_cost(GPU と CPU のビット一致は前と同じ形で通る)。
 
 ### 段ごとの内訳(後・火・外 288.15 K・2 側。µs/刻み)
 | 段 | 正の側 | 負の側(参照より冷たい物が無い) | 固定(何もしない・外 300 K の値) | 数に比例する分(光線 約 2.2 万本で) |
