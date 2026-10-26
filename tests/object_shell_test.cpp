@@ -400,6 +400,25 @@ namespace {
     // Flow = 層 k 段 + 流れ(T-1143。object_flow_cpu.h)
     enum class ShellMode : uint8_t { None, OnDemand, OnDemandRelieved, Flow };
 
+    // 圧力の反復の規則(T-1201。既定 = 0 から収まったら止める。T-1200 までの形は {24, false, false})
+    struct PressureRule {
+        uint32_t sweeps = 1024;  // 上限(untilQuiet = false なら決まった回数)
+        bool untilQuiet = true;
+        bool warmStart = false;
+        uint32_t gapSweeps = 0;        // 調べるだけ: 0 から解く時のこの回数と止まった時の面の速さの差
+        uint32_t multigridCycles = 0;  // 調べるだけ(道 B): 赤黒の前の多重格子の V 字の回数
+        int64_t quietTolerance = 0;    // 調べるだけ: 収まったとみなす 1 回の赤黒の値の変わりの上限
+    };
+
+    // 圧力の反復の回数(T-1201。燃え方の場面ごと: 0 始め〔火の来た列が 1/3 まで〕・1 最中・2 消えかけ〔0.5 s 新しい列に火が来ない〕)
+    struct SweepStats {
+        uint64_t solves = 0;
+        uint64_t sweeps = 0;
+        uint32_t most = 0;
+        uint64_t capped = 0;
+        uint64_t multigridWork = 0;  // 多重格子の費用(細かい格子の赤黒 1 回 = 1000)
+    };
+
     struct Burn {
         std::vector<uint32_t> litTick;  // 列に火が来た刻み(0 = 来ない)
         int32_t bodyLevel = BODY_LEVEL;
@@ -416,6 +435,9 @@ namespace {
         uint64_t voxelTicks = 0;                  // 回したボクセルの数の和(費用)
         int64_t fastestMillimetresPerSecond = 0;  // 流れ: 一番速い面
         uint64_t limitedShares = 0;               // 流れ: 出る上限で縮めた(ボクセル × 小刻み)
+        std::array<SweepStats, 3> sweepStats{};   // 流れ: 圧力の反復の回数(燃え方の場面ごと。T-1201)
+        int64_t gapSpeedQ16 = 0;                  // 流れ: 決まった回数と止まった時の面の速さの差の最大(T-1201)
+        int64_t gapReferenceQ16 = 0;
         double cpuMilliseconds = 0;
         bool conserved = true;
         bool failed = false;
@@ -452,7 +474,7 @@ namespace {
     Burn RunBurn(const Tables& tables, const Fuel& fuel, int32_t cellLevel, ShellMode mode, bool sleeping = true,
                  bool probe = false, uint32_t layers = 1, bool skeletonWalls = true, const Grid& grid = {},
                  bool inWorld = false, const Tables* splitTables = nullptr, uint32_t splitLog2 = 0,
-                 uint32_t pressureSweeps = 24) {
+                 const PressureRule& pressure = {}) {
         const test::OhCpuTable shared{.view = tables.table.View(),
                                       .objectSpecies = tables.object.species,
                                       .molarMasses = tables.table.molarMasses};
@@ -465,7 +487,12 @@ namespace {
                                             .molarMasses = objectTables.table.molarMasses};
         // 流れの小刻みは箱が細かいほど多く(1 小刻みに 1 ボクセルの上限が同じ 1.875 m/s になるように)
         test::OhShellFlow flow{.substeps = 4u << static_cast<uint32_t>(grid.bodyLevel - BODY_LEVEL),
-                               .pressureSweeps = pressureSweeps,
+                               .pressureSweeps = pressure.sweeps,
+                               .pressureUntilQuiet = pressure.untilQuiet,
+                               .pressureWarmStart = pressure.warmStart,
+                               .pressureMultigridCycles = pressure.multigridCycles,
+                               .pressureQuietTolerance = pressure.quietTolerance,
+                               .gapSweeps = pressure.gapSweeps,
                                .skeletonWalls = skeletonWalls};
         const test::OhGasList& gases = tables.object.gases;
         test::OhWorld world = MakeWorld(tables.table, fuel, cellLevel, grid);
@@ -505,6 +532,11 @@ namespace {
                 test::object_shell_nest::BeforeObject(tables.table, *nest, world, WORLD_SEED, tick);
 
             const uint64_t objectTick = static_cast<uint64_t>(tick) * splits;
+            const uint64_t solvesBefore = flow.pressureSolves;
+            const uint64_t sweepsBefore = flow.pressureSweepsUsed;
+            const uint64_t cappedBefore = flow.pressureCapped;
+            const uint64_t multigridBefore = flow.pressureMultigridWork;
+            flow.pressureMostSweeps = 0;
             if (splits == 1) {
                 test::StepObjectHeat(shared, gases, world, lensOn, WORLD_SEED, tick);
                 if (mode == ShellMode::Flow)
@@ -515,6 +547,19 @@ namespace {
             }
 
             burn.voxelTicks += world.voxels.size();
+            if (flow.pressureSolves != solvesBefore) {
+                uint32_t lit = 0;
+                for (const uint32_t litAt : burn.litTick)
+                    lit += litAt != 0 ? 1u : 0u;
+
+                const size_t phase = lit * 3 < columns ? 0 : (lastLitTick != 0 && tick > lastLitTick + 30 ? 2 : 1);
+                SweepStats& stats = burn.sweepStats[phase];
+                stats.solves += flow.pressureSolves - solvesBefore;
+                stats.sweeps += flow.pressureSweepsUsed - sweepsBefore;
+                stats.most = std::max(stats.most, flow.pressureMostSweeps);
+                stats.capped += flow.pressureCapped - cappedBefore;
+                stats.multigridWork += flow.pressureMultigridWork - multigridBefore;
+            }
 
             if (probe) {
                 size_t hottestVoxel = 0;
@@ -621,6 +666,8 @@ namespace {
         // 1 小刻み・1 ボクセル の速さ = 1.875 m/s(7.8 mm・1/240 s。細かい箱も小刻みを同じ割合で増やすので同じ): q(Q16)× 1875 ÷ 65536 mm/s
         burn.fastestMillimetresPerSecond = (flow.fastestQ16 * 1875) / 65536;
         burn.limitedShares = flow.limitedShares;
+        burn.gapSpeedQ16 = flow.gapSpeedQ16;
+        burn.gapReferenceQ16 = flow.gapReferenceQ16;
 
         burn.conserved = burn.conserved && totals() == start;
         burn.cpuMilliseconds = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began)
@@ -676,6 +723,31 @@ namespace {
                         static_cast<long long>(burn.fastestMillimetresPerSecond),
                         static_cast<unsigned long long>(burn.limitedShares));
 
+        if (burn.sweepStats[0].solves + burn.sweepStats[1].solves + burn.sweepStats[2].solves != 0) {
+            std::printf("  圧力の反復(1 回に解く赤黒の平均 / 一番多い / 上限で止まった / 解いた回数):");
+            const std::array<const char*, 3> names = {"始め", "最中", "消えかけ"};
+            for (size_t phase = 0; phase < names.size(); ++phase) {
+                const SweepStats& stats = burn.sweepStats[phase];
+                std::printf(
+                    " %s %.1f / %u / %llu / %llu", names[phase],
+                    stats.solves == 0 ? 0.0 : static_cast<double>(stats.sweeps) / static_cast<double>(stats.solves),
+                    stats.most, static_cast<unsigned long long>(stats.capped),
+                    static_cast<unsigned long long>(stats.solves));
+                if (stats.multigridWork != 0)
+                    std::printf("(多重格子を足した費用 赤黒 %.1f 回分)",
+                                static_cast<double>((stats.sweeps * 1000) + stats.multigridWork) /
+                                    (1000.0 * static_cast<double>(std::max<uint64_t>(stats.solves, 1))));
+            }
+
+            std::printf("\n");
+        }
+
+        if (burn.gapReferenceQ16 != 0)
+            std::printf(
+                "  決まった回数で打ち切った時の面の速さの差: 最大 %lld(止まった時の速さの最大 %lld。Q16 ボクセル / "
+                "小刻み)\n",
+                static_cast<long long>(burn.gapSpeedQ16), static_cast<long long>(burn.gapReferenceQ16));
+
         std::printf("  列に火が来た刻み:");
         for (const uint32_t tick : burn.litTick)
             std::printf(" %u", tick);
@@ -701,18 +773,43 @@ int main(int argc, char** argv) {
         const bool monoxide = argc >= 9 && std::atoi(argv[8]) != 0;
         // [反応を分ける 2 の何乗か](T-1186。0 = 今のまま 1 刻みに 1 度)
         const auto splitLog2 = argc >= 10 ? static_cast<uint32_t>(std::atoi(argv[9])) : 0u;
-        // [圧力の赤黒の反復の回数](T-1186 の次の道の調べ。既定 24)
-        const auto sweeps = argc >= 11 ? static_cast<uint32_t>(std::atoi(argv[10])) : 24u;
+        // [圧力の赤黒の反復の上限](T-1186 の次の道の調べ。既定 1024)[規則 0 = 0 から決まった回数(T-1200 まで)/ 1 = 0 から収まるまで(既定)/
+        //  3 = 温めた始まり + 収まるまで][調べる回数: 0 から解く時、この回数と止まった時の面の速さの差](T-1201)
+        PressureRule pressure;
+        if (argc >= 11)
+            pressure.sweeps = static_cast<uint32_t>(std::atoi(argv[10]));
+
+        if (argc >= 12) {
+            const auto rule = static_cast<uint32_t>(std::atoi(argv[11]));
+            pressure.untilQuiet = (rule & 1u) != 0;
+            pressure.warmStart = (rule & 2u) != 0;
+        }
+
+        if (argc >= 13)
+            pressure.gapSweeps = static_cast<uint32_t>(std::atoi(argv[12]));
+
+        if (argc >= 14)
+            pressure.multigridCycles = static_cast<uint32_t>(std::atoi(argv[13]));
+
+        if (argc >= 15)
+            pressure.quietTolerance = std::atoi(argv[14]);
+
+        const uint32_t sweeps = pressure.sweeps;
         const TableKind kind = monoxide ? TableKind::FuelGas : TableKind::FuelGasWithoutMonoxide;
         const Tables split = MakeTables(kind, splitLog2);
         const Burn burn = RunBurn(monoxide ? fuelGas : noMonoxide, FUELS[fuelIndex], cellLevel, ShellMode::Flow, true,
                                   false, layers, true, grid, inWorld, splitLog2 != 0 ? &split : nullptr, splitLog2,
-                                  sweeps);
+                                  pressure);
         char label[200];
-        std::snprintf(label, sizeof(label), "層 %u 段・箱 %.2f mm・骨格 %u 列・%s%s・反応 %u 分け・圧力 %u 回", layers,
+        std::snprintf(label, sizeof(label),
+                      "層 %u 段・箱 %.2f mm・骨格 %u 列・%s%s・反応 %u 分け・圧力 上限 %u 回%s%s%s", layers,
                       7.8125 / (1 << (grid.bodyLevel - BODY_LEVEL)), grid.columns,
-                      inWorld ? "世界の流れ" : "閉じた 1 セル", monoxide ? "・CO あり" : "", 1u << splitLog2, sweeps);
+                      inWorld ? "世界の流れ" : "閉じた 1 セル", monoxide ? "・CO あり" : "", 1u << splitLog2, sweeps,
+                      pressure.untilQuiet ? "・収まるまで" : "・決まった回数",
+                      pressure.warmStart ? "・温めた始まり" : "", pressure.multigridCycles != 0 ? "・多重格子" : "");
         Print(FUELS[fuelIndex].name, label, cellLevel, burn);
+        std::printf("  圧力: 収まったとみなす変わりの上限 %lld・多重格子の V 字 %u 回\n",
+                    static_cast<long long>(pressure.quietTolerance), pressure.multigridCycles);
 
         return burn.conserved && !burn.failed ? 0 : 1;
     }
