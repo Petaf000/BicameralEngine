@@ -41,8 +41,27 @@ namespace bicameral::sim::nest_detail {
     // 頁 page のセル index に書く(成分の数が頁の幅を超えれば頁を広げる)
     void StorePageCell(MultiresNest& nest, uint32_t page, uint32_t index, const reaction::RxCell& cell);
 
-    // 頁 page の幅を、頁の中のセルの成分の数の最大まで詰める(眠る判定で。読む値は変わらない)
+    // 頁 page の幅を、頁の中のセルの成分の数の最大まで詰める(眠る判定で。読む値は変わらない)。層が全部 0 なら層の並びを返す(T-1210)
     void NarrowPageCells(MultiresNest& nest, uint32_t page);
+
+    // --- 成分ごとの層の量(T-1210。multires_cell_store.cpp)---
+
+    // 頁 page のセル index の層(位置は LoadPageCell の成分と同じ)
+    [[nodiscard]] MrCellLayers LoadPageCellLayers(const MultiresNest& nest, uint32_t page, uint32_t index);
+
+    // 頁 page のセル index に成分の量と層を書く(層を動かす法則の書き方。層はセルに収まること)
+    void StorePageCellWithLayers(MultiresNest& nest, uint32_t page, uint32_t index, const reaction::RxCell& cell,
+                                 const MrCellLayers& layers);
+
+    // 頁 page に 0 でない層があるか(層のある頁は畳まない。1 段目)
+    [[nodiscard]] bool PageHasLayers(const MultiresNest& nest, uint32_t page);
+
+    // 頁 page の層を全部 0 にする(頁を空きへ返す時。次に使う所に古い層を残さない)
+    void ClearPageLayers(MultiresNest& nest, uint32_t page);
+
+    // 頁 page のセル index の 0 でない層を要約に足す(address・物質・層。層の無いセルは何も足さない = 層の無い世界の要約は今と同じ)
+    [[nodiscard]] uint64_t HashCellLayers(uint64_t hash, const MultiresNest& nest, uint32_t page, uint32_t index,
+                                          uint64_t address);
 
     // 頁を持つ枠のセル
     inline reaction::RxCell LoadCellAt(const MultiresNest& nest, uint32_t slot, uint32_t index) {
