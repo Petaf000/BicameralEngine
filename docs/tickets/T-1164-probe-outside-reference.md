@@ -1,6 +1,6 @@
 # T-1164 仮の世界の放射の段の「世界の外」を参照の温度にする(既定にした・GPU の 2 側も)
 
-- Status: Doing(2026-10-26 wt6 第 2 回: 既定 = 環境の温度の物〔D-671〕・いつも流す〔D-670〕・GPU の正と負の 2 側は済み。**window_replay_play が落ちる**〔下の「落ちている試験」〕のが残り)
+- Status: Doing(2026-10-26 wt6 第 3 回: 窓の再生の非決定は**直した**〔放射の段の持ち越しの溢れ。ADR-0484〕。残り: 費用の内訳〔2 側で 1 側の 2.3 倍〕・空との交換の口・夜の地面)
 - 種類: 工学
 - PC: 必須
 - マイルストーン: 列 4(T-1155 の「世界の外の扱い」から分けた)
@@ -57,14 +57,29 @@
   (ISA なら箱の上と下で 0.2 K 違う)。作り手から見て: 高い所に置いた世界(山の上)でも外は海面の温度。気体の区画の floorHeightMillimeters に合わせる形もある(値 1 つ)。
 - 【エンジン】**基準の大気を書かない世界は 0 K の空のまま**(ADR-0478 の決定 3 のとおり): C++ の試験の表など。作り手から見て: 環境を書き忘れた世界は外へ冷え続ける
   (書けば眠る)。書き忘れをベイクで警告する形は足していない。
-- **試験のパッケージ combustion_test の初めの世界(300 K)と環境(earth_environment の ISA 288.15 K)が合っていない**: 窓の既定の世界(サンプルの世界)は
-  何もしなくても木箱・地面が 288.15 K の外へ冷え続け、眠らない(放射の段の費用が毎刻みかかる。D-468)。どちらかを揃えるのはパッケージの値(公開の試験データ。D-006 の外)。
-  おすすめ: combustion_test で地面の点を 300 K に set_point する(気体の区画の基準も 300 K になる。probe_gas などは表を自分で作っているので影響は小さい見込み・未確認)。この作業役では変えていない。
+- **試験のパッケージ combustion_test の地面の点を 300 K にした(仮・ユーザー未確認。2026-10-26 wt6 第 3 回)**: 初めの世界(300 K)と環境(ISA の 288.15 K)が合わず、
+  窓の既定の世界が外へ冷え続けて眠らなかった。init.luau で基準の大気の高さ 0 の点だけ set_point で 300 K に(成分は地球の点のまま。取り消しは environment の鍵と 4 行)。
+  影響: 参照の温度が 300 K になり、何もしない所は放射の段で眠る。直さずに通った: reaction_*・probe_radiation・probe_gas(1349 → 738 秒)・probe_liquid・rest_return・
+  probe_phase_porous_stone・world_layout・play_metric・slope_check・gas_reference・gas_projection(_plates)・gas_base_layers・gas_tree・physics_heat・blank_world・
+  gpu_probe_sim(115 → 54 秒)・gpu_probe_physics_radiation(137 → 32 秒)・gpu_play_metric(203 → 40 秒)・window_replay_record・play・rewind。値の基準を直した試験は無い。
+  作り手から見て: サンプルの世界の大気は地面で 300 K・11 km で 216.65 K(ISA の折れ目はそのまま)。地面の気圧の分布がわずかに変わる。
 - 置き場: GPU の仮の世界の放射の段が 265 MiB × 2 側 = 531 MiB(負の側は参照より冷たい物だけなので小さくできる見込み。測ってから)。
 - 費用: gpu_play_metric が 41 秒(T-1113 の前)→ 203 秒、gpu_probe_gas は 300 秒の上限に当たった(CPU リファレンスが 2 側を流す・試験の表の環境 300 K)。gpu_probe_gas の上限を 900 秒にした。
-  GPU の 1 刻みの費用(2 側)は未測(perf.md の T-1154 の行 0.55 ms は 1 側)。
+  **GPU の 1 刻み(2 側・密な表)= 1407.6 µs**(sealed_fire_out の場面・試験の表の環境 288.15 K。1 側・0 K の空は 699 µs、放射なし 152.7 µs。perf.md)。
+  放射の取り分 1.25 ms = 1 側の 2.3 倍。見立て(未測): 環境 288.15 K では 300 K の面がほぼ全部 正の側で放ち、負の側は空でも固定の費用(全部のセルの RcSources・
+  持ち越しの表 24 MiB を RcCarryIn と RadiationHash で掃く)を払う。次: 同じビルドで 1 側(0 K の空)を測る口を gpu_play_metric_test に足し、段ごとのタイムスタンプで内訳を取る。
+  直す候補: 負の側の段を「参照より冷たいセルがある刻みだけ」流す(冷たいセルの数を RadiationGrid で数える)・2 側を 1 つの置き場に符号つきで持つ。
 
-## 落ちている試験(2026-10-26 wt6・引き継ぎ)
+## 落ちていた試験(2026-10-26 wt6 第 3 回で直した)
+- **根: GPU の放射の段の持ち越しの疎な表(2^19)の溢れ**(印 4。放つ面 24,629/刻み・袋の最大 425,445 は余裕あり)。サンプルの世界は組を待つ熱の光
+  (D-658 の 15 組の 14/15)で (セル・面・帯) が 2^19 を超え、溢れた鍵が atomic の取り合いの順で落ちて結果が回ごとに変わった。
+  **main(82453cf5)でも同じに落ちる**(本体の実行ファイルで window_replay_record → play・rewind・peek: 3 本とも S(33) から。2026-10-17 を最後に main で流していなかった)
+  = T-1154(GPU の仮の世界に放射)からの根で、2 側の変更からではない。
+- 直し方(ADR-0484): 持ち越しを鍵で引く密な表 2 つ(刻みの偶奇)にした。鍵の数だけ置き場があるので溢れない。置き場は同じ(265 MiB/側)。
+  release でも溢れが見えるように ProbeFrameReadback::radiationOverflow(と Error のログ)を足し、物理 + 放射の試験 gpu_probe_physics_radiation を足した。
+- 通った: window_replay_record・play・rewind・peek(3 本の再生が記録と全部一致 = 3 回とも同じハッシュ)・gpu_probe_physics_radiation・gpu_cascade_light・
+  gpu_probe_sim・gpu_probe_rewind・gpu_world_copy。
+- 下は前の回の見立て(残しておく)。
 - **window_replay_play**(窓の記録 → 重さを分けた単位〔--sim-load 400000 --sim-split 3 --target-fps 30〕で再生): 2 回とも **S(33) から**ハッシュが記録と違う(一致 32 / 不一致 80)。
   S(1)〜S(32) は一致。記録のハッシュは回ごとに違う(クリックがフレームで入るため)が、ずれ始めは同じ刻み。window_replay_record・window_blank_record/play は通る。
   - main(T-1154 で GPU に放射を入れた後)で通るかは**未確認**(10-23〜26 のどの作業ツリーのログにも window_replay_play を流した跡が無い)。
@@ -89,6 +104,9 @@
 - GPU と CPU を毎刻み比べる試験(gpu_probe_* など)は、既定が両方で同じに変わるので基準は無い(2 側の形のビット一致の確かめになる)。
 
 ## 作業ログ
+- 2026-10-26(wt6 第 3 回): **窓の再生の非決定を直した**: main(82453cf5)でも同じに落ちる = T-1154 からの根。release でも見える溢れの読み出しで
+  放射の段の持ち越しの溢れ(印 4)と分かり、持ち越しを鍵で引く密な表 2 つにした(ADR-0484。溢れない)。試験 gpu_probe_physics_radiation を足した。
+  費用は GPU の 1 刻み 1407.6 µs(2 側。1 側 699 µs の 2.3 倍・内訳は未測)。combustion_test の地面を 300 K に(仮)。T-1161 は手を付けていない。
 - 2026-10-26(wt6 第 2 回): いつも流す(D-670)・外 = 環境の温度の物(D-671)・GPU の 2 側。CPU: probe_radiation(7 を足した)・reaction_package_scene・reaction_replay_table・blank_world・physics_heat・
   probe_liquid・rest_return・probe_phase_porous_stone・play_metric・slope_check・reaction_species_remap・replay_file・cascade_light・cascade_light_swing・sky_port・cascade_tree_grid が通った。
   probe_gas は保存の取り残しを直した(上の表)。GPU: gpu_probe_sim・gpu_probe_place・gpu_probe_rewind_regions・gpu_world_copy・gpu_cascade_light・gpu_probe_blank が CPU とビット一致
