@@ -5,6 +5,8 @@
 // 光の当たる / 放つセルの数(放つ面・光線の本数)を変えた点を並べる(固定の費用と、数に比例する分を分ける)。
 // 確かめること(ctest の gpu_radiation_cost): 印を付けても世界の結果が同じ(刻みごとのハッシュが印なしと全部一致。D-428)・
 //   印を捨てていない・段の時間が取れた・放射の段の置き場が溢れない・シェーダーの assert が 0 件。
+//   負の側が空の刻みを GPU が飛ばしても(T-1229)、飛ばさない時と刻みごとのハッシュが全部同じ(ずっと空・時々要る・ずっと要るの 3 場面。
+//   飛ばした刻みの数も見込みどおり)。
 // 引数: gpu_test_options.h(--warp・--no-gbv)と --ticks n(既定 48)・--measure(全部の場面を測ってログに。既定は火の場面だけ)
 #include <algorithm>
 #include <array>
@@ -34,11 +36,20 @@ namespace {
     constexpr uint32_t REFERENCE_300_K = 300000;  // mK
     constexpr uint32_t REFERENCE_ISA = 288150;    // mK(ISA の海面。T-1164 の測りの環境)
 
+    // 負の側を飛ばす刻みの見込み(T-1229)
+    enum class SkipExpect : uint8_t { All, Some, None };
+
     struct Scene {
         std::string_view name;
         ProbeCascadeOptions cascade;
         bool fire = false;
+        bool coldBlock = false;  // 刻み COLD_FROM_TICK に芯の冷たい木の球を置き、COLD_UNTIL_TICK に 300 K の球へ戻す
+        SkipExpect skip = SkipExpect::All;
     };
+
+    constexpr uint64_t COLD_FROM_TICK = 8;
+    constexpr uint64_t COLD_UNTIL_TICK = 24;
+    constexpr uint32_t COLD_BLOCK_MK = 250000;
 
     ProbeCascadeOptions FixedReference(uint32_t referenceMk) {
         ProbeCascadeOptions options{.environmentReference = false};
@@ -66,14 +77,58 @@ namespace {
     }
 
     // 飛ばす段の出入りを見る場面(T-1229): 負の側がずっと空(外 = 世界の温度)・火で時々要る・ずっと要る(外が世界より暖かい)
+    // (火・外 300 K は火の周りも参照より冷たくならないので、負の側はずっと空。芯の冷たい球を置いて戻す場面が「時々」。
+    //  開けた所に冷たい塊を置くと、光が見える所を全部わずかに冷やすので、置き直しても負の側は空に戻らない)
     std::vector<Scene> SkipScenes() {
         return {
-            {.name = "何もしない・外 300 K(負の側がずっと空)", .cascade = FixedReference(REFERENCE_300_K)},
-            {.name = "火・外 300 K(負の側が時々)", .cascade = FixedReference(REFERENCE_300_K), .fire = true},
+            {.name = "火・外 300 K(負の側がずっと空)", .cascade = FixedReference(REFERENCE_300_K), .fire = true},
+            {.name = "芯の冷たい木の球を置いて戻す・外 300 K(負の側が時々)",
+             .cascade = FixedReference(REFERENCE_300_K),
+             .coldBlock = true,
+             .skip = SkipExpect::Some},
             {.name = "火・外 301 K(負の側がずっと要る)",
              .cascade = FixedReference(REFERENCE_300_K + 1000),
-             .fire = true},
+             .fire = true,
+             .skip = SkipExpect::None},
         };
+    }
+
+    // 場面のコマンド(刻みの順)
+    std::vector<ProbeCommand> SceneCommands(const BakedReactionTable& table, const Scene& scene) {
+        std::vector<ProbeCommand> commands;
+        if (scene.fire)
+            commands.push_back(MakePokeCommand(0, 0, 35, 32, 32));  // 木箱の壁に火
+
+        if (!scene.coldBlock)
+            return commands;
+
+        // 木の壁と同じ中身の球(半径 4。300 K)の芯(半径 1)だけを冷たくして置き、後で球ごと 300 K で置き直す。
+        // 冷たい芯は木に囲まれて光が出ない(面の向こうが光を通さない)が、写しの段は向こうを見ないので負の側を流す。
+        // 置き直した後は全部が参照の温度なので、負の側は空に戻って飛ばす(流す → 飛ばすの出入りを両方通る)
+        const std::array<SpeciesAmount, 3> wood = {
+            SpeciesAmount{.species = table.SpeciesId("cellulose"), .amount = 38600000},
+            SpeciesAmount{.species = table.SpeciesId("oxygen"), .amount = 983000},
+            SpeciesAmount{.species = table.SpeciesId("nitrogen"), .amount = 3697000}};
+        const ProbePlaceShape shell{.x = 12, .y = 32, .z = 32, .radius = 4, .temperatureMilliKelvin = REFERENCE_300_K};
+        ProbePlaceShape core = shell;
+        core.radius = 1;
+        core.temperatureMilliKelvin = COLD_BLOCK_MK;
+        commands.push_back(MakePlaceCommand(COLD_FROM_TICK, 1, shell, wood));
+        commands.push_back(MakePlaceCommand(COLD_FROM_TICK, 2, core, wood));
+        commands.push_back(MakePlaceCommand(COLD_UNTIL_TICK, 3, shell, wood));
+
+        return commands;
+    }
+
+    // 飛ばした刻みの数が見込みどおりか(時々: 冷たい芯の前の刻みに加えて、戻した後にまた飛ばす)
+    bool SkipsAsExpected(SkipExpect expect, uint64_t skipped, uint64_t ticks) {
+        switch (expect) {
+            case SkipExpect::All: return skipped == ticks;
+            case SkipExpect::None: return skipped == 0;
+            case SkipExpect::Some: return skipped > COLD_FROM_TICK && skipped < ticks;
+        }
+
+        return false;
     }
 
     struct Run {
@@ -102,18 +157,24 @@ namespace {
         }
 
         ProbeSim& simulation = *created;
-        const std::vector<ProbeCommand> commands = {MakePokeCommand(0, 0, 35, 32, 32)};  // 木箱の壁に火
+        const std::vector<ProbeCommand> commands = SceneCommands(table, scene);
         const uint32_t unitsPerTick = simulation.UnitsPerTick();
         const uint64_t end = ticks * unitsPerTick;
         Run run;
         for (uint64_t position = 0, frame = 0; position < end; ++frame) {
             const uint64_t units = std::min<uint64_t>(uint64_t{TICKS_PER_FRAME} * unitsPerTick, end - position);
-            const bool first = frame == 0 && scene.fire;
-            const ProbeFrameInput input{
-                .firstTick = position / unitsPerTick,
-                .firstUnit = static_cast<uint32_t>(position % unitsPerTick),
-                .unitCount = static_cast<uint32_t>(units),
-                .commands = first ? std::span<const ProbeCommand>(commands) : std::span<const ProbeCommand>()};
+            // このフレームの刻みに当てるコマンド
+            const uint64_t firstTick = position / unitsPerTick;
+            const uint64_t endTick = (position + units + unitsPerTick - 1) / unitsPerTick;
+            std::vector<ProbeCommand> frameCommands;
+            for (const ProbeCommand& command : commands) {
+                if (command.targetTick >= firstTick && command.targetTick < endTick)
+                    frameCommands.push_back(command);
+            }
+            const ProbeFrameInput input{.firstTick = position / unitsPerTick,
+                                        .firstUnit = static_cast<uint32_t>(position % unitsPerTick),
+                                        .unitCount = static_cast<uint32_t>(units),
+                                        .commands = frameCommands};
             ID3D12CommandList* list = simulation.RecordFrame(0, input);
             if (list == nullptr || !queue.WaitCpu(queue.Submit(list)))
                 return std::nullopt;
@@ -222,6 +283,8 @@ namespace {
             failures.Check(skipping->hashes == running->hashes,
                            std::format("飛ばしても刻みごとの世界のハッシュが全部同じ: {}", scene.name));
             failures.Check(running->skipped == 0, std::format("飛ばさない時は 0 刻み: {}", scene.name));
+            const bool expected = SkipsAsExpected(scene.skip, skipping->skipped, ticks);
+            failures.Check(expected, std::format("飛ばした刻みの数が見込みどおり: {}", scene.name));
             failures.Check(skipping->asserts == 0 && skipping->overflow == 0,
                            std::format("飛ばした時も assert・溢れが 0: {}", scene.name));
         }
