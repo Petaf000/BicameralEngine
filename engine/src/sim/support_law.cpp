@@ -16,6 +16,21 @@
 //     ½ b (2 Δn')²  +  ½ (b/9) (4 Δt + ε (3 φ_C + 6 φ_F))²  +  ½ (b/3) (s 角_high − s 角_low)²(s 角_C = φ_C・s 角_F = 2 φ_F)
 //   (ε = −1 は x の面・+1 は上の面。軸 E w D / L = 4b・ずれ 12 E I / L³ = 16b/9・曲げ E I / L = b/3。I = D s³ / 12。
 //   粗い面に並ぶ 2 本の梁の断面の二次モーメントの和 2 (D s³/12) + 2 (s D)(s/2)² = D (2s)³ / 12 は粗い梁と同じ)
+// 面の点のばね(MixedBeam::FaceSpring。T-1191・ADR-0485。既定): 3 つのばねを細かい側の面の中心の点に置く。ずれだけが ② と違う:
+//     ½ 4b (Δt + ε (φ_C + φ_F))²(面の点の横の動き: 低い側 t − ε φ・高い側 t + ε φ。φ_C = 角 × s・φ_F = 角 × s/2 はどちらも中心から面までの腕 × 角)
+//   ② の梁は長さ 1.5 s の一様な梁なので、ずれの力の回りが 0 になる点が梁の真ん中(粗いセルの中心から 0.75 s)にあり、面(s)に無い。
+//   一様なずれでも面に偽の曲げ(ずれの力 × s/4)が出て、粗いセルの回りの釣り合いの腕が 0.75 s(本当は面までの s)になる(T-1191)。
+//   硬さは同じ大きさの面と同じ規則(伸びとずれ E × 面積 ÷ 中心の間の長さ = E s D ÷ 1.5 s = 4b・曲げ E I ÷ 1.5 s = b s²/3。
+//   同じ大きさの面は 6b・6b・2b Δφ² で、梁の式と一致する)
+// 対のずれ(MixedBeam::FacePair。T-1191・ADR-0485。既定): 粗いセル C は剛体なので、③ の面の点は C の歪みを持たない。③ のままだと
+//   (1) 塊が縦に押し縮められると、C の面に並ぶ 2 つの細かいセル L・U の縦の縮みを C が止める偽のずれ(細かい面の縦の力の 1/3)、
+//   (2) 一様なずれの歪み γ で、L・U の伸びに逆向きの偽の差 ±γ s/4(ずれの力の 1/3)が出る(つぎはぎの検査に落ちる)。
+//   直し(対の平均で C につなぐ): ずれは対の平均 d̄ = (d_L + d_U)/2 だけを C が受ける
+//     ½ 4b d_L² + ½ 4b d_U² − ½ K (d_U − d_L)²(K = w_L w_U ÷ (w_L + w_U)・等しければ 2b → ½ 8b d̄²。負の項は L と U の面へ)
+//   伸びは対の平均のずれの歪み(d̄ = 0.75 s γ)を引いて読む: 2Δn'_k → 2Δn'_k − 側 σ_k (d_L + d_U)/3(側 = 細かいセルが +軸の側なら +1)。
+//     3 つの節(C・自分・相手)の項 ½ (b/9) (3 × 2Δn'_k − 側 σ_k (d_L + d_U))²(面のブロックへは C と自分の面・C と相手の面・L と U の面に分けて入れる)
+//   曲げは ③ のまま(回りは L・U の伸びの対と細かい面の曲げで運ぶ = 全部細かい塊と同じ分け方)。系の全体は正(どの項も 2 乗・負の項は平均の 2 乗の分け方)。
+//   対の中の面と両方の面の残りの硬さの小さい方 β の分だけ対として読み、1 − β は ③(割れて L と U が離れると面ごと)
 #include "sim/support_law.h"
 
 #include <algorithm>
@@ -38,6 +53,7 @@ namespace bicameral::sim {
         constexpr uint32_t FORCE_SHIFT = 48;  // 力 mN → 右辺(2^-16 nm × 2^-32 mN/nm)
         constexpr uint64_t NO_CELL = UINT32_MAX;
         constexpr uint32_t SPLIT_CELL = UINT32_MAX - 1;  // m_index: 2 × 2 の細かいセルに分けたセル(T-1120)
+        constexpr uint32_t MIXED_GROUP_TERMS = 3;        // 違う大きさの面 1 つの項(伸び・ずれ・曲げ)
 
         // セルの座標の外接の箱(閉じた領域の「変わった所の大きさ」。T-1171)。空なら長い辺は 1 セル
         struct CellBox {
@@ -69,8 +85,9 @@ namespace bicameral::sim {
         // 項 ½ c (g_low · x_low + g_high · x_high)² の勾配(成分ごとの -1〜2)
         using Gradient = std::array<int64_t, SUPPORT_COMPONENTS>;
 
-        void AddTerm(EquilibriumBlockFace& face, uint64_t coefficient, const Gradient& low, const Gradient& high) {
-            const auto c = (int64_t)coefficient;
+        void AddTerm(EquilibriumBlockFace& face, uint64_t coefficient, const Gradient& low, const Gradient& high,
+                     bool negative = false) {
+            const int64_t c = negative ? -(int64_t)coefficient : (int64_t)coefficient;
             for (uint32_t row = 0; row < SUPPORT_COMPONENTS; ++row) {
                 for (uint32_t column = 0; column < SUPPORT_COMPONENTS; ++column) {
                     const uint32_t at = row * EQ_MAX_COMPONENTS + column;
@@ -127,6 +144,14 @@ namespace bicameral::sim {
 
         int64_t Flow(uint64_t coefficient, int64_t difference) {
             return ImFaceFlow(ImWide(coefficient), difference);
+        }
+
+        // 2 つのばねを直列にした硬さ a b ÷ (a + b)(切り捨て = 対の面の系が正のまま。T-1191)
+        uint64_t SeriesCoefficient(uint64_t a, uint64_t b) {
+            if (a == 0 || b == 0)
+                return 0;
+
+            return FxDivU128By64(FxMulU64Full(a, b), a + b).quotient;
         }
 
         // 係数 × 面の残りの硬さ(Q16)。割れていない面は掛けない(今までとビット一致)
@@ -334,7 +359,8 @@ namespace bicameral::sim {
         const auto addMixed = [&](uint32_t coarse, uint32_t fine, uint32_t axis, bool coarseLow, int64_t offset,
                                   uint32_t faceX, uint32_t faceUp) {
             const auto first = (uint32_t)m_mixedTerms.size();
-            AddMixedBond(coarse, fine, axis, coarseLow, offset, FineIntact(faceX, faceUp, axis));
+            AddMixedBond(coarse, fine, axis, coarseLow, offset, FineIntact(faceX, faceUp, axis),
+                         PairBeta(fine, axis, faceX, faceUp));
             if (m_mixedTerms.size() != first)
                 m_mixedFaceAt[(faceX + (size_t)fineWidth * faceUp) * 2 + axis] = first;
         };
@@ -373,6 +399,8 @@ namespace bicameral::sim {
                     addMixed(coarse, cell, axis, true, offset, backX, backUp);
             }
         }
+
+        BuildMixedPairs();
     }
 
     // 細かいセルどうしの段の斜めの棒(T-1067): 細かい格子で、斜め上の隣が細かいセル・間の 2 つの場所(横・上)の片方だけにセルがある所。
@@ -422,7 +450,7 @@ namespace bicameral::sim {
 
     // 違う大きさの梁(冒頭の式。低い側 = −軸の側)。MixedBeam::CenterLine は粗い側の端の横のずれ σ を見ない
     void SupportLaw::AddMixedBond(uint32_t coarse, uint32_t fine, uint32_t axis, bool coarseLow, int64_t offset,
-                                  uint32_t intact) {
+                                  uint32_t intact, uint32_t beta) {
         if (intact == 0)
             return;
 
@@ -432,7 +460,7 @@ namespace bicameral::sim {
         const int64_t turnSign = axis == 0 ? -1 : 1;  // ε
         const int64_t coarseSide = coarseLow ? -1 : 1;
         const int64_t fineSide = -coarseSide;
-        const bool faceOffset = m_options.mixedBeam == MixedBeam::FaceOffset;
+        const bool faceOffset = m_options.mixedBeam != MixedBeam::CenterLine;
         const auto term = [&](uint64_t coefficient) {
             return MixedTerm{.low = coarseLow ? coarse : fine,
                              .high = coarseLow ? fine : coarse,
@@ -443,19 +471,23 @@ namespace bicameral::sim {
             return ofCoarse == coarseLow ? each.gradientLow : each.gradientHigh;
         };
 
-        // 軸: ½ b (2 Δn')²(2 n_C' = 2 n_C + ε σ φ_C)
-        MixedTerm axial = term(b);
+        // 軸: ½ b (2 Δn')²(2 n_C' = 2 n_C + ε σ φ_C)。対のずれは β の分を対の 3 つの節の項に(AddMixedPair。冒頭)
+        const uint64_t axialPair = Scaled(b, beta);
+        MixedTerm axial = term(b - axialPair);
         gradientOf(axial, true)[along] = 2 * coarseSide;
         gradientOf(axial, false)[along] = 2 * fineSide;
         gradientOf(axial, true)[SUPPORT_TURN] = faceOffset ? coarseSide * turnSign * offset : 0;
         m_mixedTerms.push_back(axial);
 
-        // ずれ: ½ (b/9) (4 Δt + ε (3 φ_C + 6 φ_F))²
-        MixedTerm shear = term(b / 9);
-        gradientOf(shear, true)[across] = 4 * coarseSide;
-        gradientOf(shear, false)[across] = 4 * fineSide;
-        gradientOf(shear, true)[SUPPORT_TURN] = 3 * turnSign;
-        gradientOf(shear, false)[SUPPORT_TURN] = 6 * turnSign;
+        // ずれ: 面の点のばね ½ 4b (Δt + ε (φ_C + φ_F))²(FaceLever は硬さだけ ② の 16b/9)・② ½ (b/9) (4 Δt + ε (3 φ_C + 6 φ_F))²
+        const bool atFace = m_options.mixedBeam == MixedBeam::FacePair ||
+                            m_options.mixedBeam == MixedBeam::FaceSpring || m_options.mixedBeam == MixedBeam::FaceLever;
+        MixedTerm shear = term(!atFace ? b / 9 : m_options.mixedBeam == MixedBeam::FaceLever ? 16 * b / 9 : 4 * b);
+        const int64_t slideScale = atFace ? 1 : 4;
+        gradientOf(shear, true)[across] = slideScale * coarseSide;
+        gradientOf(shear, false)[across] = slideScale * fineSide;
+        gradientOf(shear, true)[SUPPORT_TURN] = (atFace ? 1 : 3) * turnSign;
+        gradientOf(shear, false)[SUPPORT_TURN] = (atFace ? 1 : 6) * turnSign;
         m_mixedTerms.push_back(shear);
 
         // 曲げ: ½ (b/3) (s 角_high − s 角_low)²
@@ -463,6 +495,108 @@ namespace bicameral::sim {
         gradientOf(bend, true)[SUPPORT_TURN] = coarseSide;
         gradientOf(bend, false)[SUPPORT_TURN] = 2 * fineSide;
         m_mixedTerms.push_back(bend);
+
+        m_mixedGroups.push_back({.beta = beta, .axialPair = axialPair, .shearPair = Scaled(shear.coefficient, beta)});
+    }
+
+    // 対の面として読む割合 β(Q16。冒頭): FacePair で、対の相手の細かいセルがあれば、対の中の面と 2 つの違う大きさの面の残りの硬さの
+    // 小さい方。(faceX, faceUp) は違う大きさの面の鍵(m_mixedFaceAt)。対の相手は横の座標の奇偶を入れ替えた所
+    uint32_t SupportLaw::PairBeta(uint32_t fine, uint32_t axis, uint32_t faceX, uint32_t faceUp) const {
+        if (m_options.mixedBeam != MixedBeam::FacePair)
+            return 0;
+
+        const auto [fx, fup] = m_cells[fine];
+        const uint32_t partnerX = axis == 0 ? fx : fx ^ 1;
+        const uint32_t partnerUp = axis == 0 ? fup ^ 1 : fup;
+        if (m_fineIndex[partnerX + (size_t)2 * m_scene.width * partnerUp] == NO_CELL)
+            return 0;
+
+        const uint32_t inner = axis == 0 ? FineIntact(fx, fup & ~1u, 1) : FineIntact(fx & ~1u, fup, 0);
+        const uint32_t partner = axis == 0 ? FineIntact(faceX, faceUp ^ 1, axis) : FineIntact(faceX ^ 1, faceUp, axis);
+
+        return std::min({inner, partner, FineIntact(faceX, faceUp, axis), SUPPORT_INTACT_FULL});
+    }
+
+    // 対(冒頭): L(横の座標が偶数の側)の違う大きさの面から相手の U の面を探す
+    void SupportLaw::BuildMixedPairs() {
+        const uint32_t fineWidth = 2 * m_scene.width;
+        for (uint32_t fup = 0; fup < 2 * m_scene.height; ++fup) {
+            for (uint32_t fx = 0; fx < fineWidth; ++fx) {
+                for (uint32_t axis = 0; axis < 2; ++axis) {
+                    const uint32_t lower = m_mixedFaceAt[(fx + (size_t)fineWidth * fup) * 2 + axis];
+                    if (lower == NO_CELL || ((axis == 0 ? fup : fx) & 1) != 0 ||
+                        m_mixedGroups[lower / MIXED_GROUP_TERMS].beta == 0)
+                        continue;
+
+                    const uint32_t partnerX = axis == 0 ? fx : fx + 1;
+                    const uint32_t partnerUp = axis == 0 ? fup + 1 : fup;
+                    const uint32_t upper = m_mixedFaceAt[(partnerX + (size_t)fineWidth * partnerUp) * 2 + axis];
+                    if (upper != NO_CELL)
+                        AddMixedPair(lower, upper);
+                }
+            }
+        }
+    }
+
+    // 対のずれの負の項と、伸びの 3 つの節の項(冒頭)。組の項は 0 = 伸び・1 = ずれ・2 = 曲げ
+    void SupportLaw::AddMixedPair(uint32_t lower, uint32_t upper) {
+        MixedGroup& groupLower = m_mixedGroups[lower / MIXED_GROUP_TERMS];
+        MixedGroup& groupUpper = m_mixedGroups[upper / MIXED_GROUP_TERMS];
+        groupLower.pair = (uint32_t)m_mixedPairs.size();
+        groupUpper.pair = groupLower.pair;
+        groupUpper.upper = true;
+        m_mixedPairs.push_back({.lower = lower,
+                                .upper = upper,
+                                .pairTerm = (uint32_t)m_pairTerms.size(),
+                                .firstTriple = (uint32_t)m_tripleTerms.size()});
+
+        const auto fineOf = [&](const MixedTerm& term) {
+            return m_cellFine[term.high] != 0 ? term.high : term.low;
+        };
+        const auto coarseOf = [&](const MixedTerm& term) {
+            return m_cellFine[term.high] != 0 ? term.low : term.high;
+        };
+        const auto gradientOf = [&](const MixedTerm& term, uint32_t cell) {
+            return term.high == cell ? term.gradientHigh : term.gradientLow;
+        };
+
+        // ずれ: −½ K (d_U − d_L)²(d = 細かい側の勾配 g の分。C の分は消える)
+        const MixedTerm& shearLower = m_mixedTerms[lower + 1];
+        const MixedTerm& shearUpper = m_mixedTerms[upper + 1];
+        const uint32_t fineLower = fineOf(shearLower);
+        const uint32_t fineUpper = fineOf(shearUpper);
+        const Gradient shearFine = gradientOf(shearLower, fineLower);
+        Gradient negated{};
+        for (uint32_t c = 0; c < SUPPORT_COMPONENTS; ++c)
+            negated[c] = -shearFine[c];
+
+        m_pairTerms.push_back({.low = fineLower,
+                               .high = fineUpper,
+                               .coefficient = SeriesCoefficient(groupLower.shearPair, groupUpper.shearPair),
+                               .gradientLow = negated,
+                               .gradientHigh = shearFine,
+                               .intact = groupLower.beta,
+                               .negative = true});
+
+        // 伸び: ½ (b/9) (3 × 2Δn'_k − 側 σ_k (d_L + d_U))²(σ_L = −1・σ_U = +1。側 = 細かいセルが +軸の側なら +1)
+        const uint32_t coarse = coarseOf(shearLower);
+        const int64_t fineSide = m_cellFine[shearLower.high] != 0 ? 1 : -1;
+        for (const uint32_t own : {lower, upper}) {
+            const MixedTerm& axial = m_mixedTerms[own];
+            const uint32_t ownFine = fineOf(axial);
+            const uint32_t otherFine = ownFine == fineLower ? fineUpper : fineLower;
+            const int64_t mix = -fineSide * (own == lower ? -1 : 1);
+            TripleTerm triple{.nodes = {coarse, ownFine, otherFine},
+                              .coefficient = m_mixedGroups[own / MIXED_GROUP_TERMS].axialPair / 9};
+            for (uint32_t c = 0; c < SUPPORT_COMPONENTS; ++c) {
+                triple.gradients[0][c] = 3 * gradientOf(axial, coarse)[c] +
+                                         mix * (gradientOf(shearLower, coarse)[c] + gradientOf(shearUpper, coarse)[c]);
+                triple.gradients[1][c] = 3 * gradientOf(axial, ownFine)[c] + mix * shearFine[c];
+                triple.gradients[2][c] = mix * shearFine[c];
+            }
+
+            m_tripleTerms.push_back(triple);
+        }
     }
 
     // --- 成分を持つ節の系(Coupled。T-0919): Lagged と同じエネルギーの項を 3 × 3 の面のブロックへ ---
@@ -511,14 +645,9 @@ namespace bicameral::sim {
             system.faces.push_back(face);
         }
 
-        // 違う大きさの梁(T-1120): 同じ 2 節の 3 つの項を 1 つの面へ
-        for (size_t first = 0; first < m_mixedTerms.size(); first += 3) {
-            EquilibriumBlockFace face{.low = m_mixedTerms[first].low, .high = m_mixedTerms[first].high};
-            for (size_t i = first; i < first + 3; ++i)
-                AddTerm(face, m_mixedTerms[i].coefficient, m_mixedTerms[i].gradientLow, m_mixedTerms[i].gradientHigh);
-
-            system.faces.push_back(face);
-        }
+        // 違う大きさの面(T-1120・T-1191): 同じ 2 節の 3 つの項を 1 つの面へ。対は L と U の面に負の項、3 つの節の項は 3 つの面に分けて入れる
+        // (面だけでは正でない所がある。系の全体は正)
+        BuildMixedBlocks(system.faces);
 
         // 固定した面: ½ 12b n² + ½ 12b (2t + s φ)² + ½ 4b φ²(s は Lagged の AddClamp と同じ)
         for (const Clamp& clamp : m_clamps) {
@@ -545,6 +674,69 @@ namespace bicameral::sim {
         }
 
         m_blockGrid = BuildEquilibriumBlockGrid(system);
+    }
+
+    void SupportLaw::BuildMixedBlocks(std::vector<EquilibriumBlockFace>& faces) const {
+        const size_t mixedFirst = faces.size();
+        for (size_t first = 0; first < m_mixedTerms.size(); first += MIXED_GROUP_TERMS) {
+            EquilibriumBlockFace face{.low = m_mixedTerms[first].low, .high = m_mixedTerms[first].high};
+            for (size_t i = first; i < first + MIXED_GROUP_TERMS; ++i)
+                AddTerm(face, m_mixedTerms[i].coefficient, m_mixedTerms[i].gradientLow, m_mixedTerms[i].gradientHigh);
+
+            faces.push_back(face);
+        }
+
+        for (const MixedPair& pair : m_mixedPairs) {
+            const MixedTerm& term = m_pairTerms[pair.pairTerm];
+            EquilibriumBlockFace pairFace{.low = term.low, .high = term.high};
+            AddTerm(pairFace, term.coefficient, term.gradientLow, term.gradientHigh, true);
+            for (uint32_t i = 0; i < 2; ++i) {
+                const TripleTerm& triple = m_tripleTerms[pair.firstTriple + i];
+                EquilibriumBlockFace& own = faces[mixedFirst + (i == 0 ? pair.lower : pair.upper) / MIXED_GROUP_TERMS];
+                EquilibriumBlockFace&
+                    other = faces[mixedFirst + (i == 0 ? pair.upper : pair.lower) / MIXED_GROUP_TERMS];
+                AddTriple(own, other, pairFace, triple);
+            }
+
+            faces.push_back(pairFace);
+        }
+    }
+
+    // 3 つの節の項 c g_i g_jᵀ を面へ: 粗いセルと自分の面に 2 つの対角と間・粗いセルと相手の面に相手の対角と間・L と U の面に 2 つの細かいセルの間
+    void SupportLaw::AddTriple(EquilibriumBlockFace& own, EquilibriumBlockFace& other, EquilibriumBlockFace& pairFace,
+                               const TripleTerm& triple) const {
+        const auto c = (int64_t)triple.coefficient;
+        const auto add = [&](EquilibriumBlockFace& face, uint32_t i, uint32_t j, bool diagonals) {
+            const bool aLow = face.low == triple.nodes[i];
+            FX_ASSERT(aLow ? face.high == triple.nodes[j]
+                           : face.high == triple.nodes[i] && face.low == triple.nodes[j]);
+            const Gradient& low = aLow ? triple.gradients[i] : triple.gradients[j];
+            const Gradient& high = aLow ? triple.gradients[j] : triple.gradients[i];
+            for (uint32_t row = 0; row < SUPPORT_COMPONENTS; ++row) {
+                for (uint32_t column = 0; column < SUPPORT_COMPONENTS; ++column) {
+                    const uint32_t at = row * EQ_MAX_COMPONENTS + column;
+                    face.lowHigh[at] += c * low[row] * high[column];
+                    if (!diagonals)
+                        continue;
+
+                    face.lowLow[at] += c * low[row] * low[column];
+                    face.highHigh[at] += c * high[row] * high[column];
+                }
+            }
+        };
+
+        add(own, 0, 1, true);
+        add(other, 0, 2, false);
+        add(pairFace, 1, 2, false);
+
+        // 相手の対角は粗いセルと相手の面へ
+        const bool otherLow = other.low == triple.nodes[2];
+        for (uint32_t row = 0; row < SUPPORT_COMPONENTS; ++row) {
+            for (uint32_t column = 0; column < SUPPORT_COMPONENTS; ++column) {
+                const int64_t value = c * triple.gradients[2][row] * triple.gradients[2][column];
+                (otherLow ? other.lowLow : other.highHigh)[row * EQ_MAX_COMPONENTS + column] += value;
+            }
+        }
     }
 
     // 面の残りの硬さ(Q16)。scene の intactX / intactUp が空なら割れていない
@@ -893,14 +1085,34 @@ namespace bicameral::sim {
     }
 
     // 項 ½ c (g · x)² が high のセルへ当てる上の力 −c (g · x) g_high,上(low へは g_low,上 = −g_high,上 なので同じ値の逆)
-    int64_t SupportLaw::UpForceOnTerm(const MixedTerm& term) const {
+    int64_t SupportLaw::TermProjection(const MixedTerm& term) const {
         int64_t projection = 0;
         for (uint32_t c = 0; c < SUPPORT_COMPONENTS; ++c) {
             projection += term.gradientLow[c] * CellValue(term.low, c);
             projection += term.gradientHigh[c] * CellValue(term.high, c);
         }
 
-        return -Flow(term.coefficient, projection) * term.gradientHigh[SUPPORT_UP];
+        return projection;
+    }
+
+    int64_t SupportLaw::TripleProjection(const TripleTerm& term) const {
+        int64_t projection = 0;
+        for (uint32_t i = 0; i < 3; ++i) {
+            for (uint32_t c = 0; c < SUPPORT_COMPONENTS; ++c)
+                projection += term.gradients[i][c] * CellValue(term.nodes[i], c);
+        }
+
+        return projection;
+    }
+
+    int64_t SupportLaw::TermForce(const MixedTerm& term) const {
+        const int64_t force = Flow(term.coefficient, TermProjection(term));
+
+        return term.negative ? -force : force;
+    }
+
+    int64_t SupportLaw::UpForceOnTerm(const MixedTerm& term) const {
+        return -TermForce(term) * term.gradientHigh[SUPPORT_UP];
     }
 
     int64_t SupportLaw::UpForceOnClamp(const Clamp& clamp) const {
@@ -962,33 +1174,55 @@ namespace bicameral::sim {
         return forces;
     }
 
-    // 違う大きさの梁の面の力(T-1067)。項 ½ c p²(p = g · x)の力 c p を勾配で配る: 軸 = Σ c p g_high,軸・ずれ = Σ c p g_high,横。
-    // 切り口(細かい側の面の位置。梁の長さ L = 1.5 s のうち粗い側の端から s)の曲げの力の回り M は、両端の回り(ずれと曲げの項の
+    // 違う大きさの面の力(T-1067)。項 ½ c p²(p = g · x)の力 c p を勾配で配る: 軸 = Σ c p g_high,軸・ずれ = Σ c p g_high,横。
+    // 切り口(細かい側の面の位置。中心の間 L = 1.5 s のうち粗い側の端から s)の曲げの力の回り M は、両端の回り(ずれと曲げの項の
     // φ の勾配 f)の直線の内挿で、どちらの向きでも 6M/s = 2 (f_high − f_low)(同じ大きさの面の 6M/dx = 1.5 (f_high − f_low) と同じ形)。
-    // 軸の項の φ の勾配(粗い側の端を面の位置へずらす剛体の動き)は梁の曲げではないので入れない
+    // ずれを面の点で運ぶ形(③・④)は、ずれの項の f が両端で同じ(腕 s と s/2)なので M に入らない(面の点で回りが 0)。
+    // 軸の項の φ の勾配(粗い側の端を面の位置へずらす剛体の動き)は梁の曲げではないので入れない(④ の 3 つの節の伸びの項も同じ)。
+    // 対(④。T-1191): ずれの負の項は細かいセルが受ける力として足し(β が全部なら対の 2 つの面のずれの力は同じ)、伸びの 3 つの節の項は自分の分を足す
     SupportFaceForces SupportLaw::MixedForces(size_t first, uint32_t axis) const {
         const uint32_t along = axis == 0 ? SUPPORT_X : SUPPORT_UP;
         const uint32_t across = axis == 0 ? SUPPORT_UP : SUPPORT_X;
         SupportFaceForces forces;
         int64_t turnLow = 0;
         int64_t turnHigh = 0;
-        for (size_t i = first; i < first + 3; ++i) {
+        const bool atFace = m_options.mixedBeam != MixedBeam::FaceOffset &&
+                            m_options.mixedBeam != MixedBeam::CenterLine;
+        for (size_t i = first; i < first + MIXED_GROUP_TERMS; ++i) {
             const MixedTerm& term = m_mixedTerms[i];
-            int64_t projection = 0;
-            for (uint32_t c = 0; c < SUPPORT_COMPONENTS; ++c) {
-                projection += term.gradientLow[c] * CellValue(term.low, c);
-                projection += term.gradientHigh[c] * CellValue(term.high, c);
-            }
-
-            const int64_t force = Flow(term.coefficient, projection);
+            const int64_t force = TermForce(term);
             forces.axialMn += force * term.gradientHigh[along];
             forces.shearMn += force * term.gradientHigh[across];
-            forces.energyPj += SpringWork(force, projection);
-            if (i == first)
-                continue;
+            forces.energyPj += SpringWork(force, TermProjection(term));
+            if (i == first || (i == first + 1 && atFace))
+                continue;  // 軸の項・面の点で運ぶずれの項(面の点で回りが 0)は曲げの力の回りに入らない
 
             turnLow += force * term.gradientLow[SUPPORT_TURN];
             turnHigh += force * term.gradientHigh[SUPPORT_TURN];
+        }
+
+        const MixedGroup& group = m_mixedGroups[first / MIXED_GROUP_TERMS];
+        if (group.pair != NO_CELL) {
+            const bool fineHigh = m_cellFine[m_mixedTerms[first].high] != 0;
+            const MixedPair& pair = m_mixedPairs[group.pair];
+
+            // ずれの負の項(細かいセルが受ける力 → 面の力。細かいセルが −軸の側なら逆)
+            const MixedTerm& term = m_pairTerms[pair.pairTerm];
+            const int64_t force = TermForce(term);
+            const Gradient& gradient = group.upper ? term.gradientHigh : term.gradientLow;
+            const int64_t toFace = fineHigh ? 1 : -1;
+            forces.axialMn += toFace * force * gradient[along];
+            forces.shearMn += toFace * force * gradient[across];
+            forces.energyPj -= SpringWork(force, TermProjection(term)) / 2;  // 負の項のエネルギーを 2 つの面で半分ずつ
+
+            // 伸びの 3 つの節の項(nodes の 0 = 粗いセル・1 = 自分の細かいセル)
+            const TripleTerm& triple = m_tripleTerms[pair.firstTriple + (group.upper ? 1 : 0)];
+            const int64_t projection = TripleProjection(triple);
+            const int64_t tripleForce = Flow(triple.coefficient, projection);
+            const Gradient& highGradient = fineHigh ? triple.gradients[1] : triple.gradients[0];
+            forces.axialMn += tripleForce * highGradient[along];
+            forces.shearMn += tripleForce * highGradient[across];
+            forces.energyPj += SpringWork(tripleForce, projection);
         }
 
         const int64_t bend = 2 * (turnHigh - turnLow);
@@ -1046,10 +1280,19 @@ namespace bicameral::sim {
             net[brace.low] -= force;
         }
 
-        for (const MixedTerm& term : m_mixedTerms) {
-            const int64_t force = UpForceOnTerm(term);
-            net[term.high] += force;
-            net[term.low] -= force;
+        for (const std::vector<MixedTerm>* terms : {&m_mixedTerms, &m_pairTerms}) {
+            for (const MixedTerm& term : *terms) {
+                const int64_t force = UpForceOnTerm(term);
+                net[term.high] += force;
+                net[term.low] -= force;
+            }
+        }
+
+        // 3 つの節の項: 節 i へ −c p g_i,上(並進で変わらない項なので 3 つの和は 0)
+        for (const TripleTerm& term : m_tripleTerms) {
+            const int64_t force = Flow(term.coefficient, TripleProjection(term));
+            for (uint32_t i = 0; i < 3; ++i)
+                net[term.nodes[i]] -= force * term.gradients[i][SUPPORT_UP];
         }
 
         for (const Clamp& clamp : m_clamps) {

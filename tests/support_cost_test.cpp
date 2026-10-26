@@ -10,6 +10,7 @@
 // 2 本目(粗さで閉じる): 遠くを値で固定せず、粗いセル(2 倍)のまま一緒に解く(違う大きさのセル T-1120・ADR-0470。1 段だけ)。
 //   穴から「穴の長い辺 × 倍率」の内だけを細かく、閉じずに解き、全部細かい塊の答えと比べる(掘ったことによる変化の差)。
 // 引数: [--measure](全部の場面。既定は ctest 用の 32 × 16 m・0.5 m だけ)[--coarse](2 本目の全部の場面)[--ticks n](掘った後の刻み。既定 600)
+//   [--beam n](違う大きさの面の形 sim::MixedBeam の番号。既定 0 = ④ 対の面。1 = ③ 面の点のばね・2 = ③'・3 = ②・4 = ①。T-1191 の比べ)
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -685,7 +686,8 @@ namespace {
     constexpr std::array<uint32_t, 2> COARSE_MULTIPLIERS = {2, 4};
 
     // 1 つの場面: 全部細かい塊(閉じない)と、粗さで閉じた塊(倍率 2・4)
-    CoarseResult CoarseCase(const Case& c, uint32_t ticks, bool bitCheck, size_t multiplierCount) {
+    CoarseResult CoarseCase(const Case& c, uint32_t ticks, bool bitCheck, size_t multiplierCount, sim::MixedBeam beam) {
+        const sim::SupportOptions mixedOptions{.mixedBeam = beam};
         const Geometry g = GeometryOf(c);
         const std::string name = CaseName(c);
         const double weightMn = CellWeightMn(c);
@@ -711,7 +713,7 @@ namespace {
         const double mixedFineWeightMn = 2.0 * weightMn;
         for (size_t m = 0; m < multiplierCount; ++m) {
             const uint64_t fineLengthMm = COARSE_MULTIPLIERS[m] * std::max(c.holeWidthMm, c.holeHeightMm);
-            sim::SupportLaw before(MixedBlock(c, g, fineLengthMm, false), {});
+            sim::SupportLaw before(MixedBlock(c, g, fineLengthMm, false), mixedOptions);
             const uint32_t settle = Settle(before, mixedFineWeightMn / 10000.0);
             Expect(settle != 0,
                    std::format("混ざる塊の掘る前の釣り合いに着く: {} 倍率 {}", name, COARSE_MULTIPLIERS[m]));
@@ -720,7 +722,7 @@ namespace {
 
             const sim::SupportScene dugScene = MixedBlock(c, g, fineLengthMm, true);
             const Clock::time_point buildStart = Clock::now();
-            sim::SupportLaw after(dugScene, {});
+            sim::SupportLaw after(dugScene, mixedOptions);
             after.CarryFrom(before);
             const double buildMs = MsSince(buildStart);
             const Run run = StepDug(after, g, true, ticks);
@@ -766,7 +768,11 @@ namespace {
             if (!bitCheck)
                 continue;
 
-            sim::SupportLaw again(dugScene, {});
+            // 移り目の自重の応力(T-1191): 掘った後の値の差 ÷ 縁の力の最大 ≤ 2 %(細かい面・違う大きさの面)
+            Expect(error.fineEdgeOfStress <= 0.02 && error.mixedEdgeOfStress <= 0.02,
+                   std::format("粗さで閉じた塊の移り目の縁の力の差 ≤ 2 %: {} 倍率 {}", name, COARSE_MULTIPLIERS[m]));
+
+            sim::SupportLaw again(dugScene, mixedOptions);
             again.CarryFrom(before);
             const Run second = StepDug(again, g, true, ticks);
             Expect(second.hashes == run.hashes, "粗さで閉じた解の 2 回の実行でハッシュ一致");
@@ -777,11 +783,11 @@ namespace {
         return result;
     }
 
-    void RunCoarse(uint32_t ticks) {
+    void RunCoarse(uint32_t ticks, sim::MixedBeam beam) {
         for (const auto& [holeWidth, holeHeight] : {std::pair{1000ull, 1000ull}, std::pair{4000ull, 2000ull}}) {
-            const CoarseResult small = CoarseCase({32000, 16000, 500, holeWidth, holeHeight}, ticks, false, 2);
-            const CoarseResult large = CoarseCase({64000, 32000, 500, holeWidth, holeHeight}, ticks, false, 2);
-            const CoarseResult fine = CoarseCase({32000, 16000, 250, holeWidth, holeHeight}, ticks, false, 2);
+            const CoarseResult small = CoarseCase({32000, 16000, 500, holeWidth, holeHeight}, ticks, false, 2, beam);
+            const CoarseResult large = CoarseCase({64000, 32000, 500, holeWidth, holeHeight}, ticks, false, 2, beam);
+            const CoarseResult fine = CoarseCase({32000, 16000, 250, holeWidth, holeHeight}, ticks, false, 2, beam);
             Log(Channel::Sim, Level::Info,
                 "穴 {}×{} m 全部細かい: 掘った 1 回の費用 64×32 ÷ 32×16 = {:.3f}・0.25 ÷ 0.5 m = {:.3f}",
                 (double)holeWidth / 1000.0, (double)holeHeight / 1000.0, Ratio(large.fullCost, small.fullCost),
@@ -805,6 +811,7 @@ namespace {
         bool measure = false;
         bool coarse = false;
         uint32_t ticks = 600;
+        sim::MixedBeam beam = sim::MixedBeam::FacePair;
         for (size_t i = 1; i < arguments.size(); ++i) {
             const std::string_view name = arguments[i];
             if (name == "--measure")
@@ -813,13 +820,15 @@ namespace {
                 coarse = true;
             else if (name == "--ticks" && i + 1 < arguments.size())
                 ticks = (uint32_t)std::atoi(arguments[++i]);
+            else if (name == "--beam" && i + 1 < arguments.size())
+                beam = (sim::MixedBeam)std::atoi(arguments[++i]);
         }
 
         if (coarse) {
-            RunCoarse(ticks);
+            RunCoarse(ticks, beam);
         } else if (!measure) {
             (void)TestCase({32000, 16000, 500, 1000, 1000}, ticks, true);
-            (void)CoarseCase({32000, 16000, 500, 1000, 1000}, ticks, true, 1);
+            (void)CoarseCase({32000, 16000, 500, 1000, 1000}, ticks, true, 1, beam);
         } else {
             for (const auto& [holeWidth, holeHeight] : {std::pair{1000ull, 1000ull}, std::pair{4000ull, 2000ull}}) {
                 const CaseResult small = TestCase({32000, 16000, 500, holeWidth, holeHeight}, ticks, true);
