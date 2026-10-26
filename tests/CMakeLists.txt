@@ -234,6 +234,9 @@ set_tests_properties(probe_phase PROPERTIES TIMEOUT 1800)
 add_test(NAME probe_phase_porous_stone COMMAND probe_phase_test --stone-without-density)  # 場所を取らない石へ水が染み込む時の保存(T-0654)
 set_tests_properties(probe_phase_porous_stone PROPERTIES TIMEOUT 1800)
 # 1 セルの体積を相で分け合う(T-0593・T-0612・ADR-0268): 砂の壁が気体と水を塞ぐ・少しなら通る・燃えて減ると通る・水が空気を押し出す
+add_executable(phase_layer_test phase_layer_test.cpp)  # 凝縮相と気体が混ざるセルの 2 つのエネルギー(D-665・ADR-0486。T-1160。CPU だけ)
+target_link_libraries(phase_layer_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)
+add_test(NAME phase_layer COMMAND phase_layer_test)
 add_executable(cell_volume_test cell_volume_test.cpp)
 target_precompile_headers(cell_volume_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
 target_link_libraries(cell_volume_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)
