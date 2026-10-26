@@ -147,10 +147,26 @@ namespace bicameral::sim {
             return SfMeanValue(sum);
         }
 
+        // 親の欄 parent の内訳の欄(T-1177。無ければ MULTIRES_NO_FIELD。親 1 つに内訳は 1 つ)
+        uint32_t BreakdownOf(const MultiresNest& nest, uint32_t parent) {
+            for (uint32_t f = 0; f < nest.fields.size(); ++f) {
+                if (SfBreakdown(nest.fields[f].desc) && nest.fields[f].desc.parent == parent)
+                    return f;
+            }
+
+            return MULTIRES_NO_FIELD;
+        }
+
     }  // namespace
 
     uint32_t RegisterNestField(MultiresNest& nest, std::string name, const SfFieldDesc& desc) {
         if (name.empty() || !SfDescValid(desc) || FindNestField(nest, name) != MULTIRES_NO_FIELD)
+            return MULTIRES_NO_FIELD;
+
+        // 内訳(T-1177): 親は先に登録した保存量の欄(置き場・値の数が同じ)・親 1 つに内訳は 1 つ
+        if (SfBreakdown(desc) &&
+            (desc.parent >= nest.fields.size() || !SfBreakdownPairValid(desc, nest.fields[desc.parent].desc) ||
+             BreakdownOf(nest, desc.parent) != MULTIRES_NO_FIELD))
             return MULTIRES_NO_FIELD;
 
         // 根を置く前だけ(置いた後に足すと、使っている頁の欄の値が決まらない)
@@ -297,6 +313,31 @@ namespace bicameral::sim {
         return memory;
     }
 
+    uint64_t CountBreakdownMisfits(const MultiresNest& nest) {
+        uint64_t misfits = 0;
+        for (uint32_t f = 0; f < nest.fields.size(); ++f) {
+            const SfFieldDesc& desc = nest.fields[f].desc;
+            if (!SfBreakdown(desc))
+                continue;
+
+            for (uint32_t slot = 0; slot < nest.blocks.size(); ++slot) {
+                const MrBlock& block = nest.blocks[slot];
+                if (block.kind == MR_BLOCK_UNUSED)
+                    continue;
+
+                const uint32_t cells = MrIsUniform(block) ? 1u : MR_BLOCK_CELLS;
+                for (uint32_t index = 0; index < cells; ++index) {
+                    for (uint32_t c = 0; c < desc.components; ++c) {
+                        const int64_t parent = LoadNestField(nest, desc.parent, slot, index, c);
+                        misfits += SfBreakdownFits(parent, LoadNestField(nest, f, slot, index, c)) ? 0u : 1u;
+                    }
+                }
+            }
+        }
+
+        return misfits;
+    }
+
     // --- 木の操作が呼ぶ ---
     namespace nest_fields {
 
@@ -379,6 +420,11 @@ namespace bicameral::sim {
                         if (LoadPage(field.store, block.page, index, c) != expected)
                             return false;
                     }
+
+                    // 内訳(T-1177): 残り(親 − 内訳。舞う粒)があれば起きている。止まれる側(層)だけなら畳める
+                    if (SfBreakdown(field.desc) &&
+                        SfBreakdownKeepsAwake(FoldValue(nest, nest.fields[field.desc.parent], slot, c), value))
+                        return false;
                 }
             }
 
@@ -425,36 +471,68 @@ namespace bicameral::sim {
             return placement;
         }
 
-        // 置かれ方の印の欄を、親の八分の一のセルごとに重みで子へ配る(重みの和が 0・重みの無いセルは子は親と同じ数)
+        // 親のセルの値 1 つを子 8 つへ重みで配る(子の番号は MrChildCell の j)。重みの和が 0・口が重みを返さないセル・
+        // SAME の規則なら子は親と同じ数。残りは重みのある最後の子(重みの無い子に端数を入れない)
+        std::array<int64_t, 8> PlaceChildValues(int64_t value, uint32_t rule, const NestChildWeights& weights,
+                                                bool placed) {
+            std::array<int64_t, 8> children{};
+            const std::array<uint64_t, 8>& weight = rule == SF_REFINE_CONDENSED ? weights.condensed : weights.open;
+            uint64_t weightSum = 0;
+            uint32_t last = 7;
+            for (uint32_t j = 0; j < 8; ++j) {
+                weightSum += weight[j];
+                last = weight[j] > 0 ? j : last;
+            }
+
+            if (!placed || rule == SF_REFINE_SAME || weightSum == 0) {
+                children.fill(SfRefineValue(value));
+                return children;
+            }
+
+            int64_t given = 0;
+            for (uint32_t j = 0; j < 8; ++j) {
+                if (j == last)
+                    continue;
+
+                children[j] = SfPlacedValue(value, weight[j], weightSum, 8);
+                given += children[j];
+            }
+
+            children[last] = SfPlacedLastValue(value, given, 8);
+
+            return children;
+        }
+
+        // 内訳を持つ親の欄の配り(T-1177): 子の親 = 内訳を内訳の印で配った値 + 残り(親 − 内訳)を親の印で配った値
+        struct BreakdownSource {
+            const MultiresFieldStore* store = nullptr;  // 内訳の欄(無ければ nullptr)
+            uint32_t rule = SF_REFINE_SAME;             // 内訳の配り方
+        };
+
+        // 置かれ方の印の欄(と内訳を持つ親の欄)を、親の八分の一のセルごとに重みで子へ配る
         void RefinePlaced(MultiresFieldStore& store, uint32_t components, uint32_t rule, uint32_t parentPage,
-                          uint32_t octant, uint32_t childPage, const OctantPlacement& placement) {
+                          uint32_t octant, uint32_t childPage, const OctantPlacement& placement,
+                          const BreakdownSource& breakdown) {
             for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
                 const uint32_t parentCell = MrOctantCell(octant, local);
                 const NestChildWeights& weights = placement.weights[local];
-                const std::array<uint64_t, 8>& weight = rule == SF_REFINE_CONDENSED ? weights.condensed : weights.open;
-                uint64_t weightSum = 0;
-                uint32_t last = 7;  // 残りを持つ子 = 重みのある最後の子(重みの無い子に端数を入れない)
-                for (uint32_t j = 0; j < 8; ++j) {
-                    weightSum += weight[j];
-                    last = weight[j] > 0 ? j : last;
-                }
-
-                const bool same = !placement.placed[local] || weightSum == 0;
+                const bool placed = placement.placed[local];
                 for (uint32_t c = 0; c < components; ++c) {
                     const int64_t value = LoadPage(store, parentPage, parentCell, c);
-                    int64_t given = 0;
-                    for (uint32_t j = 0; j < 8; ++j) {
-                        if (!same && j == last)
-                            continue;
-
-                        const int64_t child = same ? SfRefineValue(value)
-                                                   : SfPlacedValue(value, weight[j], weightSum, 8);
-                        given += child;
-                        StorePage(store, childPage, MrChildCell(local, j), c, child);
+                    std::array<int64_t, 8> children{};
+                    if (breakdown.store == nullptr) {
+                        children = PlaceChildValues(value, rule, weights, placed);
+                    } else {
+                        const int64_t part = LoadPage(*breakdown.store, parentPage, parentCell, c);
+                        FX_ASSERT(SfBreakdownFits(value, part));
+                        const std::array<int64_t, 8> parts = PlaceChildValues(part, breakdown.rule, weights, placed);
+                        const std::array<int64_t, 8> rest = PlaceChildValues(value - part, rule, weights, placed);
+                        for (uint32_t j = 0; j < 8; ++j)
+                            children[j] = parts[j] + rest[j];
                     }
 
-                    if (!same)
-                        StorePage(store, childPage, MrChildCell(local, last), c, SfPlacedLastValue(value, given, 8));
+                    for (uint32_t j = 0; j < 8; ++j)
+                        StorePage(store, childPage, MrChildCell(local, j), c, children[j]);
                 }
             }
         }
@@ -489,8 +567,14 @@ namespace bicameral::sim {
 
                 StartPage(store, childPage);
                 const uint32_t rule = SfRefinePlacement(field.desc);
-                if (placement.any && rule != SF_REFINE_SAME) {
-                    RefinePlaced(store, components, rule, parent.page, octant, childPage, placement);
+                const uint32_t breakdownField = BreakdownOf(nest, (uint32_t)(&field - nest.fields.data()));
+                BreakdownSource breakdown;
+                if (breakdownField != MULTIRES_NO_FIELD)
+                    breakdown = {.store = &nest.fields[breakdownField].store,
+                                 .rule = SfRefinePlacement(nest.fields[breakdownField].desc)};
+
+                if (placement.any && (rule != SF_REFINE_SAME || breakdown.rule != SF_REFINE_SAME)) {
+                    RefinePlaced(store, components, rule, parent.page, octant, childPage, placement, breakdown);
                 } else {
                     for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
                         const uint32_t parentCell = MrParentCellOfChild(octant, index);

@@ -233,6 +233,8 @@ namespace bicameral::sim::case_b {
         uint64_t surfaceFaces = 0;       // そのうち層の面(境の剪断)
         uint64_t mergedFluidFaces = 0;   // 気体と液体があるが 1 つの速さで解いた面(主の流体が片側に無い)
         uint64_t stoppedFluidFaces = 0;  // 主でない流体が、その相の無いセルから出る向きなので止めた面
+        uint64_t stoppedSuspendedFaces =
+            0;  // 層と舞う粒を分けた時、その置き場の粒の無いセルから出る向きなので止めた面(T-1167)
 
         // --- 粒の降伏(R3・T-0996)---
         uint64_t yieldMovingPairs = 0;       // 降伏して動いた面の柱(刻みの累計)

@@ -607,12 +607,13 @@ namespace {
             std::printf(
                 "    2 つの状態(T-1136): 舞う粒 → 層 %llu mg・層 → 舞う粒 %llu mg・運ぶ段で層 → 舞う粒 %llu mg・"
                 "舞う粒の面 %llu・表面へ置いた層 %llu mg(運ぶ段の層 → 舞う粒のうち上へ出た %llu "
-                "mg・表面の空きが足りない %llu mg)(累計)\n",
+                "mg・表面の空きが足りない %llu mg)・置き場の粒の無いセルから出る向きで止めた面 %llu(累計)\n",
                 (unsigned long long)run.stats.settledGrainMg, (unsigned long long)run.stats.liftedGrainMg,
                 (unsigned long long)run.stats.convertedGrainMg, (unsigned long long)run.stats.suspendedFaces,
                 (unsigned long long)run.stats.surfacePlacedGrainMg,
                 (unsigned long long)run.stats.convertedUpwardGrainMg,
-                (unsigned long long)run.stats.convertedBesideSurfaceGrainMg);
+                (unsigned long long)run.stats.convertedBesideSurfaceGrainMg,
+                (unsigned long long)run.stats.stoppedSuspendedFaces);
     }
 
     // 1 mm/s 以上で動く粒の質量の割合(‰。面の粒の質量で重み)

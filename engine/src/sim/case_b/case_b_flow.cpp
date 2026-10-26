@@ -1254,6 +1254,14 @@ namespace bicameral::sim::case_b {
 
             const int64_t momentum = SuspendedMomentum(box, face);
             const uint32_t upwind = momentum >= 0 ? face.left : face.right;
+            if (momentum != 0 && runtime.scratch.grains[upwind].suspendedMassMg <= 0) {
+                // 舞う粒の無いセルから出る向きの運動量は持たない(帳簿 Wall。主でない流体の StopEmptyUpwind と同じ規則)。
+                // 残すと、動かせない数 mg の雲の上の面に重さだけが g t で溜まり、真空の 2 m で 582 m/s になった(T-1167)
+                StopSuspended(box, face);
+                ++runtime.stats->stoppedSuspendedFaces;
+                return;
+            }
+
             face.suspendedFractionQ32 = PhaseFractionQ32(box, face.suspendedMassMg, momentum,
                                                          runtime.scratch.grains[upwind].suspendedMassMg);
             const GrainCell& target = runtime.scratch.grains[face.suspendedFractionQ32 > 0 ? face.right : face.left];
@@ -1368,6 +1376,14 @@ namespace bicameral::sim::case_b {
 
             const int64_t grainMomentum = GrainMomentum(box, face);
             const uint32_t upwind = grainMomentum >= 0 ? face.left : face.right;
+            if (runtime.scratch.splitGrain && grainMomentum != 0 && LayerArmMassMg(runtime.scratch, upwind) <= 0) {
+                // 層と舞う粒を分けた時は、層の置き場も舞う粒と同じ規則(層の無いセルから出る向きの運動量は持たない。T-1167)。
+                // 層の置き場は面の質量が両側の平均の切り上げなので、数 mg の層の上の面に重さだけが溜まり、真空で 582 m/s になった
+                StopGrain(box, face);
+                ++runtime.stats->stoppedSuspendedFaces;
+                return;
+            }
+
             face.grainFractionQ32 = GrainFractionQ32(box, face, grainMomentum, LayerArmMassMg(runtime.scratch, upwind));
             const GrainCell& target = runtime.scratch.grains[face.grainFractionQ32 > 0 ? face.right : face.left];
             if (target.noRoom && face.grainFractionQ32 != 0) {
