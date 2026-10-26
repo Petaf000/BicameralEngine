@@ -452,6 +452,9 @@ add_test(NAME field_storage COMMAND field_storage_test)
 add_executable(placement_refine_test placement_refine_test.cpp)  # 細かくする時の置かれ方で配る・wt3 の T-1106 と同じ答え(T-1157)
 target_link_libraries(placement_refine_test PRIVATE bicameral_multires bicameral_core)
 add_test(NAME placement_refine COMMAND placement_refine_test)
+add_executable(tree_refine_placement_test tree_refine_placement_test.cpp)  # 木を細かくする時のセルの中身を置かれ方で(T-1176)
+target_link_libraries(tree_refine_placement_test PRIVATE bicameral_multires bicameral_core)
+add_test(NAME tree_refine_placement COMMAND tree_refine_placement_test)
 # 研究 R-T2(T-0856): 刻みの長さを状態が変わる速さで選ぶ CPU の試作(捨てる試作なのでエンジンのライブラリに入れず、試験に直接入れる)
 add_executable(time_step_lab_test time_step_lab_test.cpp ${PROJECT_SOURCE_DIR}/engine/src/sim/time_step_lab.cpp)
 target_link_libraries(time_step_lab_test PRIVATE bicameral_fixed bicameral_core)
@@ -1242,6 +1245,7 @@ foreach(_name IN ITEMS
     gpu_probe_trace_test gpu_probe_rewind_test gpu_world_copy_test gpu_probe_physics_test gpu_probe_fire_test
     gpu_conduct_bench gpu_implicit_box_bench gpu_place_bench blank_world_test gpu_probe_blank_test gpu_probe_gas_test
     gpu_probe_liquid_test world_layout_test play_metric_test
-    gpu_play_metric_test environment_package_test multires_graded_test placement_refine_test)
+    gpu_play_metric_test environment_package_test multires_graded_test placement_refine_test
+    tree_refine_placement_test)
   target_link_libraries(${_name} PRIVATE bicameral_test_reaction_table)
 endforeach()

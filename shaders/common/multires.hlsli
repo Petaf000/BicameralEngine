@@ -41,6 +41,9 @@ FX_CONST uint32_t MR_BLOCK_EDGE = 8;
 FX_CONST uint32_t MR_BLOCK_CELLS = 512;
 FX_CONST uint32_t MR_OCTANT_EDGE = 4;  // 子ブロックが覆う親のセルの一辺
 FX_CONST uint32_t MR_OCTANT_CELLS = 64;
+// レベル 0 のセルの体積(mm³。0.5 m 角。cell_view.hlsli の CV_CELL_VOLUME_LEVEL_UNITS〔pL〕と同じ)。どのレベルでも「数の空間」での
+// セルの器はこの数(量の単位が 8^-k なので)。細かくする時の置かれ方が読む(T-1176)
+FX_CONST uint64_t MR_CELL_VOLUME_MM3 = 125000000;
 FX_CONST uint32_t MR_CHILDREN_PER_CELL = 8;  // 親のセル 1 つ = 子のセル 2³
 FX_CONST uint32_t MR_LEVEL_SHIFT = 3;        // 1 段で単位が 1/8 = 3bit
 FX_CONST uint32_t MR_NO_BLOCK = 0xFFFFFFFFu;

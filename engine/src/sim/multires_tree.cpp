@@ -370,6 +370,10 @@ namespace bicameral::sim {
                     if (childFraction != MR_NO_FRACTION)
                         SetFraction(nest, childFraction, index, FractionAt(nest, parent.fraction, parentCell));
                 }
+
+                // --- 寄せるセルの中身は置かれ方で(T-1176。端数は上で写した SAME のまま)---
+                if (!uniform)
+                    nest_detail::PlaceRefineOctantCells(nest, parentSlot, octant, childPage);
             }
 
             // --- 登録した欄: 子は親と同じ数・頁を持つ親の覆われたセルは 0(T-0711)---

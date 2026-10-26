@@ -14,6 +14,7 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -24,6 +25,7 @@
 #include "common/world_ledger.hlsli"
 #include "sim/implicit_conduction.h"
 #include "sim/multires_wide_cell.h"
+#include "sim/placement_refine.h"
 #include "sim/reaction_table.h"
 
 namespace bicameral::sim {
@@ -178,6 +180,13 @@ namespace bicameral::sim {
         std::function<bool(const MultiresNest& nest, uint32_t parentSlot, uint32_t parentCell,
                            NestChildWeights& weights)>
             refinePlacement;
+
+        // --- 細かくする時のセルの中身(成分・エネルギー)を置かれ方で(T-1176。D-664・D-674。状態に入らない)。物質の表(相の印と
+        //     モル体積)を持てば、寄せるセルの子は置かれ方で配る(EnableRefineCellPlacement)。空なら今と同じ SAME。
+        //     GPU の RefineLevel はまだ SAME なので、GPU と比べる世界では空のまま(T-1188)---
+        struct RefineCells {
+            std::vector<reaction::RxSpecies> species;
+        } refineCells;
 
         // --- 活性の種(T-0100)。次の StepActive で刻むブロックの元(世界の枠ごとに 0 / 1)。
         //     GPU は順の決まらない一覧で持つので、集合として比べる(状態の要約に入れない)---
@@ -351,6 +360,16 @@ namespace bicameral::sim {
 
     // 使っている世界の頁の数(観察の枠の頁は数えない)
     [[nodiscard]] uint32_t UsedWorldPages(const MultiresNest& nest);
+
+    // --- 細かくする時のセルの中身の置かれ方(T-1176。engine/src/sim/multires_refine_cells.cpp)---
+
+    // 物質の表を持たせ、細かくする時のセルの中身と置かれ方の印の欄(refinePlacement)を同じ置かれ方で配るようにする
+    void EnableRefineCellPlacement(MultiresNest& nest, const BakedReactionTable& table);
+
+    // 頁を持つ親のセル 1 つの置かれ方(数の空間。子の器 = MR_CELL_VOLUME_MM3・量 = 親の数 × 8・並びは親の成分の順)。
+    // 寄せないセル・表が無い・溢れを使う世界・一様な親なら無し(子は親と同じ数)
+    [[nodiscard]] std::optional<PlacedChildren> PlaceTreeCell(const MultiresNest& nest, uint32_t parentSlot,
+                                                              uint32_t parentCell);
 
     // --- 世界の木 ---
 

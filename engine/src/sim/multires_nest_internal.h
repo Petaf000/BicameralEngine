@@ -246,4 +246,8 @@ namespace bicameral::sim::nest_detail {
         nest.blocks[slot].busyTick = multires::MR_BUSY_POKED;
     }
 
+    // 細かくした子の頁へ写した親の八分の一のセルを、寄せるセルだけ置かれ方で配り直す(T-1176。multires_refine_cells.cpp)。
+    // 写した後・欄を配る前・親を覆う前に呼ぶ
+    void PlaceRefineOctantCells(MultiresNest& nest, uint32_t parentSlot, uint32_t octant, uint32_t childPage);
+
 }  // namespace bicameral::sim::nest_detail
