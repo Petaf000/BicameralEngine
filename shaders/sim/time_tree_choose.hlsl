@@ -11,8 +11,9 @@
 // 同じ最大の不動点に落ちる(CPU の回す順とビット一致)。掃く回は前の回に変わった単位が無ければ何もしない(g_ttcCounters)。
 // ルートの SRV/UAV に GetDimensions を使わない(大きさはルート定数)。浮動小数点は使わない(04 §4)。
 // 結び付け(gpu_time_tree_choose.cpp の ROOT_LAYOUT と同じ順)
-RWStructuredBuffer<uint32_t> g_ttcCaps : register(u0);      // 単位ごと: 窓の上限
-RWStructuredBuffer<uint32_t> g_ttcState : register(u1);     // 単位ごと: 今の e(下 8 bit)・歩の途中のまま・打ち切った
+RWStructuredBuffer<uint32_t> g_ttcCaps : register(u0);  // 単位ごと: 窓の上限
+globallycoherent RWStructuredBuffer<uint32_t> g_ttcState
+    : register(u1);                                         // 単位ごと: 今の e(下 8 bit)・歩の途中のまま・打ち切った
 RWStructuredBuffer<uint32_t> g_ttcAfter : register(u2);     // 2 単位で 1 語: 出来事の後の詰めた記録
 RWStructuredBuffer<uint32_t> g_ttcCounters : register(u3);  // 掃く回ごと: 変わった単位の数
 RWStructuredBuffer<uint32_t> g_ttcWindowA : register(u4);   // 格子のセルごと(行き来する 2 つ)
@@ -35,7 +36,7 @@ cbuffer TimeTreeChooseConstants : register(b0) {
 };
 
 static const uint32_t TTC_NO_UNIT = 0xFFFFFFFFu;
-static const uint32_t TTC_MAX_PASSES = 32;  // gpu_time_tree_choose.h の MAX_SWEEPS
+static const uint32_t TTC_MAX_PASSES = 128;  // gpu_time_tree_choose.h の MAX_SWEEPS
 
 // --- 詰めた記録(time_step_tree.h の TIME_TREE_RECORD_*)---
 static const uint32_t TTC_RECORD_EXPONENT_MASK = 0xFu;
@@ -125,14 +126,14 @@ uint32_t TtcWindowRead(uint32_t cell) {
     InterlockedMin(g_ttcCaps[unit], g_ttcWindowB[cell], previous);
 }
 
-// --- 単位: 窓の上限と隣の差 1 段で縮める(1 回)---
-[numthreads(64, 1, 1)] void TtcSweep(uint32_t unit : SV_DispatchThreadID) {
-    if (unit >= g_ttcUnits)
-        return;
+// --- 単位: 窓の上限と隣の差 1 段で縮める ---
+// 1 回の Dispatch の中でも、隣の新しい値が見えれば続けて縮める(TTC_INNER_SWEEPS 回まで。g_ttcState は globallycoherent)。
+// 打ち切った単位は奇数の刻み(cap 0)で e 0 になり、隣の歩の途中の単位を次々に打ち切る(火を付けた刻みで木の半分)ので、
+// 1 回に 1 隣ずつでは木の差し渡しの回数が要る。値は減るだけなので、途中で古い値を読んでも着く不動点は同じ
+static const uint32_t TTC_INNER_SWEEPS = 8;
 
-    if (g_ttcPass > 0 && g_ttcCounters[g_ttcPass - 1] == 0)
-        return;  // 前の回に変わった単位が無い = もう不動点
-
+// 上限まで縮める。変えたら true
+bool TtcSweepOnce(uint32_t unit) {
     uint32_t limit = g_ttcCaps[unit];
     const uint32_t end = g_ttcNeighborStarts[unit + 1];
     for (uint32_t k = g_ttcNeighborStarts[unit]; k < end; ++k)
@@ -141,7 +142,7 @@ uint32_t TtcWindowRead(uint32_t cell) {
     const uint32_t state = g_ttcState[unit];
     const uint32_t exponent = state & TTC_STATE_EXPONENT_MASK;
     if (exponent <= limit)
-        return;
+        return false;
 
     uint32_t next = limit;
     uint32_t flags = state & TTC_STATE_TRUNCATED;
@@ -154,6 +155,29 @@ uint32_t TtcWindowRead(uint32_t cell) {
     }
 
     g_ttcState[unit] = next | flags;
+
+    return true;
+}
+
+[numthreads(64, 1, 1)] void TtcSweep(uint32_t unit : SV_DispatchThreadID) {
+    if (unit >= g_ttcUnits)
+        return;
+
+    if (g_ttcPass > 0 && g_ttcCounters[g_ttcPass - 1] == 0)
+        return;  // 前の回に変わった単位が無い = もう不動点
+
+    bool changed = false;
+    for (uint32_t inner = 0; inner < TTC_INNER_SWEEPS; ++inner) {
+        if (!TtcSweepOnce(unit))
+            break;
+
+        changed = true;
+        DeviceMemoryBarrier();
+    }
+
+    if (!changed)
+        return;
+
     uint32_t previous = 0;
     InterlockedAdd(g_ttcCounters[g_ttcPass], 1u, previous);
 }

@@ -5,7 +5,7 @@
 // 1. ビット一致: 出来事ごとに GPU の窓の上限・選んだ e・後の詰めた記録が CPU と同じか。掃く回が不動点に着いたか(MAX_SWEEPS の内)。
 // 2. 費用(--measure): 出来事ごとに 1 本のリストへ続けて積んだ時間(GPU の時計が高いまま = 早送りの形)の平均・最大と、
 //    1 出来事を 4 回続けて積んだ最小。--events-total n で火事全体(n 出来事)の待ちへ伸ばす。
-// 引数: --choices <ファイル> [--measure] [--events-total n] と GPU の試験の共通の引数(--warp・--queue・--no-gbv)。
+// 引数: --choices <ファイル> [--measure] [--events-total n] [--no-predicate(残りの掃く回も全部積む)] と GPU の試験の共通の引数(--warp・--queue・--no-gbv)。
 #include <algorithm>
 #include <cstdint>
 #include <expected>
@@ -207,6 +207,7 @@ namespace {
         std::string path;
         bool measure = false;
         uint64_t eventsTotal = 0;
+        bool predicate = true;
         std::vector<char*> rest = {arguments[0]};
         for (size_t index = 1; index < arguments.size(); ++index) {
             const std::string_view argument = arguments[index];
@@ -214,6 +215,8 @@ namespace {
                 path = arguments[++index];
             else if (argument == "--measure")
                 measure = true;
+            else if (argument == "--no-predicate")
+                predicate = false;
             else if (argument == "--events-total" && index + 1 < arguments.size())
                 eventsTotal = std::stoull(arguments[++index]);
             else
@@ -252,7 +255,7 @@ namespace {
             return 1;
         }
 
-        auto gpu = sim::GpuTimeTreeChoose::Create(device->Get(), file->tables, befores);
+        auto gpu = sim::GpuTimeTreeChoose::Create(device->Get(), file->tables, befores, predicate);
         if (!gpu) {
             Log(Channel::Gpu, Level::Error, "gpu_time_step_choose_test: FAILED({})", gpu.error());
             return 1;

@@ -69,7 +69,8 @@ namespace bicameral::sim {
 
     std::expected<GpuTimeTreeChoose, std::string> GpuTimeTreeChoose::Create(ID3D12Device5* device,
                                                                             const TimeTreeChooseTables& tables,
-                                                                            std::span<const uint16_t> befores) {
+                                                                            std::span<const uint16_t> befores,
+                                                                            bool predicate) {
         if (!tables.supported || tables.units == 0 || befores.size() % tables.units != 0)
             return std::unexpected(
                 "刻みを選ぶ段の GPU 版の範囲の外(窓・隣の差 1 段だけ)か、記録の数が単位の倍数でない");
@@ -79,6 +80,7 @@ namespace bicameral::sim {
         result.m_gridCells = tables.gridSize[0] * tables.gridSize[1] * tables.gridSize[2];
         result.m_wordsPerEvent = (tables.units + 1) / 2;
         result.m_events = static_cast<uint32_t>(befores.size() / tables.units);
+        result.m_usePredicate = predicate;
         result.m_shape.units = tables.units;
         result.m_shape.gridSize = tables.gridSize;
         result.m_shape.radius = tables.radius;
@@ -123,6 +125,7 @@ namespace bicameral::sim {
         result.m_state = gpu::CreateBuffer(device, unitBytes, UAV);
         result.m_after = gpu::CreateBuffer(device, afterBytes, UAV);
         result.m_counters = gpu::CreateBuffer(device, counterBytes, UAV);
+        result.m_predicate = gpu::CreateBuffer(device, sizeof(uint64_t), UAV);
         result.m_windowA = gpu::CreateBuffer(device, gridBytes, UAV);
         result.m_windowB = gpu::CreateBuffer(device, gridBytes, UAV);
         result.m_capsReadback = gpu::CreateBuffer(device, unitBytes, READBACK);
@@ -135,7 +138,7 @@ namespace bicameral::sim {
         const bool tablesMade = result.m_before.Valid() && result.m_gridUnits.Valid() &&
                                 result.m_neighborStarts.Valid() && result.m_neighbors.Valid();
         const bool buffersMade = result.m_caps && result.m_state && result.m_after && result.m_counters &&
-                                 result.m_windowA && result.m_windowB && result.m_capsReadback &&
+                                 result.m_predicate && result.m_windowA && result.m_windowB && result.m_capsReadback &&
                                  result.m_stateReadback && result.m_afterReadback && result.m_countersReadback &&
                                  result.m_timestampReadback;
         if (!tablesMade || !buffersMade ||
@@ -193,10 +196,39 @@ namespace bicameral::sim {
             Dispatch(list, STAGE_MIN_AXIS, m_gridCells, axis, event, cap);
 
         Dispatch(list, STAGE_GATHER, m_gridCells, 0, event, cap);
-        for (uint32_t sweep = 0; sweep < MAX_SWEEPS; ++sweep)
+        for (uint32_t sweep = 0; sweep < HEAD_SWEEPS; ++sweep)
             Dispatch(list, STAGE_SWEEP, m_units, sweep, event, cap);
 
+        // --- 残りの回: 初めの最後の回に変わった単位があった時だけ(印の 64bit = 最後の回と次の回〔まだ 0〕)---
+        if (m_usePredicate)
+            RecordPredicate(list);
+
+        for (uint32_t sweep = HEAD_SWEEPS; sweep < MAX_SWEEPS; ++sweep)
+            Dispatch(list, STAGE_SWEEP, m_units, sweep, event, cap);
+
+        if (m_usePredicate) {
+            list->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+            const D3D12_RESOURCE_BARRIER back = gpu::Transition(m_predicate.Get(), D3D12_RESOURCE_STATE_PREDICATION,
+                                                                D3D12_RESOURCE_STATE_COMMON);
+            list->ResourceBarrier(1, &back);
+        }
+
         Dispatch(list, STAGE_PACK, m_wordsPerEvent, 0, event, cap);
+    }
+
+    void GpuTimeTreeChoose::RecordPredicate(ID3D12GraphicsCommandList* list) const {
+        // 述語の写しは出来事ごとに COMMON から(前の出来事の終わりで戻す)
+        const std::array<D3D12_RESOURCE_BARRIER, 2> before = {
+            gpu::Transition(m_counters.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE),
+            gpu::Transition(m_predicate.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST)};
+        list->ResourceBarrier(static_cast<uint32_t>(before.size()), before.data());
+        list->CopyBufferRegion(m_predicate.Get(), 0, m_counters.Get(), uint64_t{HEAD_SWEEPS - 1} * sizeof(uint32_t),
+                               sizeof(uint64_t));
+        const std::array<D3D12_RESOURCE_BARRIER, 2> after = {
+            gpu::Transition(m_counters.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+            gpu::Transition(m_predicate.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_PREDICATION)};
+        list->ResourceBarrier(static_cast<uint32_t>(after.size()), after.data());
+        list->SetPredication(m_predicate.Get(), 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
     }
 
     void GpuTimeTreeChoose::RecordReadback(ID3D12GraphicsCommandList* list) const {

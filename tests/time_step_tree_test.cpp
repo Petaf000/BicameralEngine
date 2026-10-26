@@ -1506,12 +1506,17 @@ namespace {
 
     // --- T-1112: 刻みを選ぶ段(窓・隣の差 1 段)の入力と CPU の答えを書く(gpu_time_step_choose_test が GPU で選び直す)・
     //     詰めた歩の記録が 1 刻みずつと一気にでビット一致 ---
+    constexpr uint64_t CHOOSE_RARE_EVENTS = 64;  // 打ち切り・隣の差で縮んだ出来事は every によらずこの数まで書く
+
     struct ChooseTrace {
         test::TimeStepChooseFile file;
         uint64_t events = 0;
         uint64_t packFailures = 0;
         uint64_t truncated = 0;  // 選ぶ段で打ち切った単位(歩の途中で次の e が決まった)
-        uint64_t hash = 0;       // 出来事ごとの (刻み・後の詰めた記録) の要約
+        uint64_t limited = 0;    // 隣の差 1 段で窓の上限・望みより短くなった単位
+        uint64_t truncatedEvents = 0;
+        uint64_t limitedEvents = 0;
+        uint64_t hash = 0;  // 出来事ごとの (刻み・後の詰めた記録) の要約
     };
 
     ChooseTrace TraceChoose(TimeTreeSetup setup, const Material& material, const TimeTreeWorld& world, uint64_t ticks,
@@ -1524,10 +1529,27 @@ namespace {
             for (const uint16_t record : view.after)
                 trace.hash = fx::FxHashCombine(trace.hash, record);
 
-            for (size_t u = 0; u < view.next.size() && packed; ++u)
-                trace.truncated += view.next[u] >= 0 && (view.before[u] & TIME_TREE_RECORD_OPEN) != 0 ? 1 : 0;
+            // 打ち切り・隣の差で縮んだ単位(歩の途中で選び直した・窓の上限と望みより短い)を数え、そういう出来事も書く
+            uint64_t truncated = 0;
+            uint64_t limited = 0;
+            for (size_t u = 0; u < view.next.size() && packed; ++u) {
+                if (view.next[u] < 0)
+                    continue;
 
-            if (every != 0 && trace.events % every == 0 && packed) {
+                const bool open = (view.before[u] & TIME_TREE_RECORD_OPEN) != 0;
+                const auto desired = static_cast<int32_t>((view.before[u] >> TIME_TREE_RECORD_DESIRED_SHIFT) &
+                                                          TIME_TREE_RECORD_EXPONENT_MASK);
+                truncated += open ? 1 : 0;
+                limited += !open && view.next[u] < std::min({desired, view.cap, int32_t{view.windowCaps[u]}}) ? 1 : 0;
+            }
+
+            trace.truncated += truncated;
+            trace.limited += limited;
+            const bool rare = (truncated != 0 && trace.truncatedEvents < CHOOSE_RARE_EVENTS) ||
+                              (limited != 0 && trace.limitedEvents < CHOOSE_RARE_EVENTS);
+            trace.truncatedEvents += truncated != 0 ? 1 : 0;
+            trace.limitedEvents += limited != 0 ? 1 : 0;
+            if (every != 0 && packed && (trace.events % every == 0 || rare)) {
                 test::TimeStepChooseEvent event{.tick = view.tick,
                                                 .cap = view.cap,
                                                 .before = {view.before.begin(), view.before.end()},
@@ -1566,10 +1588,11 @@ namespace {
 
         Log(Channel::Sim, Level::Info,
             "刻みを選ぶ段({}・{}): 刻み {}・出来事 {}・書いた出来事 {}・単位 {}・窓の格子 {}×{}×{}・半径 {}・隣 {}・"
-            "打ち切り {}・要約 {:016x}",
+            "打ち切り {}(出来事 {})・隣の差で縮んだ {}(出来事 {})・要約 {:016x}",
             shapeName, TrialName(), ticks, bulk.events, bulk.file.events.size(), bulk.file.tables.units,
             bulk.file.tables.gridSize[0], bulk.file.tables.gridSize[1], bulk.file.tables.gridSize[2],
-            bulk.file.tables.radius, bulk.file.tables.neighbors.size(), bulk.truncated, bulk.hash);
+            bulk.file.tables.radius, bulk.file.tables.neighbors.size(), bulk.truncated, bulk.truncatedEvents,
+            bulk.limited, bulk.limitedEvents, bulk.hash);
         if (!dumpPath.empty())
             Expect(test::WriteTimeStepChoose(dumpPath, bulk.file), "刻みを選ぶ段: ファイルに書けた");
     }

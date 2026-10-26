@@ -30,13 +30,17 @@ namespace bicameral::sim {
 
     class GpuTimeTreeChoose {
     public:
-        static constexpr uint32_t MAX_SWEEPS = 32;  // time_tree_choose.hlsl の TTC_MAX_PASSES
+        static constexpr uint32_t MAX_SWEEPS = 128;  // time_tree_choose.hlsl の TTC_MAX_PASSES
+        // 初めのこの回数だけはいつも積み、残りは「最後の回に変わった単位があった」時だけ走らせる(述語〔SetPredication〕で
+        // 飛ばす。空の Dispatch と壁が 1 回約 1 µs で、128 回では 1 出来事の大半になった。打ち切りが連なる出来事だけ 59 回まで要る)
+        static constexpr uint32_t HEAD_SWEEPS = 4;
         static constexpr uint32_t MAX_TIMESTAMPS = 1024;
 
-        // befores = 出来事ごとの選ぶ前の詰めた記録を並べたもの(出来事 × units)
+        // befores = 出来事ごとの選ぶ前の詰めた記録を並べたもの(出来事 × units)。predicate = false なら残りの回も述語なしで全部積む(比べの測り)
         [[nodiscard]] static std::expected<GpuTimeTreeChoose, std::string> Create(ID3D12Device5* device,
                                                                                   const TimeTreeChooseTables& tables,
-                                                                                  std::span<const uint16_t> befores);
+                                                                                  std::span<const uint16_t> befores,
+                                                                                  bool predicate = true);
 
         // 表と記録の写し(最初のリストの初め。バッファは COMMON の時)
         void RecordUpload(ID3D12GraphicsCommandList* list) const;
@@ -59,6 +63,7 @@ namespace bicameral::sim {
         GpuTimeTreeChoose() = default;
 
         void Bind(ID3D12GraphicsCommandList* list, uint64_t debugRing) const;
+        void RecordPredicate(ID3D12GraphicsCommandList* list) const;
         void Dispatch(ID3D12GraphicsCommandList* list, uint32_t pipeline, uint32_t threads, uint32_t pass,
                       uint32_t event, int32_t cap) const;
 
@@ -66,6 +71,7 @@ namespace bicameral::sim {
         uint32_t m_gridCells = 0;
         uint32_t m_wordsPerEvent = 0;
         uint32_t m_events = 0;
+        bool m_usePredicate = true;
         TimeTreeChooseTables m_shape;  // 大きさだけ(表の中身は写しの中)
 
         ComPtr<ID3D12RootSignature> m_rootSignature;
@@ -78,6 +84,7 @@ namespace bicameral::sim {
         ComPtr<ID3D12Resource> m_state;
         ComPtr<ID3D12Resource> m_after;
         ComPtr<ID3D12Resource> m_counters;
+        ComPtr<ID3D12Resource> m_predicate;  // 初めの回の最後の印の写し(64bit。0 なら残りを飛ばす)
         ComPtr<ID3D12Resource> m_windowA;
         ComPtr<ID3D12Resource> m_windowB;
         ComPtr<ID3D12Resource> m_capsReadback;
