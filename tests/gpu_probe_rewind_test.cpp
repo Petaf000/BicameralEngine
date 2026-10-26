@@ -251,7 +251,7 @@ namespace {
     // 試す世界(区画なし = 仮の世界 + 積み木。--regions なら気体と液体の区画を足す)
     struct Scenario {
         BakedReactionTable table;
-        BakedReactionTable swapped;           // 刻み SWAP_TICK に差し替える表(木の燃焼の速さ 100 倍)
+        BakedReactionTable swapped;  // 刻み SWAP_TICK に差し替える表(木の燃焼の速さ 100 倍・固体の伝導率 10 倍)
         std::vector<reaction::RxCell> world;  // 空なら表の世界の組み立て
         PhysicsScene scene;
         ProbeGasOptions gas;
@@ -284,6 +284,18 @@ namespace {
         for (RuleDefinition& rule : definition.rules) {
             if (rule.name == "cellulose_combustion")
                 rule.rate.preExponentialMantissa *= 100;
+        }
+
+        return definition;
+    }
+
+    // 差し替える表: 燃焼の速さに加えて固体の伝導率を 10 倍(現実の伝導率〔T-1066〕では殻 1 セルの木箱の火が広がらず、
+    // 燃焼の速さだけでは世界が変わらない。差し替えが効いていることを確かめるため、火をつけたセルの冷め方を変える。T-1163)
+    ReactionTableDefinition ChangeSwappedValues(ReactionTableDefinition definition) {
+        definition = SpeedUpCombustion(std::move(definition));
+        for (SpeciesDefinition& species : definition.species) {
+            if (species.phase == SpeciesPhase::Solid)
+                species.thermalConductivity *= 10;
         }
 
         return definition;
@@ -393,8 +405,8 @@ namespace {
     std::optional<Scenario> MakeScenario(bool regions) {
         const ReactionTableDefinition definition = regions ? MakeRegionDefinition() : MakeCombustionTestTable();
         auto table = BakeReactionTable(definition);
-        auto swapped = BakeReactionTable(regions ? ChangeRegionValues(SpeedUpCombustion(definition))
-                                                 : SpeedUpCombustion(definition));
+        auto swapped = BakeReactionTable(regions ? ChangeRegionValues(ChangeSwappedValues(definition))
+                                                 : ChangeSwappedValues(definition));
         if (!table || !swapped)
             return std::nullopt;
 

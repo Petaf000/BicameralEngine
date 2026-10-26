@@ -32,6 +32,11 @@ CPU リファレンス(ProbeReference の (1d)。sim/probe_reference_radiation.c
   表の差し替えでは光の値を新しい表のものにするが、流す・流さないは作った時の表のまま(光の値を書かない表へ差し替えると CPU と違う。警告を出す)。
 - 置き場: 放つ面 2^17・袋 2^20・持ち越し 2^19(状態 265 MiB。溢れたら RadiationHash の assert ProbeRadiationOverflow)。
 
+## 試験で直したもの
+- 表の違う保存点へ戻す時(RecordRestore)も光の値をその表のものにした(gpu_probe_rewind_regions。物質の並びが 14 → 15 に変わる表で落ちた)。
+- gpu_probe_rewind(_regions) の「差し替えが効いている」: 差し替える表を燃焼の速さ × 100 に加えて固体の伝導率 × 10 にした(ChangeSwappedValues)。
+  燃焼の速さだけでは殻 1 セルの木箱の火の世界が変わらない(T-1163 と同じ根。**main でも落ちるかは未確認**。この枝で放射を入れた後に見つけた)。
+
 ## 切った試験(GPU・CPU とも放射なしで比べる)
 - gpu_probe_trace: トレースの予想(sim/probe_trace の AppendExpectedProbeTrace)がつつき・置くの根だけを数え、放射が起こすブロックを数えない。
   放射を入れると室温の世界でも 0 K の空へ冷える面のブロックが毎刻み起きる(GPU のトレース 3251 件 / 予想 966 件)。予想に放射の根を足すのは残り(下)。

@@ -271,7 +271,9 @@ namespace bicameral::sim {
             return true;
 
         Log(Channel::Sim, Level::Info, "巻き戻し: 刻み {} の保存点の表へ戻す", savePoint.tick);
-        if (!RecordTableBuffers(list, frame, savePoint.table, savePoint.tick))
+        // 熱の放射の段の物質の光の値も保存点の表のものに(物質の並びが変わる表がある。T-1154)
+        if (!RecordTableBuffers(list, frame, savePoint.table, savePoint.tick) ||
+            !RecordRadiationTableSwap(list, frame, savePoint.table))
             return false;
 
         m_tableSerial = savePoint.tableSerial;
