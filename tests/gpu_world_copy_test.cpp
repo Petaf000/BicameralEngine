@@ -133,7 +133,8 @@ namespace {
         std::vector<physics::PxHeatEntry> heat;  // 前の刻みの物理の熱の入口
 
         CpuWorld(const BakedReactionTable& table, const PhysicsScene& scene)
-            : reference(table), physics(scene, PhysicsParametersFor(StandardWorldPhysics())) {}
+            : reference(table), physics(scene, PhysicsParametersFor(StandardWorldPhysics())) {
+        }
 
         // due: この刻みのコマンド(押すのは pushes が true の時だけ。コマンドを当てない写しは押さない)
         void Advance(uint64_t tick, std::span<const ProbeCommand> due, bool pushes) {

@@ -106,6 +106,8 @@ namespace {
         HeatRun run;
         PhysicsWorld world(scene, PhysicsParametersFor(table.environment));
         ProbeReference reference(table);
+        // 物理の熱の帳簿だけを見る試験なので、熱の放射の段(T-1113。0 K の空へ逃げる分がある)は切る。放射の保存は probe_radiation が見る
+        reference.SetCascadeRadiation({.enabled = false});
         const int64_t nearBefore = EnergyAround(reference.State(0), lookX, lookZ);
 
         std::vector<physics::PxHeatEntry> heat;  // 前の刻みの物理の熱の入口

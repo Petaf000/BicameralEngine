@@ -116,6 +116,34 @@ namespace bicameral::sim {
     [[nodiscard]] std::expected<CascadeGrid, std::string> MakeCascadeGrid(const MultiresNest& nest,
                                                                           const BakedReactionTable& table);
 
+    // --- 木を読む写し(T-1155。T-1117 の段取り 1・3 の 1 本目)---
+    // 粗い葉(0.5 m より粗いレベルのセル)を 0.5 m の升目へ 2^−L 個ずつ広げて読む。セルの値はレベルの単位の数(同じ数 = 同じ密度・温度)なので、
+    // 広げた升目の光の値と温度は粗いセルのものそのまま = 粗いセルを同じ数の 0.5 m のセルに割った世界とビット単位で同じ写しになる。
+    // 粗い面から放つ量は 0.5 m の面の数(4^−L)倍 = 面積に比例し、細かさによらない(T-1117 の段取り 3 の性質。歩く本数を減らす形は段取り 2)。
+    // 0.5 m より細かい葉(レベル > 0)は読まない(誤り): 吸った量を細かい葉へ配る規則は土台(ADR-0469 の芯 2-1・芯 4)。
+    struct CascadeTreeGrid {
+        CascadeGrid grid;                 // レベル 0 の升目(世界の箱全部)
+        std::vector<uint32_t> leafSlot;   // 升目ごとの葉のブロックの枠
+        std::vector<uint16_t> leafIndex;  // その中のセル(0〜MR_BLOCK_CELLS − 1)
+    };
+
+    // 葉のセル 1 つの吸った・放った(2^−16 mJ。実の量)。レベルの単位への換算(× 8^L)と丸め・当てるのは使う側(土台の当てる段。T-1161)
+    struct CascadeLeafNet {
+        uint32_t slot = 0;
+        uint32_t index = 0;  // 葉のレベルは nest.blocks[slot].level
+        std::array<uint64_t, reaction::LT_BANDS> absorbed{};
+        std::array<uint64_t, reaction::LT_BANDS> emitted{};
+
+        bool operator==(const CascadeLeafNet&) const = default;
+    };
+
+    [[nodiscard]] std::expected<CascadeTreeGrid, std::string> MakeCascadeTreeGrid(const MultiresNest& nest,
+                                                                                  const BakedReactionTable& table);
+
+    // 升目ごとの結果を葉ごとに足す(枠・セルの順。吸った・放ったがどちらも 0 の葉は入れない)。和は升目の和とビット単位で同じ
+    [[nodiscard]] std::vector<CascadeLeafNet> FoldCascadeToLeaves(const CascadeTreeGrid& tree,
+                                                                  const CascadeTickResult& result);
+
     // 世界の箱を確かめる(1 辺 127 セルまで。溜めの出どころを 15bit × 3 に詰める。ADR-0432。細かい葉・粗い根を読む形は T-0973)
     [[nodiscard]] std::expected<void, std::string> CheckCascadeGrid(const CascadeGrid& grid);
 

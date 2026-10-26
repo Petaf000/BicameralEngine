@@ -23,6 +23,13 @@ namespace bicameral::sim {
         constexpr uint64_t LIGHT_BYTES = 24;
         constexpr uint64_t WORD_BYTES = 8;
 
+        // 自分のルート署名(CreateStandalone): 木のルート署名(sim/gpu_multires.cpp の ROOT_LAYOUT)の頭と同じ並び。
+        // シェーダーが読むのは u4・u5・定数 b0 の外の 4 語(並びの 12〜15 語目)・デバッグのリングだけ
+        constexpr uint32_t OWN_ROOT_CONSTANTS = 26;  // multires_bindings.hlsli の RootConstants の語の数
+        constexpr uint32_t OWN_EXTERNAL_FIRST = 12;  // g_external0 の位置
+        constexpr gpu::RootSignatureLayout OWN_ROOT_LAYOUT{
+            .uavCount = 6, .rootConstantCount = OWN_ROOT_CONSTANTS, .debugRing = true};
+
         static_assert(sizeof(rx::RcGpuParams) <= WORK_PARAMS_BYTES);
         static_assert(sizeof(rx::RcCellLight) == LIGHT_BYTES);
 
@@ -136,19 +143,42 @@ namespace bicameral::sim {
                                                                         const CascadeGrid& grid,
                                                                         const CascadeParams& params,
                                                                         const GpuCascadeCapacity& capacity) {
+        return CreateWith(device, nest.RootSignature(), grid, params, capacity);
+    }
+
+    std::expected<GpuCascadeLight, std::string> GpuCascadeLight::CreateStandalone(ID3D12Device5* device,
+                                                                                  const CascadeGrid& grid,
+                                                                                  const CascadeParams& params,
+                                                                                  const GpuCascadeCapacity& capacity) {
+        ComPtr<ID3D12RootSignature> root = gpu::CreateRootSignature(device, OWN_ROOT_LAYOUT);
+        if (!root)
+            return std::unexpected("距離ごとの段のルート署名を作れない");
+
+        auto result = CreateWith(device, root.Get(), grid, params, capacity);
+        if (result)
+            result->m_ownRoot = std::move(root);
+
+        return result;
+    }
+
+    std::expected<GpuCascadeLight, std::string> GpuCascadeLight::CreateWith(ID3D12Device5* device,
+                                                                            ID3D12RootSignature* rootSignature,
+                                                                            const CascadeGrid& grid,
+                                                                            const CascadeParams& params,
+                                                                            const GpuCascadeCapacity& capacity) {
         if (auto checked = CheckGpuShape(grid, params, capacity); !checked)
             return std::unexpected(checked.error());
 
         GpuCascadeLight result;
         result.m_cellCount = grid.CellCount();
 
-        // --- パイプライン(木のルート署名を借りる)---
+        // --- パイプライン(木のルート署名を借りるか、自分のもの)---
         for (const char* name : SHADER_NAMES) {
             const auto shader = gpu::LoadShader(name);
             if (!shader)
                 return std::unexpected(shader.error());
 
-            result.m_pipelines.push_back(gpu::CreateComputePipeline(device, nest.RootSignature(), *shader));
+            result.m_pipelines.push_back(gpu::CreateComputePipeline(device, rootSignature, *shader));
             if (!result.m_pipelines.back())
                 return std::unexpected(std::string("距離ごとの段のパイプラインを作れない: ") + name);
         }
@@ -206,17 +236,48 @@ namespace bicameral::sim {
         return result;
     }
 
-    void GpuCascadeLight::Dispatch(ID3D12GraphicsCommandList10* list, GpuMultires& nest,
+    void GpuCascadeLight::Dispatch(ID3D12GraphicsCommandList10* list, GpuMultires* nest,
                                    D3D12_GPU_VIRTUAL_ADDRESS debugRing, size_t pipeline, uint64_t items,
                                    std::array<uint32_t, 4> external) const {
         const uint64_t groups = std::clamp<uint64_t>((items + RC_GROUP_THREADS - 1) / RC_GROUP_THREADS, 1, MAX_GROUPS);
         external[2] = static_cast<uint32_t>(groups * RC_GROUP_THREADS);
-        nest.RecordExternalDispatch(list, debugRing, m_pipelines[pipeline].Get(), static_cast<uint32_t>(groups),
-                                    external);
+        if (nest != nullptr) {
+            nest->RecordExternalDispatch(list, debugRing, m_pipelines[pipeline].Get(), static_cast<uint32_t>(groups),
+                                         external);
+            return;
+        }
+
+        // --- 自分のルート署名(u0〜u3 は読まないので作業のバッファを仮に結ぶ)---
+        std::array<uint32_t, OWN_ROOT_CONSTANTS> constants{};
+        std::copy(external.begin(), external.end(), constants.begin() + OWN_EXTERNAL_FIRST);
+        const D3D12_GPU_VIRTUAL_ADDRESS work = m_work->GetGPUVirtualAddress();
+        list->SetComputeRootSignature(m_ownRoot.Get());
+        list->SetPipelineState(m_pipelines[pipeline].Get());
+        for (uint32_t view = 0; view < 4; ++view)
+            list->SetComputeRootUnorderedAccessView(view, work);
+
+        list->SetComputeRootUnorderedAccessView(4, work);
+        list->SetComputeRootUnorderedAccessView(5, m_state->GetGPUVirtualAddress());
+        list->SetComputeRoot32BitConstants(OWN_ROOT_LAYOUT.RootConstantIndex(), OWN_ROOT_CONSTANTS, constants.data(),
+                                           0);
+        list->SetComputeRootUnorderedAccessView(OWN_ROOT_LAYOUT.DebugRingIndex(), debugRing);
+        list->Dispatch(static_cast<uint32_t>(groups), 1, 1);
+        const D3D12_RESOURCE_BARRIER barrier = gpu::UavBarrier(nullptr);
+        list->ResourceBarrier(1, &barrier);
     }
 
     bool GpuCascadeLight::RecordUpload(ID3D12GraphicsCommandList10* list, GpuMultires& nest,
                                        D3D12_GPU_VIRTUAL_ADDRESS debugRing, const CascadeCarry& carry) {
+        return RecordUploadWith(list, &nest, debugRing, carry);
+    }
+
+    bool GpuCascadeLight::RecordUpload(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                       const CascadeCarry& carry) {
+        return m_ownRoot && RecordUploadWith(list, nullptr, debugRing, carry);
+    }
+
+    bool GpuCascadeLight::RecordUploadWith(ID3D12GraphicsCommandList10* list, GpuMultires* nest,
+                                           D3D12_GPU_VIRTUAL_ADDRESS debugRing, const CascadeCarry& carry) {
         if (carry.entries.size() > m_params.carryCapacity)
             return false;
 
@@ -245,10 +306,14 @@ namespace bicameral::sim {
         list->ResourceBarrier(1, &toUav);
 
         // --- 状態を 0 に・袋の溜めを空に・初めの持ち越しを表 0 へ ---
-        nest.SetExternalViews(m_work->GetGPUVirtualAddress(), m_state->GetGPUVirtualAddress());
+        if (nest != nullptr)
+            nest->SetExternalViews(m_work->GetGPUVirtualAddress(), m_state->GetGPUVirtualAddress());
+
         Dispatch(list, nest, debugRing, InitState, m_params.stateWords, {0, 0, 0, 0});
         Dispatch(list, nest, debugRing, InitBags, uint64_t{m_params.bagCapacity} * 2, {0, 0, 0, 0});
-        nest.SetExternalViews(0, 0);
+        if (nest != nullptr)
+            nest->SetExternalViews(0, 0);
+
         m_parity = 0;
 
         return true;
@@ -256,10 +321,21 @@ namespace bicameral::sim {
 
     void GpuCascadeLight::RecordTick(ID3D12GraphicsCommandList10* list, GpuMultires& nest,
                                      D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick) {
+        RecordTickWith(list, &nest, debugRing, tick, m_parity);
+    }
+
+    void GpuCascadeLight::RecordTick(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                     uint64_t tick) {
+        if (m_ownRoot)
+            RecordTickWith(list, nullptr, debugRing, tick, static_cast<uint32_t>(tick & 1));
+    }
+
+    void GpuCascadeLight::RecordTickWith(ID3D12GraphicsCommandList10* list, GpuMultires* nest,
+                                         D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick, uint32_t in) {
         const auto tickLow = static_cast<uint32_t>(tick);  // 刻みは 2^32 未満(試験と測りの範囲)
-        const uint32_t in = m_parity;
         const uint64_t cells = m_cellCount;
-        nest.SetExternalViews(m_work->GetGPUVirtualAddress(), m_state->GetGPUVirtualAddress());
+        if (nest != nullptr)
+            nest->SetExternalViews(m_work->GetGPUVirtualAddress(), m_state->GetGPUVirtualAddress());
 
         // --- 段 0: 放つ面 ---
         Dispatch(list, nest, debugRing, BeginTick, rx::RC_GPU_HEADER_WORDS, {tickLow, in, 0, 0});
@@ -282,7 +358,9 @@ namespace bicameral::sim {
 
         // --- 照り返しを次の刻みへ ---
         Dispatch(list, nest, debugRing, CarryOut, m_params.carryCapacity, {tickLow, out, 0, 0});
-        nest.SetExternalViews(0, 0);
+        if (nest != nullptr)
+            nest->SetExternalViews(0, 0);
+
         m_parity = 1 - in;
     }
 

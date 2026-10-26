@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstring>
 
+#include "common/probe_region_hash.hlsli"
 #include "core/aliases.h"
 #include "core/log.h"
 #include "gpu/com_ptr.h"
@@ -336,6 +337,9 @@ namespace bicameral::sim {
         if (auto gas = sim.CreateGas(device, table); !gas)
             return std::unexpected(gas.error());
 
+        if (auto radiation = sim.CreateRadiation(device, table); !radiation)
+            return std::unexpected(radiation.error());
+
         if (auto liquid = sim.CreateLiquid(device, table); !liquid)
             return std::unexpected(liquid.error());
 
@@ -528,6 +532,7 @@ namespace bicameral::sim {
         list->ResourceBarrier(static_cast<UINT>(barriers.size()), barriers.data());
         RecordGasInitialization(list);
         RecordLiquidInitialization(list);
+        RecordRadiationInitialization(list);
         m_initialized = true;
     }
 
@@ -607,11 +612,14 @@ namespace bicameral::sim {
                              std::memcmp(&m_gasHeader, &source.m_gasHeader, sizeof(ProbeGasHeader)) == 0;
         const bool sameLiquid = (m_liquidWork == nullptr) == (source.m_liquidWork == nullptr) &&
                                 std::memcmp(&m_liquidHeader, &source.m_liquidHeader, sizeof(ProbeLiquidHeader)) == 0;
-        if (!sameGas || !sameLiquid)
-            Log(Channel::Sim, Level::Error, "写しの早送りの写す元と区画(気体 {}・液体 {})が違う",
-                sameGas ? "同じ" : "違う", sameLiquid ? "同じ" : "違う");
+        const bool sameRadiation = m_cascade.has_value() == source.m_cascade.has_value() &&
+                                   (!m_cascade ||
+                                    m_cascade->PersistentStateBytes() == source.m_cascade->PersistentStateBytes());
+        if (!sameGas || !sameLiquid || !sameRadiation)
+            Log(Channel::Sim, Level::Error, "写しの早送りの写す元と区画(気体 {}・液体 {}・放射 {})が違う",
+                sameGas ? "同じ" : "違う", sameLiquid ? "同じ" : "違う", sameRadiation ? "同じ" : "違う");
 
-        return sameGas && sameLiquid;
+        return sameGas && sameLiquid && sameRadiation;
     }
 
     // 表の差し替えの約束: (tick, 適用の単位) がこのフレームの単位の中にあり、表がある(T-0139)
@@ -790,8 +798,11 @@ namespace bicameral::sim {
         list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, lastQuery);
         list->ResolveQueryData(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, firstQuery, input.unitCount + 2,
                                frame.timestampReadback.Get(), 0);
-        if (FAILED(list->Close()))
+        if (const HRESULT closed = list->Close(); FAILED(closed)) {
+            Log(Channel::Sim, Level::Error, "フレームのリストを閉じられない(slot {}・{:#x})", slot,
+                static_cast<uint32_t>(closed));
             return nullptr;
+        }
 
         frame.firstTick = input.firstTick;
         frame.firstUnit = input.firstUnit;
@@ -940,6 +951,12 @@ namespace bicameral::sim {
                 RecordLiquid(list);
             }
 
+            // 放射(表が光の値を書いた時だけ。T-1154): 液体の後(CPU の (1d))。変わったセルのブロックは気体と同じく起こす
+            if (m_cascade) {
+                list->ResourceBarrier(1, &allUavs);
+                RecordRadiation(list, input, tick);
+            }
+
             // 起こす刻みの来たブロックを同じ一覧へ(適用が一覧の見出しを整えた後。待ちの丸め。T-0122)
             list->ResourceBarrier(1, &allUavs);
             list->SetPipelineState(m_wakeDuePipeline.Get());
@@ -959,6 +976,9 @@ namespace bicameral::sim {
             if (m_liquidWork)
                 RecordLiquidHash(list);
 
+            if (m_cascade)
+                RecordRadiationHash(list, input, tick);
+
             // 刻みのイベントを並べてリングへ(ハッシュとは別のバッファなので間のバリアは要らない)
             list->SetPipelineState(m_flushEventsPipeline.Get());
             list->Dispatch(1, 1, 1);
@@ -968,6 +988,45 @@ namespace bicameral::sim {
         }
 
         list->ResourceBarrier(1, &allUavs);
+    }
+
+    // --- 熱の放射の段(T-1154。作るのと表は sim/probe_sim_radiation.cpp)---
+
+    // 段の間だけ u15〜u17(気体の区画の結び先)を借りる。段の後で BindRootViews が結び直す
+    void ProbeSim::BindRadiationViews(ID3D12GraphicsCommandList10* list) const {
+        list->SetComputeRootUnorderedAccessView(UAV_GAS_STATE, m_cascade->Work()->GetGPUVirtualAddress());
+        list->SetComputeRootUnorderedAccessView(UAV_GAS_WORK, m_cascade->State()->GetGPUVirtualAddress());
+        list->SetComputeRootUnorderedAccessView(UAV_GAS_CELLS, m_radiationLights->GetGPUVirtualAddress());
+    }
+
+    // 写し(セル → 光の値・温度)→ 距離ごとの段の 1 刻み(自分のルート署名)→ セルへ当てる(このルート署名に戻して)
+    void ProbeSim::RecordRadiation(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick) {
+        const D3D12_RESOURCE_BARRIER allUavs = gpu::UavBarrier(nullptr);
+        BindRadiationViews(list);
+        list->SetPipelineState(m_radiationPipelines[0].Get());
+        list->Dispatch(LINEAR_CELL_GROUPS, 1, 1);
+        list->ResourceBarrier(1, &allUavs);
+
+        m_cascade->RecordTick(list, m_debugRing.GpuAddress(), tick);
+
+        BindRootArguments(list, input);
+        SetUnitConstants(list, tick, m_speciesCount);
+        BindRadiationViews(list);
+        list->SetPipelineState(m_radiationPipelines[1].Get());
+        list->Dispatch(LINEAR_CELL_GROUPS, 1, 1);
+        list->ResourceBarrier(1, &allUavs);
+        BindRootViews(list, input);
+    }
+
+    // 状態のハッシュの単位: 次の刻みへの持ち越しの寄与を足す(単位の引数 = 歩幅のスレッドの数)
+    void ProbeSim::RecordRadiationHash(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick) const {
+        constexpr uint32_t HASH_GROUPS = 256;
+        BindRadiationViews(list);
+        SetUnitConstants(list, tick, HASH_GROUPS * PROBE_LINEAR_GROUP_SIZE);
+        list->SetPipelineState(m_radiationPipelines[2].Get());
+        list->Dispatch(HASH_GROUPS, 1, 1);
+        SetUnitConstants(list, tick, 0);
+        BindRootViews(list, input);
     }
 
     // 物理の熱をセルへ(T-0561・ADR-0242。物理を入れた世界だけ): 前の刻みの物理の単位が分けた熱の入口(GpuPhysics の u14)を、
@@ -1024,7 +1083,8 @@ namespace bicameral::sim {
                 remap->dropped);
 
         // 区画の作業場は今の表(m_tableCopy)と比べて作り直すので、表を写す前に
-        if (!RecordRegionTableSwap(list, frame, table, *remap) || !RecordTableBuffers(list, frame, table, tick))
+        if (!RecordRegionTableSwap(list, frame, table, *remap) || !RecordTableBuffers(list, frame, table, tick) ||
+            !RecordRadiationTableSwap(list, frame, table))
             return false;
 
         BindRootViews(list, frame.input.Get());
@@ -1653,8 +1713,11 @@ namespace bicameral::sim {
         }
 
         // (1d) 放射(段を入れた時だけ。T-0585・ADR-0263): 液体の後・伝導と反応の前(段の順: コマンド → 物理の熱 → 気体 → 液体 → 放射 → 伝導と反応)
+        m_cascadeReport = {};
         if (m_radiation)
             StepRadiation(tick, currentBase, seeds);
+        else if (m_cascade.enabled)
+            StepCascadeRadiation(tick, currentBase, seeds);
 
         m_wokenBlocks = CountWokenBlocks(m_blockFlags, m_scheduled);
         m_scheduled = ScheduleBlocks(seeds);
@@ -1795,6 +1858,19 @@ namespace bicameral::sim {
 
         if (m_liquid)
             hash += m_liquid->HashTerm();
+
+        // 放射の持ち越し(D-619)。(セル・面・帯)ごとの寄与の和なので、GPU(RadiationHash)が順不同に足しても同じ値。
+        // 持ち越しが無い世界(放射の段の無い世界)は今までと同じ値
+        for (const CascadeCarryEntry& entry : m_cascadeCarry.entries) {
+            if (entry.amount != 0)
+                hash += ProbeCascadeCarryHashTerm(entry.cell, entry.face, entry.band, entry.amount);
+        }
+
+        // 負の側(参照の温度の形だけ。面の番号に 8 を足して正の側と分ける)
+        for (const CascadeCarryEntry& entry : m_cascadeCarryNegative.entries) {
+            if (entry.amount != 0)
+                hash += ProbeCascadeCarryHashTerm(entry.cell, entry.face | 8u, entry.band, entry.amount);
+        }
 
         return hash;
     }

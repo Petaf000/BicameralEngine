@@ -286,6 +286,12 @@ namespace {
         return reference;
     }
 
+    // mJ の和に、熱の放射の段(T-1113)がセルの外に持つ分(2^−16 mJ)を足した値(mJ を 2^16 倍した mod 2^64。保存の比べに使う)
+    int64_t WithRadiation(int64_t milliJoules, const ProbeReference& reference) {
+        return static_cast<int64_t>((static_cast<uint64_t>(milliJoules) << reaction::RC_ENERGY_SHIFT) +
+                                    reference.CascadeRadiationUnits());
+    }
+
     // --- 見るもの ---
     // 区画の x の範囲・y の範囲の物質の量(µmol)
     uint64_t AmountIn(const BakedReactionTable& table, const ProbeReference& reference, uint64_t tick,
@@ -364,7 +370,7 @@ namespace {
                                       table.speciesElements[(species * table.elementNames.size()) + e];
         }
 
-        totals.energy += FieldEnergy(reference);
+        totals.energy = WithRadiation(totals.energy + FieldEnergy(reference), reference);
 
         return totals;
     }
@@ -383,7 +389,7 @@ namespace {
                 ++check.emptyWithEnergy;
         }
 
-        check.energy += FieldEnergy(reference);
+        check.energy = WithRadiation(check.energy + FieldEnergy(reference), reference);
 
         return check;
     }

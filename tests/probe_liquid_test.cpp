@@ -462,8 +462,15 @@ namespace {
         const ProbeLiquidField* liquid = reference.LiquidField();
         auto after = measure(TICKS);
         after.second += liquid->PotentialEnergySum() + liquid->KineticEnergySum() - liquid->Ledger().energy;
+        // 熱の放射の段(T-1113)がセルの外に持つ分(2^−16 mJ)も足し、mJ を 2^16 倍した mod 2^64 の値で比べる
+        const auto scaled = [](int64_t milliJoules) {
+            return static_cast<int64_t>(static_cast<uint64_t>(milliJoules) << reaction::RC_ENERGY_SHIFT);
+        };
+        after.second = static_cast<int64_t>(static_cast<uint64_t>(scaled(after.second)) +
+                                            reference.CascadeRadiationUnits());
+        const std::pair<uint64_t, int64_t> beforeScaled = {before.first, scaled(before.second)};
         std::printf("  熱になった %lld mJ\n", (long long)(measure(TICKS).second - before.second));
-        EXPECT(after == before);
+        EXPECT(after == beforeScaled);
         EXPECT(plateauAfter < plateauBefore);
         EXPECT(basinAfter > 0);
     }

@@ -425,6 +425,116 @@ namespace bicameral::sim {
         return grid;
     }
 
+    std::expected<CascadeTreeGrid, std::string> MakeCascadeTreeGrid(const MultiresNest& nest,
+                                                                    const BakedReactionTable& table) {
+        const mr::WeWorld& world = nest.edges.world;
+        if (world.highX <= world.lowX || world.highY <= world.lowY || world.highZ <= world.lowZ)
+            return std::unexpected("世界の箱(nest.edges.world)が空");
+
+        if (world.rootLevel > 0)
+            return std::unexpected("根が 0.5 m より細かい木はまだ読めない(細かい葉へ配る規則は土台。T-1155)");
+
+        // --- 箱をレベル 0 の升目へ ---
+        const auto rootShift = static_cast<uint32_t>(-world.rootLevel);
+        CascadeTreeGrid tree;
+        CascadeGrid& grid = tree.grid;
+        grid.low = {world.lowX << rootShift, world.lowY << rootShift, world.lowZ << rootShift};
+        grid.size = {(world.highX - world.lowX) << rootShift, (world.highY - world.lowY) << rootShift,
+                     (world.highZ - world.lowZ) << rootShift};
+        const auto count = static_cast<size_t>(grid.size[0] * grid.size[1] * grid.size[2]);
+        if (count >= (size_t{1} << 31))
+            return std::unexpected("世界の箱のセルが多すぎる(2^31 まで)");
+
+        grid.lights.assign(count, {});
+        grid.temperatureMk.assign(count, 0);
+        tree.leafSlot.assign(count, mr::MR_NO_BLOCK);
+        tree.leafIndex.assign(count, 0);
+        const ReactionTableView view = table.View();
+        struct Lights {
+            const std::vector<rx::LtSpeciesLight>* lights = nullptr;
+
+            [[nodiscard]] rx::LtSpeciesLight Light(uint32_t species) const { return (*lights)[species]; }
+        };
+        const Lights lights{.lights = &table.speciesLight};
+
+        // --- 葉(覆われていないセル)を 2^shift 角に広げる ---
+        for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
+            const mr::MrBlock& block = nest.blocks[slot];
+            if (block.kind != mr::MR_BLOCK_REAL)
+                continue;
+
+            if (block.level > 0)
+                return std::unexpected("0.5 m より細かい葉はまだ読めない(細かい葉へ配る規則は土台。T-1155)");
+
+            const auto shift = static_cast<uint32_t>(-block.level);
+            const int64_t span = int64_t{1} << shift;
+            for (uint32_t index = 0; index < mr::MR_BLOCK_CELLS; ++index) {
+                if (mr::MrIsCoveredCell(block, index))
+                    continue;
+
+                const rx::RxCell cell = LoadNestCell(nest, slot, index);
+                const rx::LtCellBand shortBand = rx::LtCellBandOf(lights, cell, rx::LT_BAND_SHORT);
+                const rx::LtCellBand longBand = rx::LtCellBandOf(lights, cell, rx::LT_BAND_LONG);
+                const rx::RcCellLight light{.depthShortQ32 = rx::RdOpticalDepthQ32(shortBand.absorption),
+                                            .depthLongQ32 = rx::RdOpticalDepthQ32(longBand.absorption),
+                                            .reflectanceShortQ16 = shortBand.reflectanceQ16,
+                                            .reflectanceLongQ16 = longBand.reflectanceQ16};
+                const int32_t thermal = rx::RxComputeThermal(view, cell).temperature;
+                const uint32_t temperature = thermal > 0 ? static_cast<uint32_t>(thermal) : 0u;
+                const int64_t x0 = (block.originX + mr::MrCellX(index)) << shift;
+                const int64_t y0 = (block.originY + mr::MrCellY(index)) << shift;
+                const int64_t z0 = (block.originZ + mr::MrCellZ(index)) << shift;
+                for (int64_t z = z0; z < z0 + span; ++z) {
+                    for (int64_t y = y0; y < y0 + span; ++y) {
+                        for (int64_t x = x0; x < x0 + span; ++x) {
+                            if (!grid.Contains(x, y, z))
+                                continue;
+
+                            const size_t at = grid.IndexOf(x, y, z);
+                            grid.lights[at] = light;
+                            grid.temperatureMk[at] = temperature;
+                            tree.leafSlot[at] = slot;
+                            tree.leafIndex[at] = static_cast<uint16_t>(index);
+                        }
+                    }
+                }
+            }
+        }
+
+        if (std::find(tree.leafSlot.begin(), tree.leafSlot.end(), mr::MR_NO_BLOCK) != tree.leafSlot.end())
+            return std::unexpected("世界の箱の中に葉の無い所がある");
+
+        return tree;
+    }
+
+    std::vector<CascadeLeafNet> FoldCascadeToLeaves(const CascadeTreeGrid& tree, const CascadeTickResult& result) {
+        std::map<uint64_t, CascadeLeafNet> leaves;
+        for (size_t at = 0; at < tree.leafSlot.size(); ++at) {
+            uint64_t any = 0;
+            for (uint32_t band = 0; band < rx::LT_BANDS; ++band)
+                any |= result.absorbed[(at * rx::LT_BANDS) + band] | result.emitted[(at * rx::LT_BANDS) + band];
+
+            if (any == 0)
+                continue;
+
+            const uint64_t key = (uint64_t{tree.leafSlot[at]} << 16) | tree.leafIndex[at];
+            CascadeLeafNet& leaf = leaves[key];
+            leaf.slot = tree.leafSlot[at];
+            leaf.index = tree.leafIndex[at];
+            for (uint32_t band = 0; band < rx::LT_BANDS; ++band) {
+                leaf.absorbed[band] += result.absorbed[(at * rx::LT_BANDS) + band];
+                leaf.emitted[band] += result.emitted[(at * rx::LT_BANDS) + band];
+            }
+        }
+
+        std::vector<CascadeLeafNet> folded;
+        folded.reserve(leaves.size());
+        for (const auto& [key, leaf] : leaves)
+            folded.push_back(leaf);
+
+        return folded;
+    }
+
     std::expected<void, std::string> CheckCascadeParams(const CascadeParams& params) {
         if (params.levels == 0 || params.levels > LEVEL_LIMIT)
             return std::unexpected("段の数は 1〜8");

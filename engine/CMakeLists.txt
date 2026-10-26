@@ -166,8 +166,10 @@ add_library(bicameral_sim STATIC
   src/sim/face_opening.cpp  # セルの面の開き具合の欄(21 §2.7 の塞ぐ面。形から導く。T-0937)
   src/sim/probe_save_point.cpp
   src/sim/probe_sim.cpp
+  src/sim/probe_reference_radiation.cpp  # 仮の世界の CPU リファレンスの熱の放射の段(RC。T-1113)
   src/sim/probe_sim_gas.cpp  # 仮の世界の GPU の刻みに気体の区画(T-0592)
   src/sim/probe_sim_liquid.cpp  # 仮の世界の GPU の刻みに液体の区画(T-0613)
+  src/sim/probe_sim_radiation.cpp  # 仮の世界の GPU の刻みに熱の放射の段(T-1154)
   src/sim/slope_gauge.cpp  # 開発ビルドの坂の計器(反応が坂を上った量を刻みごとに数える。T-0518)
   src/sim/probe_trace.cpp
   src/sim/tick_cost.cpp  # 単位の GPU 時間を刻みごとに(重さの検査。T-0413)

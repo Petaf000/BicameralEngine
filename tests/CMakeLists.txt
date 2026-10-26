@@ -110,6 +110,10 @@ add_executable(cascade_light_swing_test cascade_light_swing_test.cpp)
 target_link_libraries(cascade_light_swing_test PRIVATE bicameral_reaction_script bicameral_multires bicameral_core)
 add_test(NAME cascade_light_swing COMMAND cascade_light_swing_test)
 set_tests_properties(cascade_light_swing PROPERTIES TIMEOUT 1500)
+# 木を読む写し(T-1155: 粗い葉を 0.5 m に広げる・葉ごとに足す)
+add_executable(cascade_tree_grid_test cascade_tree_grid_test.cpp)
+target_link_libraries(cascade_tree_grid_test PRIVATE bicameral_reaction_script bicameral_multires bicameral_core)
+add_test(NAME cascade_tree_grid COMMAND cascade_tree_grid_test)
 set_tests_properties(cascade_light PROPERTIES TIMEOUT 1500)  # 筋の 500 刻み・坂の 200 刻み(T-0959)
 add_executable(radiation_lines_test radiation_lines_test.cpp)
 target_link_libraries(radiation_lines_test PRIVATE bicameral_reaction bicameral_core)
@@ -169,8 +173,6 @@ target_precompile_headers(reaction_package_scene_test PRIVATE ${PROJECT_SOURCE_D
 target_link_libraries(reaction_package_scene_test PRIVATE bicameral_reaction_script bicameral_sim bicameral_core)
 add_dependencies(reaction_package_scene_test bicameral_data)
 add_test(NAME reaction_package_scene COMMAND reaction_package_scene_test)
-# 現実の伝導率(T-1066)では放射の段の無い仮の世界の既定で木箱の火が広がらない。放射の段をすべての世界へ入れるまで止める(T-1113)
-set_tests_properties(reaction_package_scene PROPERTIES DISABLED TRUE)
 # 再生ファイルに残した反応表だけで、パッケージのフォルダ無しに同じ表で再生でき、ハッシュ列が一致する(T-0170・T-0193。CPU リファレンス)
 add_executable(reaction_replay_table_test reaction_replay_table_test.cpp)
 target_precompile_headers(reaction_replay_table_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
@@ -192,6 +194,12 @@ target_link_libraries(physics_heat_test PRIVATE bicameral_test_reaction_table bi
 add_test(NAME physics_heat COMMAND physics_heat_test)
 
 # 仮の世界に気体を載せる CPU リファレンス(T-0590・ADR-0256): 静かな大気・燃える木箱の煙が上がる・帳簿込みの保存・決定性
+# 仮の世界の CPU リファレンスの熱の放射の既定の段(RC。T-1113): 既定で動く・光の値の無い表では流さない・保存(ビット単位)・決定的・火の熱を隣へ運ぶ
+add_executable(probe_radiation_test probe_radiation_test.cpp)
+target_precompile_headers(probe_radiation_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
+target_link_libraries(probe_radiation_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)
+add_test(NAME probe_radiation COMMAND probe_radiation_test)
+
 add_executable(probe_gas_test probe_gas_test.cpp)
 target_precompile_headers(probe_gas_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
 target_link_libraries(probe_gas_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)
@@ -475,7 +483,7 @@ add_test(NAME multires_edge COMMAND multires_edge_test)
 add_executable(lab_box_test lab_box_test.cpp)  # 実験室の箱の CPU 側(T-0142)
 target_link_libraries(lab_box_test PRIVATE bicameral_multires bicameral_core)
 add_test(NAME lab_box COMMAND lab_box_test)
-# 実験の箱(多重解像度)に放射の段が無く、現実の伝導率(T-1066)で木の火が広がらない・頭打ちの場面が出ない。T-1113 と頭打ちの組み直しまで止める
+# 実験の箱(多重解像度)に放射の段が無く、現実の伝導率(T-1066)で木の火が広がらない・頭打ちの場面が出ない。多重解像度の放射(T-1155)と頭打ちの組み直しまで止める
 set_tests_properties(lab_box PROPERTIES DISABLED TRUE)
 
 add_executable(multires_subcycle_test multires_subcycle_test.cpp)  # 細かいレベルの熱の刻み(T-0108)
@@ -808,7 +816,8 @@ set_tests_properties(gpu_probe_peek gpu_probe_peek_warp PROPERTIES TIMEOUT 900)
 bicameral_add_gpu_test(gpu_probe_fire_test)
 target_link_libraries(gpu_probe_fire_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_probe_fire gpu_probe_fire_test gpu --ticks 3600 --no-gbv)
-# 放射の段の無い GPU の仮の世界で、現実の伝導率(T-1066)だと木箱の火が広がらない(CPU とは一致)。T-1113 まで止める
+# 放射の段の無い GPU の仮の世界で、現実の伝導率(T-1066)だと木箱の火が広がらない(CPU とは一致)。GPU の放射(T-1154)まで止める。
+# ただし CPU の仮の世界に放射の段(RC)を入れても 30 秒で広がらない(T-1113 の測り)ので、燃える気体(D-660・T-1156)も要る
 set_tests_properties(gpu_probe_fire PROPERTIES DISABLED TRUE)
 # 仮の世界の GPU の刻みに気体の区画(T-0592): 静かな大気と燃える木箱が CPU リファレンス(probe_gas)と毎刻みビット一致
 bicameral_add_gpu_test(gpu_probe_gas_test)
@@ -1211,7 +1220,7 @@ add_test(NAME float_check_source_accepts
 foreach(_name IN ITEMS
     reaction_package_test reaction_package_scene_test reaction_species_remap_test reaction_test reaction_contention_test
     reaction_wait_test multires_test multires_wide_test multires_activity_test multires_quiet_test multires_uniform_test
-    multires_state_test field_storage_test sun_column_test sun_lens_test object_heat_test object_heat_nest_test grass_wake_test cascade_light_test sky_port_test cascade_light_swing_test
+    multires_state_test field_storage_test sun_column_test sun_lens_test object_heat_test object_heat_nest_test grass_wake_test cascade_light_test sky_port_test cascade_light_swing_test cascade_tree_grid_test
     multires_conduction_test multires_edge_test multires_subcycle_test multires_implicit_test multires_implicit_tree_test lab_box_test
     gpu_reaction_test gpu_sun_column_test gpu_cascade_light_test gpu_object_heat_test gpu_object_heat_nest_test gpu_multires_test gpu_multires_activity_test gpu_multires_quiet_test gpu_multires_uniform_test
     gpu_multires_conduction_test gpu_multires_implicit_test gpu_multires_implicit_build_test gpu_multires_implicit_tree_test
