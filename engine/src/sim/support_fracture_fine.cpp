@@ -2,7 +2,8 @@
 // 違う大きさのセル(T-1120・ADR-0470)が混ざる場面で、割れの判定を面の数ではなく長さと面積で数える(ADR-0470「割れの判定の数え方」)。
 // 面の種類(s = cellMm ÷ 2・D = 奥行 cellMm。w = 面の幅・h = 面の梁の長さ):
 //   粗い面(分けていないセルどうし)w = 2s・h = 2s / 細かい面(細かいセルどうし)w = s・h = s / 違う大きさの面 w = s・h = 1.5s
-//   面積 A = w D・割れ面のエネルギー G A・U_t = σt² A h ÷ (2E)・r = G A ÷ U_t = 2 E G ÷ (σt² h)・1 刻みに進む割合 = 速さ × 刻み ÷ w
+//   面積 A = w D・割れ面のエネルギー G A・U_t = σt² A h ÷ (2E)・r = G A ÷ U_t = 2 E G ÷ (σt² h)
+//   1 刻みに進む割合 = 速さ × 刻み ÷ 持ち主の区間の Σw(割れが渡る幅。1 本目・2 本目は面ごとに w。T-1135)
 // 区間(3 本目): 面の続き(割れ切っていない面の並び)の両端から長さ ℓ ずつ(細かい格子の数 ℓ ÷ s)。面は近い方の端からの距離(端の側の縁まで)で
 //   持ち主の区間が決まる。強さは区間の範囲の面の引き・押し・軸・ずれの和 ÷ 面積の和、進みは持ち主の区間の ΣU ÷ ΣU_t と ΣGA ÷ ΣU_t で
 //   (粗い面だけなら面の数で数える形 = support_fracture.cpp の WindowStep と同じ区間。丸めの順は違う)。
@@ -61,11 +62,6 @@ namespace bicameral::sim {
             each.unitPj = std::max<uint64_t>(FxDivU128By64(product, 4 * stiffness).quotient, 1);
             each.softening = std::min(FxDivU128By64(FxMulU64Full(each.surfacePj, ONE), each.unitPj).quotient,
                                       SOFTENING_CAP);
-
-            // 速さ × 刻み ÷ 面の幅(1 を超えたら 1)
-            const FxU128 travel = FxMulU64Full(m_strength.crackSpeedMmPerS * m_fracture.stepUs, ONE);
-            const uint64_t step = FxDivU128By64(travel, MICRO * each.slots * side).quotient;
-            each.speedStep = (uint32_t)std::clamp<uint64_t>(step, 1, ONE);
         }
     }
 
@@ -228,7 +224,7 @@ namespace bicameral::sim {
                                    .surfacePj = kind.surfacePj,
                                    .count = 1,
                                    .progress = face.progress,
-                                   .speedStep = kind.speedStep});
+                                   .widthMm = kind.slots * side});
             }
 
             return AdvanceFineWindows(faces, homeOf, windows);
@@ -304,7 +300,7 @@ namespace bicameral::sim {
             window.surfacePj += kind.surfacePj;
             ++window.count;
             window.progress = std::min(window.progress, face.progress);
-            window.speedStep = std::min(window.speedStep, kind.speedStep);
+            window.widthMm += kind.slots * (m_scene.cellMm / 2);
             homeOf[run[j]] = home;
         }
     }
@@ -364,7 +360,8 @@ namespace bicameral::sim {
             if (window.count == 0 || window.target <= window.progress)
                 continue;
 
-            uint32_t reach = window.progress + std::min(window.target - window.progress, window.speedStep);
+            const uint32_t speedStep = SpeedStepFor(window.widthMm);
+            uint32_t reach = window.progress + std::min(window.target - window.progress, speedStep);
             if (windowHeat(w, reach) < 0) {
                 uint32_t low = window.progress;
                 uint32_t high = reach;
@@ -437,6 +434,23 @@ namespace bicameral::sim {
             }
         }
 
+        // 戻さない所: 比が coarsenIndex 以上のセルから coarsenRing のセルまで(分ける所より広く・低い線で = 場所と線の両方に幅を持たせる)
+        std::vector<uint8_t> hold(m_scene.solid.size(), 0);
+        const auto holdRing = (int64_t)m_fracture.coarsenRing;
+        for (uint32_t at = 0; at < worst.size(); ++at) {
+            if (worst[at] < m_fracture.coarsenIndex)
+                continue;
+
+            const auto cx = (int64_t)(at % m_scene.width);
+            const auto cy = (int64_t)(at / m_scene.width);
+            for (int64_t y = std::max<int64_t>(cy - holdRing, 0);
+                 y <= std::min<int64_t>(cy + holdRing, m_scene.height - 1); ++y) {
+                for (int64_t x = std::max<int64_t>(cx - holdRing, 0);
+                     x <= std::min<int64_t>(cx + holdRing, m_scene.width - 1); ++x)
+                    hold[(size_t)x + (size_t)m_scene.width * (size_t)y] = 1;
+            }
+        }
+
         std::vector<uint8_t> next = m_scene.fine;
         bool changed = false;
         for (uint32_t up = 0; up < m_scene.height; ++up) {
@@ -456,7 +470,7 @@ namespace bicameral::sim {
                 }
 
                 uint16_t& calm = m_calmTicks[at];
-                const bool quiet = worst[at] < m_fracture.coarsenIndex && split[at] == 0;
+                const bool quiet = hold[at] == 0 && split[at] == 0;
                 calm = quiet ? (uint16_t)std::min<uint32_t>(calm + 1u, UINT16_MAX) : 0;
                 if (calm >= m_fracture.coarsenTicks && CanMerge(x, up)) {
                     next[at] = 0;

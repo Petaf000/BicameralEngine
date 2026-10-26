@@ -11,14 +11,16 @@
 //     区間の面を一緒に進める(有限の割れの判定〔Leguillon の coupled criterion〕と同じ形。セル ≤ ℓ なら判定がセルの大きさによらない)。
 //     ℓ = 硬さ × 割れ面のエネルギー ÷ 引きの強さ²(Irwin の長さ。下限 SUPPORT_FRACTURE_MIN_LENGTH_MM。D-644)で、物質の別の値は持たない。
 //     セル > ℓ の所は区間 = 面 1 つ(粗い所は ℓ の細かさに下りて割る = 22 §3.5。下りる道は下の refine)
-// 割れの速さは物質の値(m/s。D-612 の既定 = この宇宙の速さとして遅く)。1 刻みに進む割合 = 速さ × 刻み ÷ セル(1 を超える値は 1 で止める。
+// 割れの速さは物質の値(m/s。D-612 の既定 = この宇宙の速さとして遅く)。1 刻みに進む割合 = 速さ × 刻み ÷ 割れが渡る幅(1 を超える値は 1 で止める。
+// 1 本目・2 本目は面の幅 = セル。3 本目は持ち主の区間の面の幅の和〔区間の面は一緒に進むので、区間を渡り切るまでが 幅 ÷ 速さ〕= 細かさによらない。T-1135。
 // 速さから決まる小刻み〔D-612 (a)〕の道はまだ無い: T-0943)。
 // 割れて地面・壁(固定した面)につながらなくなったセルは「分かれた」印を付けて釣り合いから外す(物の物理へ渡すのは R-O1。ここでは印まで)。
 // 細かくする道(T-1067・22 §3.5・ADR-0470「割れの判定の数え方」): 場面に分けたセル(SupportScene::fine)があるか refine を入れると、割れの進みを
 // 細かい格子(一辺 cellMm ÷ 2)の面ごとに持つ(粗い面は細かい面 2 つ分の幅で、2 つの値をそろえて持つ)。区間は面の数ではなく長さで切り、
 // 応力は面積 w × D の重み、割れ面のエネルギーは G × w × D、軟化の傾きは面の梁の長さ h(粗い面 2s・細かい面 s・違う大きさの面 1.5s)、
-// 1 刻みに進む割合は 速さ × 刻み ÷ w(support_fracture_fine.cpp)。refine は強さの比が refineIndex を超えた面の両側の粗いセルを 2 × 2 に分け、
-// 割れが止んだ所(中の面が割れていない・外の面の 2 つの細かい面の進みが同じ・比が coarsenIndex 未満)を戻す(状態だけで決まる = N1)
+// 1 刻みに進む割合は 速さ × 刻み ÷ 持ち主の区間の Σw(support_fracture_fine.cpp。T-1135)。refine は強さの比が refineIndex を超えた面の両側の粗いセルを 2 × 2 に分け、
+// 割れが止んだ所(中の面が割れていない・外の面の 2 つの細かい面の進みが同じ・周り coarsenRing の中に比が coarsenIndex 以上のセルが無い)を
+// 戻す(状態だけで決まる = N1)
 // データの流れ: SupportScene + SupportStrength → SupportLaw(釣り合い)→ 面の力・エネルギー(FaceForces)→ 割れの進み → scene の intactX / intactUp
 //   → 次の刻みの SupportLaw(前の答えから温めて始める)。帳簿: 解放されたエネルギー = 割れ面のエネルギー + 熱(pJ。整数で厳密)
 #pragma once
@@ -64,6 +66,9 @@ namespace bicameral::sim {
         // 戻すのは、比が coarsenIndex 未満の刻みがこの数だけ続いた後(分けると比の測り方が変わるので、比の幅だけでは
         // 線の近くのセルが毎刻み分ける・戻すを行き来した = 2026-10-26 の測り)。続いた数はセルごとの状態(ハッシュに入る)
         uint32_t coarsenTicks = 120;
+        // 戻してよいのは、このチェビシェフの距離の中に比が coarsenIndex 以上のセルが無いセルだけ(T-1134。分ける所の縁のセルが、
+        // 自分の比だけを見て戻ると、隣の割れかけのセルの比の揺れで分ける・戻すを 2 秒ごとに行き来した)。0 = 自分のセルだけを見る(T-1067 の形)
+        uint32_t coarsenRing = 2;
     };
 
     // 割れの帳簿(pJ)。releasedPj == surfacePj + heatPj が整数で厳密(熱は残りとして数える)
@@ -82,6 +87,8 @@ namespace bicameral::sim {
         uint64_t crackingAreaMm2 = 0;  // 割れかけの面の面積の和
         uint32_t fineCells = 0;        // 今の細かいセルの数
         uint32_t refineSteps = 0;      // セルを分けた・戻した刻みの数
+        uint32_t rebuilds =
+            0;  // 法則(SupportLaw)を作り直した数(荷を置いた・掘った・割れが進んだ・分けた。費用の測り。T-1134)
     };
 
     class SupportFracture {
@@ -158,7 +165,6 @@ namespace bicameral::sim {
             uint64_t surfacePj = 0;  // G × 面積
             uint64_t unitPj = 0;     // 引きの強さちょうどで面の梁(長さ h)が一様に伸びた時のエネルギー σt² A h ÷ (2E)
             uint64_t softening = 0;  // r = G A ÷ U_t(Q16)
-            uint32_t speedStep = 0;  // 1 刻みに進む割合の上限(Q16)= 速さ × 刻み ÷ 面の幅
         };
 
         struct FineFace {
@@ -198,7 +204,7 @@ namespace bicameral::sim {
             int64_t heatPj = 0;
             uint32_t count = 0;
             uint32_t progress = SUPPORT_INTACT_FULL;
-            uint32_t speedStep = SUPPORT_INTACT_FULL;
+            uint64_t widthMm = 0;  // 持ち主の区間の面の幅の和(割れが渡る幅。T-1135)
             uint32_t target = 0;
         };
 
@@ -242,6 +248,7 @@ namespace bicameral::sim {
         uint32_t TargetFrom(uint32_t index, int64_t undamagedPj, uint32_t progress) const;
         bool WindowStep();
         int64_t SurfacePj(uint32_t progress) const;
+        uint32_t SpeedStepFor(uint64_t widthMm) const;
         bool Advance(uint32_t x, uint32_t up, uint32_t axis);
         void Separate();
         void Rebuild();
@@ -257,7 +264,7 @@ namespace bicameral::sim {
         uint64_t m_faceSurfacePj = 0;   // G × セルの面積(pJ)
         uint64_t m_faceUnitPj = 0;      // 面が引きの強さちょうどで一様に伸びた時のエネルギー σt² dx³ ÷ (2E)(pJ)
         uint64_t m_softening = 0;       // r(Q16)
-        uint32_t m_speedStep = 0;       // 1 刻みに進む割合の上限(Q16)
+        uint32_t m_speedStep = 0;       // 面 1 つ(1 本目・2 本目)の 1 刻みに進む割合の上限(Q16)
         uint64_t m_rootStrength = 0;    // √(σc σt)(kPa。くっつく強さ c = これ ÷ 2)
         uint64_t m_windowMm = 0;        // ℓ(Window の区間の長さ)
 
