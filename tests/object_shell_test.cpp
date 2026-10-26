@@ -13,6 +13,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <fstream>
 #include <string_view>
 #include <vector>
 
@@ -406,8 +407,10 @@ namespace {
         bool untilQuiet = true;
         bool warmStart = false;
         uint32_t gapSweeps = 0;        // 調べるだけ: 0 から解く時のこの回数と止まった時の面の速さの差
-        uint32_t multigridCycles = 0;  // 調べるだけ(道 B): 赤黒の前の多重格子の V 字の回数
+        bool multigrid = false;        // 解き始めを多重格子で作る(T-1202)
         int64_t quietTolerance = 0;    // 調べるだけ: 収まったとみなす 1 回の赤黒の値の変わりの上限
+        std::ostream* dump = nullptr;  // 調べるだけ(T-1202): 圧力の問題の書き出し先と、何回に 1 回
+        uint32_t dumpEvery = 0;
     };
 
     // 圧力の反復の回数(T-1201。燃え方の場面ごと: 0 始め〔火の来た列が 1/3 まで〕・1 最中・2 消えかけ〔0.5 s 新しい列に火が来ない〕)
@@ -417,6 +420,7 @@ namespace {
         uint32_t most = 0;
         uint64_t capped = 0;
         uint64_t multigridWork = 0;  // 多重格子の費用(細かい格子の赤黒 1 回 = 1000)
+        uint64_t activeWork = 0;     // 収まるまでの赤黒を隣が変わったボクセルだけ回した時(同じ単位。T-1202)
     };
 
     struct Burn {
@@ -490,10 +494,12 @@ namespace {
                                .pressureSweeps = pressure.sweeps,
                                .pressureUntilQuiet = pressure.untilQuiet,
                                .pressureWarmStart = pressure.warmStart,
-                               .pressureMultigridCycles = pressure.multigridCycles,
+                               .pressureMultigrid = pressure.multigrid,
                                .pressureQuietTolerance = pressure.quietTolerance,
                                .gapSweeps = pressure.gapSweeps,
-                               .skeletonWalls = skeletonWalls};
+                               .skeletonWalls = skeletonWalls,
+                               .pressureDump = pressure.dump,
+                               .pressureDumpEvery = pressure.dumpEvery};
         const test::OhGasList& gases = tables.object.gases;
         test::OhWorld world = MakeWorld(tables.table, fuel, cellLevel, grid);
         world.sleeping = sleeping;
@@ -536,6 +542,7 @@ namespace {
             const uint64_t sweepsBefore = flow.pressureSweepsUsed;
             const uint64_t cappedBefore = flow.pressureCapped;
             const uint64_t multigridBefore = flow.pressureMultigridWork;
+            const uint64_t activeBefore = flow.pressureActiveWork;
             flow.pressureMostSweeps = 0;
             if (splits == 1) {
                 test::StepObjectHeat(shared, gases, world, lensOn, WORLD_SEED, tick);
@@ -559,6 +566,7 @@ namespace {
                 stats.most = std::max(stats.most, flow.pressureMostSweeps);
                 stats.capped += flow.pressureCapped - cappedBefore;
                 stats.multigridWork += flow.pressureMultigridWork - multigridBefore;
+                stats.activeWork += flow.pressureActiveWork - activeBefore;
             }
 
             if (probe) {
@@ -733,10 +741,11 @@ namespace {
                     stats.solves == 0 ? 0.0 : static_cast<double>(stats.sweeps) / static_cast<double>(stats.solves),
                     stats.most, static_cast<unsigned long long>(stats.capped),
                     static_cast<unsigned long long>(stats.solves));
+                const double solves = 1000.0 * static_cast<double>(std::max<uint64_t>(stats.solves, 1));
                 if (stats.multigridWork != 0)
-                    std::printf("(多重格子を足した費用 赤黒 %.1f 回分)",
-                                static_cast<double>((stats.sweeps * 1000) + stats.multigridWork) /
-                                    (1000.0 * static_cast<double>(std::max<uint64_t>(stats.solves, 1))));
+                    std::printf("(多重格子を足した費用 赤黒 %.1f 回分・隣が変わったボクセルだけ回すと %.1f 回分)",
+                                static_cast<double>((stats.sweeps * 1000) + stats.multigridWork) / solves,
+                                static_cast<double>(stats.activeWork + stats.multigridWork) / solves);
             }
 
             std::printf("\n");
@@ -789,10 +798,18 @@ int main(int argc, char** argv) {
             pressure.gapSweeps = static_cast<uint32_t>(std::atoi(argv[12]));
 
         if (argc >= 14)
-            pressure.multigridCycles = static_cast<uint32_t>(std::atoi(argv[13]));
+            pressure.multigrid = std::atoi(argv[13]) != 0;
 
         if (argc >= 15)
             pressure.quietTolerance = std::atoi(argv[14]);
+
+        // 調べるだけ(T-1202): 圧力の問題を書き出す(ファイル・何回に 1 回)
+        std::ofstream dump;
+        if (argc >= 17) {
+            dump.open(argv[15], std::ios::binary);
+            pressure.dump = &dump;
+            pressure.dumpEvery = static_cast<uint32_t>(std::atoi(argv[16]));
+        }
 
         const uint32_t sweeps = pressure.sweeps;
         const TableKind kind = monoxide ? TableKind::FuelGas : TableKind::FuelGasWithoutMonoxide;
@@ -806,10 +823,10 @@ int main(int argc, char** argv) {
                       7.8125 / (1 << (grid.bodyLevel - BODY_LEVEL)), grid.columns,
                       inWorld ? "世界の流れ" : "閉じた 1 セル", monoxide ? "・CO あり" : "", 1u << splitLog2, sweeps,
                       pressure.untilQuiet ? "・収まるまで" : "・決まった回数",
-                      pressure.warmStart ? "・温めた始まり" : "", pressure.multigridCycles != 0 ? "・多重格子" : "");
+                      pressure.warmStart ? "・温めた始まり" : "", pressure.multigrid ? "・多重格子" : "");
         Print(FUELS[fuelIndex].name, label, cellLevel, burn);
-        std::printf("  圧力: 収まったとみなす変わりの上限 %lld・多重格子の V 字 %u 回\n",
-                    static_cast<long long>(pressure.quietTolerance), pressure.multigridCycles);
+        std::printf("  圧力: 収まったとみなす変わりの上限 %lld・多重格子 %s\n",
+                    static_cast<long long>(pressure.quietTolerance), pressure.multigrid ? "あり" : "なし");
 
         return burn.conserved && !burn.failed ? 0 : 1;
     }
@@ -854,6 +871,36 @@ int main(int argc, char** argv) {
     EXPECT(first.digest == again.digest);
     EXPECT(first.digest == awake.digest);
     EXPECT(first.shellsMade >= 1 && first.shellsReturned >= 1);
+
+    // 1b. 圧力の解き始めを多重格子で作っても(T-1202。最後は同じ赤黒を収まるまで)、燃え広がりは 0 から赤黒だけの時と同じ
+    //     (同じ整数の式の別の動かない点。違いは 1 % 以内・2026-10-26 の紙 層 2 段で 16.35 ↔ 16.35 mm/s)・保存・上限に当たらない・赤黒が減る
+    {
+        PressureRule rule;
+        rule.multigrid = true;
+        const Burn withMultigrid = RunBurn(noMonoxide, FUELS[0], 0, ShellMode::Flow, true, false, 2, true, {}, false,
+                                           nullptr, 0, rule);
+        const double zeroStartSpeed = SpreadOf(first).millimetresPerSecond;
+        const double multigridSpeed = SpreadOf(withMultigrid).millimetresPerSecond;
+        uint64_t capped = 0;
+        uint64_t sweepsPlain = 0;
+        uint64_t sweepsMultigrid = 0;
+        for (size_t phase = 0; phase < 3; ++phase) {
+            capped += withMultigrid.sweepStats[phase].capped;
+            sweepsPlain += first.sweepStats[phase].sweeps;
+            sweepsMultigrid += withMultigrid.sweepStats[phase].sweeps +
+                               (withMultigrid.sweepStats[phase].multigridWork / 1000);
+        }
+
+        std::printf(
+            "多重格子の解き始め: 速さ %.2f mm/s(0 から赤黒だけ %.2f)・上限に当たった %llu・赤黒の和 %llu(赤黒だけ "
+            "%llu)\n",
+            multigridSpeed, zeroStartSpeed, static_cast<unsigned long long>(capped),
+            static_cast<unsigned long long>(sweepsMultigrid), static_cast<unsigned long long>(sweepsPlain));
+        EXPECT(withMultigrid.conserved && !withMultigrid.failed);
+        EXPECT(capped == 0);
+        EXPECT(zeroStartSpeed > 0 && std::abs(multigridSpeed - zeroStartSpeed) <= zeroStartSpeed * 0.01);
+        EXPECT(sweepsMultigrid * 2 < sweepsPlain);
+    }
 
     // 2. 燃え広がり(燃える物 × 0.5 m / 0.25 m × 表と層)
     struct Variant {
