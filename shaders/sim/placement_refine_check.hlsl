@@ -2,7 +2,8 @@
 // 1 グループ = 親のセル 8 つ・1 スレッド = 子 1 つ(子の番号は MrChildCell の j)。回しは shaders/sim/placement_refine.hlsli、
 // 式は shaders/common/state_field.hlsli(どちらもこの入口が DXC で通ることで HLSL として確かめる)。
 // tests/gpu_placement_refine_test.cpp が sim::PlaceRefineCell・PlaceChildWeights と 1 値ずつビット単位で比べる。
-//   t0: 物質(12 バイト = 種類・密度・詰まり)× 物質の数
+//   t0: 子 1 つの体積(mm³。8 バイト)・物質(12 バイト = 種類・密度・詰まり)× 物質の数
+//       (体積を表に置くのは、細かくする段で子の体積がレベルの表から来る形に合わせるため)
 //   t1: 親のセル((物質の数 + 3) × 8 バイト = 物を含む・x の傾き・z の傾き・物質ごとの量 mg)× セルの数
 //   u0: 子((物質の数 + 3) × 8 バイト = 寄せたか・凝縮相の量・空きの体積・物質ごとの量 mg)× 子 8 × セルの数
 ByteAddressBuffer g_materials : register(t0);
@@ -12,14 +13,14 @@ RWByteAddressBuffer g_children : register(u0);
 cbuffer PlacementConstants : register(b0) {
     uint32_t g_materialCount;
     uint32_t g_cellCount;
-    uint32_t g_childVolumeLow;   // 子 1 つの体積(mm³)の下の 32bit
-    uint32_t g_childVolumeHigh;  // 上の 32bit
+    uint32_t g_reserved0;
+    uint32_t g_reserved1;
 };
 
 static uint32_t s_parentBase;  // 今のスレッドの親のセルの番地(物質の量の先頭)
 
 #define PR_MATERIAL_COUNT g_materialCount
-#define PR_MATERIAL(m) g_materials.Load3((m) * 12)
+#define PR_MATERIAL(m) g_materials.Load3(8 + ((m) * 12))
 #define PR_PARENT_MASS(m) g_parents.Load<int64_t>(s_parentBase + ((m) * 8))
 
 #include "sim/placement_refine.hlsli"
@@ -36,7 +37,7 @@ groupshared uint64_t gs_open[CELLS_PER_GROUP * 8];
     s_parentBase = parentAddress + 24;
 
     // --- 配り方と子 j の重み ---
-    const uint64_t childVolume = ((uint64_t)g_childVolumeHigh << 32) | (uint64_t)g_childVolumeLow;
+    const uint64_t childVolume = g_materials.Load<uint64_t>(0);
     const bool blocked = g_parents.Load<uint64_t>(parentAddress) != 0;
     const PrCell cell = PrMakeCell(blocked, g_parents.Load<int64_t>(parentAddress + 8),
                                    g_parents.Load<int64_t>(parentAddress + 16), childVolume);

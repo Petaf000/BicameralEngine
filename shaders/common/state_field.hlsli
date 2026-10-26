@@ -373,9 +373,22 @@ FX_FN int64_t SfSettleBelowShare(int64_t columnMassMg, uint64_t childVolume, uin
     return FxMulDivS64(columnMassMg, childVolume, settledVolume);
 }
 
-// 子の空きの体積(気体・舞う粒の重み): 子の体積 − 凝縮相の体積(0 で止める)
+// 子の空きの体積(気体・舞う粒の重み): 子の体積 − 凝縮相の体積(0 で止める)。
+// 64bit の引き算と同じ 2 つの値の比べを並べる形(比べて 0 を選ぶ・印を掛ける)は、HW の GPU で差の上の 32bit が別の値になった
+// (差だけ・比べだけなら正しい。WARP と DXIL は正しい。T-1159。T-1078・ADR-0451 と同じ形)。32bit の 2 つに分けて借りを手で回す(同じ値。
+// 体積は 2^63 未満なので、差の一番上のビットで負を見分ける)
 FX_FN uint64_t SfOpenVolume(uint64_t childVolume, uint64_t condensedVolume) {
-    return condensedVolume >= childVolume ? 0 : childVolume - condensedVolume;
+    const uint32_t childLow = (uint32_t)(childVolume & 0xFFFFFFFFu);
+    const uint32_t childHigh = (uint32_t)(childVolume >> 32);
+    const uint32_t condensedLow = (uint32_t)(condensedVolume & 0xFFFFFFFFu);
+    const uint32_t condensedHigh = (uint32_t)(condensedVolume >> 32);
+    const uint32_t borrow = childLow < condensedLow ? 1u : 0u;
+    const uint32_t low = childLow - condensedLow;
+    const uint32_t high = childHigh - condensedHigh - borrow;
+    if ((high & 0x80000000u) != 0u || (high | low) == 0u)
+        return 0;
+
+    return ((uint64_t)high << 32) | (uint64_t)low;
 }
 
 // --- 粗くする: 子 8 つの和 ÷ 8(負の値も −∞ 向きの切り捨て)と余り(0〜7。子のレベルの単位)--------------

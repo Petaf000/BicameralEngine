@@ -2,7 +2,7 @@
 // shaders/sim/placement_refine_check.hlsl(回しは shaders/sim/placement_refine.hlsli・式は shaders/common/state_field.hlsli)を
 // 乱数の親のセルと端の場面(気体だけ・詰まり切った・据わる固体・物・半分の砂・凝縮相がごくわずか・傾きの頭打ち)で走らせ、
 // sim::PlaceRefineCell・PlaceChildWeights(columns = 2・depth = 2)と、子の番号を写し替えて(sim::PlaceIndexOfMrChild)ビット単位で比べる。
-// 子の体積は 3 通り(32bit を超える体積も。ルート定数は上下の 32bit で渡す)。引数は gpu_test_options.h。
+// 子の体積は 3 通り(32bit を超える体積も。体積は t0 の先頭の 8 バイトで渡す)。引数は gpu_test_options.h。
 #include "core/log.h"
 #include "core/singleton.h"
 #include "gpu/com_ptr.h"
@@ -117,7 +117,8 @@ namespace {
         return words;
     }
 
-    std::expected<Buffers, std::string> CreateBuffers(ID3D12Device5* device, std::span<const PlaceCell> cells) {
+    std::expected<Buffers, std::string> CreateBuffers(ID3D12Device5* device, std::span<const PlaceCell> cells,
+                                                      uint64_t childVolumeMm3) {
         Buffers buffers;
         const auto bytecode = gpu::LoadShader("sim/placement_refine_check.cso");
         if (!bytecode)
@@ -128,7 +129,8 @@ namespace {
             return std::unexpected("ルート署名を作れない");
 
         buffers.pipeline = gpu::CreateComputePipeline(device, buffers.rootSignature.Get(), *bytecode);
-        std::vector<uint32_t> materials;
+        // 先頭の 8 バイトは子の体積(placement_refine_check.hlsl の t0)
+        std::vector<uint32_t> materials = {(uint32_t)(childVolumeMm3 & 0xFFFFFFFFu), (uint32_t)(childVolumeMm3 >> 32)};
         for (const PlaceMaterial& material : MATERIALS)
             materials.insert(materials.end(), {material.kind, material.densityKgPerM3, material.packedFractionPct});
 
@@ -152,7 +154,7 @@ namespace {
         if (!queue)
             return std::unexpected(queue.error());
 
-        const auto buffers = CreateBuffers(device, cells);
+        const auto buffers = CreateBuffers(device, cells, childVolumeMm3);
         if (!buffers)
             return std::unexpected(buffers.error());
 
@@ -169,8 +171,7 @@ namespace {
         list->SetComputeRootSignature(buffers->rootSignature.Get());
         list->SetPipelineState(buffers->pipeline.Get());
         list->SetComputeRootUnorderedAccessView(0, buffers->output->GetGPUVirtualAddress());
-        const uint32_t constants[4] = {(uint32_t)MATERIALS.size(), (uint32_t)cells.size(),
-                                       (uint32_t)(childVolumeMm3 & 0xFFFFFFFFu), (uint32_t)(childVolumeMm3 >> 32)};
+        const uint32_t constants[4] = {(uint32_t)MATERIALS.size(), (uint32_t)cells.size(), 0, 0};
         list->SetComputeRoot32BitConstants(ROOT_LAYOUT.RootConstantIndex(), 4, constants, 0);
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.DebugRingIndex(), debugRing->GpuAddress());
         for (uint32_t i = 0; i < 2; ++i)
