@@ -1,6 +1,20 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-26(本体の作業役・T-1159 芯 2 の GPU の回しと 2-3)
+最終更新: 2026-10-26(本体の作業役・試験と push・wt2・wt4・wt3・wt5 の 4 本を main へ・QUESTIONS の棚卸し)
+
+## この仕事でしたこと(2026-10-26・本体の作業役・4 本のマージと棚卸し)
+- **main の試験と push**: wt6 のマージ(t-1163・t-1113)と D-669〜D-676 の後の main を release で(警告 0): CPU 10 本(probe_radiation・reaction_package_scene・blank_world・physics_heat・probe_liquid・rest_return・slope_check・cascade_tree_grid・cascade_light 616 s・sky_port)・
+  GPU 6 本(gpu_probe_sim・gpu_probe_blank・gpu_world_copy・gpu_play_metric・gpu_probe_rewind・gpu_cascade_light)合格 → push(9b5e8781)。
+- **マージ(--no-ff)**: wt2 7e70fa35(T-1134 下りる道をほかの場面でも・T-1135 割れの先の速さの上限)・wt4 777b6ae1(T-1153・T-1169・T-1170・T-1173・T-1174。T-1175 は wt4 で作業中)→ **ADR-0477 Accepted(D-669 窓・半径 2 m)**・
+  wt3 5a4cc737(案 B R3 の研究 T-1070・T-1071・T-1091〜T-1093・T-1105・T-1106・T-1136〜T-1138・T-1166 int64 の溢れの直し。場面の作り方は wt3 が sim/placement_refine に置き換え済み)・
+  wt5 4f3c948f(T-1142・T-1143・T-1144 物の箱が囲む空気の層。衝突は tests/CMakeLists.txt の一覧の 1 行だけ・両方残した。shaders/common/object_heat.hlsli が変わった)。前の 3 本は衝突なし。
+- 4 本の後の試験(release・警告 0): CPU 13 本(object_heat・object_heat_nest・grass_wake・object_shell 1077 s・case_b_box・case_b_r2・case_b_r3 814 s・support_fracture 583 s・_refine・_refine_scenes 599 s・_settle・time_step_lab・time_step_span_dump)・GPU 3 本(gpu_object_heat・gpu_object_heat_nest・gpu_time_step_span)合格。time_step_tree(約 1400 s)は push の後に流した(下の注)。archmap は変わったファイルの参照 10 本を解決できることだけ確かめた(PC が重く全体の --check が device_bash の時間内に終わらない。次に軽い時に全体を)。
+- **QUESTIONS の棚卸し**: 古い判断待ち 40 本を閉じた(答えでエンジンの作りが変わらない仮 = 今のおすすめを決定扱い〔D-539〕/ 後の決定に置き換わった)。各 ADR・チケットの末尾に 1 行・QUESTIONS は末尾の「閉じた問い」に 1 行ずつ。
+  Q31(ゲームの中身)は公開リポジトリから外した(非公開の控え claude/19)。**残る古い判断待ち: Q93 ②(液体の速さの上限 15 m/s。案 B に上限があるか未確認)・Q105・Q148**。
+  Q128 ① は案 B に置き換わる(案 B の判定で案 A に退いた時だけ戻る)。答え済みで節が残っているもの(Q153・Q161・Q167〜Q172 など)はそのまま。
+- 次の番号は **D-677・ADR-0479・T-1188・Q173**(本体に配られた範囲。この仕事では使っていない)。
+
+(前の版の最終更新: 2026-10-26 本体の作業役・T-1159 芯 2 の GPU の回しと 2-3)
 
 ## この仕事でしたこと(2026-10-26・本体の作業役・T-1159)
 - **T-1159 Done(t-1159-c1-gpu を main へ)**: 置かれ方で配るの GPU の回し `shaders/sim/placement_refine.hlsli`(1 スレッド = 子 1 つ・子の番号は MrChildCell の j)と入口 `sim/placement_refine_check.hlsl`。
