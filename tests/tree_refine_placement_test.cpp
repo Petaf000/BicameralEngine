@@ -6,6 +6,8 @@
 //   - 半分のセルは粒が下の子に・気体は上の子に多い。斜面のセルは高い側の上の子に粒が多い
 //   - 子の温度は親と揃う(熱容量の重み。丸めは子 1 つ 1 mJ 以下)
 //   - 2 回走らせて状態の要約が同じ
+//   - 層(T-1220): 粒が全部層なら層の無い世界と同じ子(子の層 = 子の粒の量)・層を使う世界では子の粒と層の和が親 × 8・
+//     舞う粒だけのセルは沈めない
 // 物質の表は試験の表(MakeSpeciesChangedTestTable)の 2 つの物質を、粒(ばらける固体)と液体に書き換えて使う(相の印とモル体積だけを読む)。
 #include <algorithm>
 #include <array>
@@ -254,6 +256,106 @@ namespace {
         Expect(highSide > lowSide, "斜面のセルは高い側の子に粒が多い");
     }
 
+    // --- 層(T-1220。ADR-0489): 層 = 沈む側・残り = 物質の置かれ方(層を使う世界の粒の残りは舞う粒)---
+
+    // 置かれ方の世界の根の粒に 層 = 粒の量 × numerator ÷ 4 を書き(layersOn なら層を使う世界)、八分の一を細かくする
+    World MakeLayeredWorld(const Materials& materials, uint64_t numerator, bool layersOn) {
+        World world = MakeWorld(materials, true, false);
+        if (layersOn)
+            EnableCellLayers(world.nest, materials.table);
+
+        for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+            const RxCell cell = LoadNestCell(world.nest, world.root, index);
+            MrCellLayers layers;
+            for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+                if (cell.species[i] == materials.grain)
+                    layers.amounts[i] = numerator == 4 ? cell.amounts[i] : cell.amounts[i] / 4 * numerator;
+            }
+
+            StoreNestCellWithLayers(world.nest, world.root, index, cell, layers);
+        }
+
+        const MrRequest refine = MrMakeRequest(MR_REQUEST_REFINE, 1, 1, 1, 1);
+        SubmitRequests(world.nest, std::span(&refine, 1));
+        ProcessRequests(world.nest);
+        for (uint32_t slot = 0; slot < world.nest.capacity.worldBlocks; ++slot) {
+            if (world.nest.blocks[slot].kind == MR_BLOCK_REAL && world.nest.blocks[slot].level == 1)
+                world.child = slot;
+        }
+
+        return world;
+    }
+
+    // 子 8 つの粒の量と層の和(親のセル local)
+    struct GrainSums {
+        uint64_t amount = 0;
+        uint64_t layer = 0;
+    };
+
+    GrainSums ChildGrainSums(const Materials& materials, const World& world, uint32_t local) {
+        GrainSums sums;
+        for (uint32_t j = 0; j < 8; ++j) {
+            const uint32_t index = MrChildCell(local, j);
+            const RxCell cell = LoadNestCell(world.nest, world.child, index);
+            const MrCellLayers layers = LoadNestCellLayers(world.nest, world.child, index);
+            for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+                if (cell.species[i] != materials.grain)
+                    continue;
+
+                sums.amount += cell.amounts[i];
+                sums.layer += layers.amounts[i];
+            }
+        }
+
+        return sums;
+    }
+
+    void TestLayers(const Materials& materials, const World& placed) {
+        // --- 層を使わない世界で粒が全部層なら、層の無い世界と同じ子(層 = 子の粒の量)---
+        const World full = MakeLayeredWorld(materials, 4, false);
+        uint32_t fullMismatches = 0;
+        for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+            const RxCell cell = LoadNestCell(full.nest, full.child, index);
+            const MrCellLayers layers = LoadNestCellLayers(full.nest, full.child, index);
+            bool same = MrSameCell(cell, LoadNestCell(placed.nest, placed.child, index));
+            for (uint32_t i = 0; i < cell.speciesCount; ++i)
+                same = same && layers.amounts[i] == (cell.species[i] == materials.grain ? cell.amounts[i] : 0);
+
+            fullMismatches += same ? 0u : 1u;
+        }
+
+        Expect(fullMismatches == 0, "層: 粒が全部層なら子は層の無い世界と同じで、子の層 = 子の粒の量");
+
+        // --- 層を使う世界: 半分が層・層の無い粒(舞う粒)---
+        const World half = MakeLayeredWorld(materials, 2, true);
+        const World floating = MakeLayeredWorld(materials, 0, true);
+        const World probe = MakeLayeredWorld(materials, 2, true);
+        uint32_t sumMismatches = 0;
+        uint32_t floatMismatches = 0;
+        for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
+            const uint32_t parentCell = MrOctantCell(0, local);
+            const RxCell parent = SceneCell(materials, parentCell);
+            const uint64_t grain = AmountOf(parent, materials.grain);
+            const GrainSums halfSums = ChildGrainSums(materials, half, local);
+            const GrainSums floatSums = ChildGrainSums(materials, floating, local);
+            sumMismatches += halfSums.amount == grain * 8 && halfSums.layer == grain / 4 * 2 * 8 ? 0u : 1u;
+            sumMismatches += floatSums.amount == grain * 8 && floatSums.layer == 0 ? 0u : 1u;
+
+            // 粒の半分の層(y = 2・z < 2)は舞う粒だけなら凝縮相が無いので寄せない(子は親と同じ数)
+            const bool halfLayerCell = MrCellZ(parentCell) < 2 && MrCellY(parentCell) == 2;
+            for (uint32_t j = 0; j < 8 && halfLayerCell; ++j) {
+                const RxCell cell = LoadNestCell(floating.nest, floating.child, MrChildCell(local, j));
+                floatMismatches += AmountOf(cell, materials.grain) == grain ? 0u : 1u;
+            }
+        }
+
+        Expect(sumMismatches == 0, "層を使う世界: 子の粒の量の和 = 親 × 8・子の層の和 = 親の層 × 8");
+        Expect(floatMismatches == 0, "層を使う世界: 舞う粒だけのセルは沈めない(子は親と同じ数)");
+        Expect(CountLayerMisfits(half.nest) == 0 && CountLayerMisfits(floating.nest) == 0, "層: 0 ≤ 層 ≤ 量");
+        Expect(HashWholeNest(half.nest) == HashWholeNest(probe.nest), "層: 2 回走らせて状態の要約が同じ");
+        Expect(HashWholeNest(half.nest) != HashWholeNest(floating.nest), "層: 層の違いで子が変わる");
+    }
+
     int Run() {
         const auto baked = BakeReactionTable(MakeSpeciesChangedTestTable());
         if (!baked) {
@@ -270,6 +372,7 @@ namespace {
 
         TestConservation(materials, placed, same);
         TestShape(materials, placed);
+        TestLayers(materials, placed);
         Expect(HashWholeNest(placed.nest) == HashWholeNest(MakeWorld(materials, true).nest),
                "2 回走らせて状態の要約が同じ");
         Expect(HashWholeNest(placed.nest) != HashWholeNest(same.nest), "置かれ方の世界は SAME の世界と違う");

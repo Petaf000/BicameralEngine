@@ -60,6 +60,9 @@ namespace bicameral::sim {
         std::array<uint32_t, multires::MR_BLOCK_CELLS + 1> offsets{};
         std::vector<uint32_t> species;
         std::vector<uint64_t> amounts;
+
+        // 成分ごとの層の量(T-1220。セルの溢れだけ。空 = 溢れの成分の層は全部 0。あれば species と同じ並び)
+        std::vector<uint64_t> layers;
     };
 
     // 一様なブロックの値 1 つの溢れ(T-0199): インラインの値(nest.cells.uniform の枠ごとの値)の続きの成分(物質 ID の昇順)。
@@ -85,11 +88,20 @@ namespace bicameral::sim {
         std::vector<uint64_t> layers;
     };
 
+    // 一様な枠の値 1 つの成分ごとの層の量(T-1220。ADR-0489): 0 でない層の物質(昇順)と層の量(µmol)。空 = 層は全部 0(層の無い枠は何も持たない)。
+    // 成分の並びの位置ではなく物質で結ぶ。読む時は今の一様の値(溢れまで)の成分と物質で結んで 層 = min(層, 量) にする
+    // (一様の値を層を知らずに書き換える道〔GPU から読んだ列〕があっても 0 ≤ 層 ≤ 量 のまま。無くなった物質の層は読まない)
+    struct MultiresUniformLayers {
+        std::vector<uint32_t> species;
+        std::vector<uint64_t> layers;
+    };
+
     // セルの置き場(T-0931): 一様の値(枠ごと。GPU と同じ RxCell)+ セルの頁(観察の枠の頁 + 世界の頁)。
     // GPU と同じ並びの列(DenseCellImage)は [一様の値 × 枠][頁 × MR_BLOCK_CELLS]。状態の要約・保存点はこの列の順・同じ値
     struct MultiresCellStore {
         std::vector<reaction::RxCell> uniform;
         std::vector<MultiresCellPage> pages;
+        std::vector<MultiresUniformLayers> uniformLayers;  // [枠] 一様の値の層(T-1220。層のある枠だけ中身を持つ)
     };
 
     inline constexpr uint32_t MULTIRES_NO_FIELD_PAGE = UINT32_MAX;
@@ -191,6 +203,15 @@ namespace bicameral::sim {
         struct RefineCells {
             std::vector<reaction::RxSpecies> species;
         } refineCells;
+
+        // --- 成分ごとの層を使う世界(T-1220。ADR-0489。状態に入らない)。EnableCellLayers で物質の表の粒の印を持たせる。
+        //     使う世界では、粒の物質(RX_SPECIES_GRAIN)の層でない分(残り)は舞う粒: 細かくする時は空きに同じ濃さで配り(層は沈む側)、
+        //     残りのある頁は畳まない(眠らない)。使わない世界(既定)は今と同じ(粒は全部沈む側として配り、眠る判定も今のまま)。
+        //     層の持ち方・付け替え・細かくする / 粗くする時の配りは、どちらの世界でも同じ ---
+        struct CellLayers {
+            bool enabled = false;
+            std::vector<uint8_t> grain;  // [物質] 粒の物質なら 1
+        } cellLayers;
 
         // --- 活性の種(T-0100)。次の StepActive で刻むブロックの元(世界の枠ごとに 0 / 1)。
         //     GPU は順の決まらない一覧で持つので、集合として比べる(状態の要約に入れない)---
@@ -322,8 +343,8 @@ namespace bicameral::sim {
     // 層を書くのは層を動かす法則(積もる・舞い上がる・崩れる・層の流れ)だけで、StoreNestCellWithLayers で書く。
     // ほかの書き方(StoreNestCell・刻み・GPU から読んだ列)は成分の量だけを書き、層は物質で結んで付け替える:
     //   層 = min(前の層, 新しい量)(増えた分は残りへ。無くなった物質・新しい物質の層は 0)。並びの位置ではなく物質で結ぶ。
-    // 1 段目(T-1210): 頁のセルだけ。一様の値の層・溢れの成分の層・細かくする / 粗くする時の配り・GPU は T-1220・T-1221
-    // (今は一様の枠の層は 0・細かくする / 粗くすると層は 0 = 全部が残りになる〔量は保存〕・層のある頁は畳まない・溢れを使う世界は層を書けない)
+    // 2 段目(T-1220。ADR-0489): 一様の枠の層(MultiresUniformLayers)・溢れの成分の層・細かくする(子は親と同じ層 / 置かれ方で配る時は層を沈む側)・
+    // 粗くする(成分ごとに層の和 ÷ 8 の切り捨て)・眠る(層まで一様な時だけ畳む。層を使う世界は舞う粒が残れば畳まない)。GPU は層を知らない(T-1221)
 
     // 成分の並びの位置ごとの層の量(位置は RxCell の species と同じ。成分の数の外は 0)
     struct MrCellLayers {
@@ -333,12 +354,23 @@ namespace bicameral::sim {
     // 層がセルに収まるか(成分ごとに 0 ≤ 層 ≤ 量・成分の数の外は 0)
     [[nodiscard]] bool MrLayersFit(const reaction::RxCell& cell, const MrCellLayers& layers);
 
-    // 枠 slot のセル index の層(一様の枠は 0)
+    // 枠 slot のセル index の層(インラインの成分の分。一様の枠は一様の値の層・覆われたセルは 0)
     [[nodiscard]] MrCellLayers LoadNestCellLayers(const MultiresNest& nest, uint32_t slot, uint32_t index);
 
-    // 頁を持つ枠 slot のセル index に、成分の量と層を書く(層を動かす法則が使う。層はセルに収まること。溢れを使わない世界)
+    // 頁を持つ枠 slot のセル index に、成分の量と層を書く(層を動かす法則が使う。層はセルに収まること。
+    // 溢れを使う世界ではインラインに入りきるセルだけ。溢れまでは StoreWideNestCellWithLayers)
     void StoreNestCellWithLayers(MultiresNest& nest, uint32_t slot, uint32_t index, const reaction::RxCell& cell,
                                  const MrCellLayers& layers);
+
+    // 上限の無い形の層(LoadWideNestCell の成分と同じ位置・同じ数。T-1220)
+    [[nodiscard]] std::vector<uint64_t> LoadWideNestCellLayers(const MultiresNest& nest, uint32_t slot, uint32_t index);
+
+    // 頁を持つ枠 slot のセル index に、上限の無い形の成分の量と層を書く(layers は cell の成分と同じ位置・同じ数。T-1220)
+    void StoreWideNestCellWithLayers(MultiresNest& nest, uint32_t slot, uint32_t index,
+                                     const reaction::RxWideCell& cell, std::span<const uint64_t> layers);
+
+    // 層を使う世界にする(物質の表の粒の印を持たせる。ADR-0489。層を書く前・刻む前に呼ぶ)
+    void EnableCellLayers(MultiresNest& nest, const BakedReactionTable& table);
 
     // 層が収まらないセルの数(試験・検査用。0 でなければ不具合)
     [[nodiscard]] uint64_t CountLayerMisfits(const MultiresNest& nest);
@@ -399,7 +431,8 @@ namespace bicameral::sim {
     // 物質の表を持たせ、細かくする時のセルの中身と置かれ方の印の欄(refinePlacement)を同じ置かれ方で配るようにする
     void EnableRefineCellPlacement(MultiresNest& nest, const BakedReactionTable& table);
 
-    // 頁を持つ親のセル 1 つの置かれ方(数の空間。子の器 = MR_CELL_VOLUME_MM3・量 = 親の数 × 8・並びは親の成分の順)。
+    // 頁を持つ親のセル 1 つの置かれ方(数の空間。子の器 = MR_CELL_VOLUME_MM3・量 = 親の数 × 8・並びは親の成分の順。
+    // 層を持つ成分・層を使う世界の粒は「層の分・残り」の 2 つの物質に分けて並ぶ。T-1220)。
     // 寄せないセル・表が無い・溢れを使う世界・一様な親なら無し(子は親と同じ数)
     [[nodiscard]] std::optional<PlacedChildren> PlaceTreeCell(const MultiresNest& nest, uint32_t parentSlot,
                                                               uint32_t parentCell);

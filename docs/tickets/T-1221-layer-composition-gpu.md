@@ -21,6 +21,10 @@ GPU の世界(gpu_multires)でも物質ごとの層の量を持ち、CPU リフ�
 ## メモ・参考
 - GPU が g_cells を直接書く所は約 50 か所(shaders/sim の multires_graph・multires_tree・multires_wait_step・multires_wide_step・multires_conduct・implicit_conduct・
   object_heat*・lab_box・reaction_cells。2026-10-26 の grep)。エネルギーだけを書く所は付け替え不要。
+- T-1220 の洗い出し(T-1220 のチケットの「2 回以上書く道」): CPU は反応・気体の段・液体の段でそれぞれ 1 セル 1 回書き、段ごとに付け替える。
+  GPU の「層を合わせる段」は刻みの最後に 1 回ではなく、この段の境ごとに置くとビット一致する(反応で減って気体で増える物質で分かれるため)。
+- T-1220 の CPU の限り(ここで直す): GPU から読んだ溢れの領域は層を消す(gpu_multires.cpp)・溢れを使う世界の一様の値の層は読み戻しで結び直さない・
+  層の頁・一様の枠の層(MultiresCellStore::uniformLayers)・溢れの層(MultiresOverflowArea::layers)を GPU へ上げる形。ADR-0489。
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-10-26(wt3): T-1210 から分けた。

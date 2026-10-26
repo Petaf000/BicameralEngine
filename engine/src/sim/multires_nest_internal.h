@@ -63,6 +63,46 @@ namespace bicameral::sim::nest_detail {
     [[nodiscard]] uint64_t HashCellLayers(uint64_t hash, const MultiresNest& nest, uint32_t page, uint32_t index,
                                           uint64_t address);
 
+    // --- 成分ごとの層の量の 2 段目(T-1220。ADR-0489。multires_cell_store.cpp・multires_wide_cell.cpp)---
+
+    // 頁 page が層の並びを持つか(インラインか溢れ。持っていても全部 0 のことがある)
+    [[nodiscard]] bool PageKeepsLayers(const MultiresNest& nest, uint32_t page);
+
+    // 枠 slot が層を持つか(一様なら一様の値の層・頁なら頁の層の並び)
+    [[nodiscard]] bool BlockKeepsLayers(const MultiresNest& nest, uint32_t slot);
+
+    // 頁 page のセル index を上限の無い形で(インライン + 溢れ)・その層(同じ位置・同じ数)
+    [[nodiscard]] reaction::RxWideCell LoadWidePageCell(const MultiresNest& nest, uint32_t page, uint32_t index);
+    [[nodiscard]] std::vector<uint64_t> LoadWidePageCellLayers(const MultiresNest& nest, uint32_t page, uint32_t index);
+
+    // 頁 page のセル index に上限の無い形の成分と層を書く(layers は cell の成分と同じ位置・同じ数。層はセルに収まること)
+    void StoreWidePageCellWithLayers(MultiresNest& nest, uint32_t page, uint32_t index,
+                                     const reaction::RxWideCell& cell, std::span<const uint64_t> layers);
+
+    // 前の成分(species)と層を新しいセルの成分へ物質で結ぶ: 層 = min(前の層, 新しい量)。前に無かった物質の層は 0
+    [[nodiscard]] std::vector<uint64_t> RebindLayers(std::span<const uint32_t> species,
+                                                     std::span<const uint64_t> layers,
+                                                     const reaction::RxWideCell& cell);
+
+    // 一様な枠 slot の層(一様の値〔溢れまで〕の成分と同じ位置・同じ数)・書く(0 でない層だけ持つ)・消す・あるか
+    [[nodiscard]] std::vector<uint64_t> LoadUniformLayers(const MultiresNest& nest, uint32_t slot);
+    void SetUniformLayers(MultiresNest& nest, uint32_t slot, const reaction::RxWideCell& value,
+                          std::span<const uint64_t> layers);
+    void ClearUniformLayers(MultiresNest& nest, uint32_t slot);
+
+    // 枠 slot のセル cell を頁 page のセル index へ写す(層まで。書く先の古い層は残さない。層の無い所は前と同じ書き方)
+    void CopyCellToPage(MultiresNest& nest, uint32_t slot, uint32_t cell, uint32_t page, uint32_t index);
+
+    // 一様な枠 slot の値(と層)で頁 page を埋め、一様の値の層を消す(頁に広げる時。頁の欄は呼ぶ側。層の無い枠は前と同じ書き方)
+    void FillPageFromUniform(MultiresNest& nest, uint32_t slot, uint32_t page);
+
+    // 層を使う世界で、セルに舞う粒(粒の物質の 量 > 層)があるか(使わない世界はいつも false。眠る判定)
+    [[nodiscard]] bool HasFloatingGrain(const MultiresNest& nest, const reaction::RxWideCell& cell,
+                                        std::span<const uint64_t> layers);
+
+    // 一様な枠 slot の 0 でない層を要約に足す(層の無い枠は何も足さない)
+    [[nodiscard]] uint64_t HashUniformLayers(uint64_t hash, const MultiresNest& nest, uint32_t slot, uint64_t address);
+
     // 頁を持つ枠のセル
     inline reaction::RxCell LoadCellAt(const MultiresNest& nest, uint32_t slot, uint32_t index) {
         FX_ASSERT(!multires::MrIsUniform(nest.blocks[slot]));

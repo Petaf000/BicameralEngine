@@ -4,6 +4,8 @@
 // 頁の幅は書く時に足りなければ広げ、眠る判定(FoldExact の前)で頁の中の成分の数の最大まで詰める。並びは値だけで決まり、書いた順に依らない。
 // 成分ごとの層の量(T-1210。ADR-0481 の 5): 層のある頁だけ成分と同じ並びの層を持つ。成分の量だけを書く道(StorePageCell)は、
 // 書く前の成分と物質で結んで 層 = min(前の層, 新しい量) に付け替える(増えた分は残りへ)。層を書くのは StorePageCellWithLayers だけ。
+// 2 段目(T-1220。ADR-0489): 一様の枠の層(物質と層の組。読む時に今の一様の値と物質で結ぶ)・溢れの成分の層(付け替えは multires_wide_cell.cpp)・
+// 頁に広げる時に写す(FillPageFromUniform)・眠る判定の舞う粒(HasFloatingGrain)・要約と検査。
 #include <algorithm>
 
 #include "sim/multires_nest.h"
@@ -69,7 +71,7 @@ namespace bicameral::sim {
         // --- 層(T-1210)---
 
         // 書く前の頁のセル index の層を、新しいセルの成分へ物質で結ぶ: 層 = min(前の層, 新しい量)。前に無かった物質の層は 0
-        MrCellLayers RebindLayers(const MultiresCellPage& page, uint32_t index, const RxCell& cell) {
+        MrCellLayers RebindPageLayers(const MultiresCellPage& page, uint32_t index, const RxCell& cell) {
             MrCellLayers layers;
             const size_t base = size_t{index} * page.width;
             for (uint32_t i = 0; i < cell.speciesCount; ++i) {
@@ -138,7 +140,7 @@ namespace bicameral::sim {
             }
 
             // --- 層を物質で結んで付け替える(書く前の成分から。T-1210)---
-            const MrCellLayers layers = RebindLayers(cells, index, cell);
+            const MrCellLayers layers = RebindPageLayers(cells, index, cell);
             WriteCell(cells, index, cell);
             WriteLayers(cells, index, cell.speciesCount, layers);
         }
@@ -152,8 +154,15 @@ namespace bicameral::sim {
             if (width < cells.width)
                 RelayoutPage(cells, width);
 
-            if (!PageHasLayers(nest, page))
+            if (!std::ranges::any_of(cells.layers, [](uint64_t layer) { return layer != 0; }))
                 cells.layers.clear();  // 層が全部 0 になった頁は層の並びを持たない(読む値は同じ)
+
+            if (!nest.wideCells)
+                return;
+
+            MultiresOverflowArea& area = nest.cellOverflow[page];
+            if (!std::ranges::any_of(area.layers, [](uint64_t layer) { return layer != 0; }))
+                area.layers.clear();  // 溢れの成分の層も同じ(T-1220)
         }
 
         MrCellLayers LoadPageCellLayers(const MultiresNest& nest, uint32_t page, uint32_t index) {
@@ -187,9 +196,14 @@ namespace bicameral::sim {
         }
 
         bool PageHasLayers(const MultiresNest& nest, uint32_t page) {
-            const std::vector<uint64_t>& layers = nest.cells.pages[page].layers;
+            const auto nonzero = [](uint64_t layer) {
+                return layer != 0;
+            };
+            if (std::ranges::any_of(nest.cells.pages[page].layers, nonzero))
+                return true;
 
-            return std::ranges::any_of(layers, [](uint64_t layer) { return layer != 0; });
+            return nest.wideCells &&
+                   std::ranges::any_of(nest.cellOverflow[page].layers, nonzero);  // 溢れの成分(T-1220)
         }
 
         void ClearPageLayers(MultiresNest& nest, uint32_t page) {
@@ -198,20 +212,134 @@ namespace bicameral::sim {
 
         uint64_t HashCellLayers(uint64_t hash, const MultiresNest& nest, uint32_t page, uint32_t index,
                                 uint64_t address) {
-            const MultiresCellPage& cells = nest.cells.pages[page];
-            if (cells.layers.empty())
+            if (!PageKeepsLayers(nest, page))
                 return hash;
 
-            // 0 でない層だけ(層の無い世界の要約はビット単位で今と同じ)。物質で書く(頁の幅に依らない)
-            const size_t base = size_t{index} * cells.width;
-            for (uint32_t i = 0; i < cells.counts[index]; ++i) {
-                const uint64_t layer = cells.layers[base + i];
-                if (layer == 0)
+            // 0 でない層だけ(層の無い世界の要約はビット単位で今と同じ)。物質で書く(頁の幅・インラインと溢れの分け目に依らない)
+            const RxWideCell cell = LoadWidePageCell(nest, page, index);
+            const std::vector<uint64_t> layers = LoadWidePageCellLayers(nest, page, index);
+            for (uint32_t i = 0; i < layers.size(); ++i) {
+                if (layers[i] == 0)
                     continue;
 
                 hash = FxHashCombine(hash, address);
-                hash = FxHashCombine(hash, cells.species[base + i]);
-                hash = FxHashCombine(hash, layer);
+                hash = FxHashCombine(hash, cell.species[i]);
+                hash = FxHashCombine(hash, layers[i]);
+            }
+
+            return hash;
+        }
+
+        // --- 2 段目(T-1220)---
+
+        bool PageKeepsLayers(const MultiresNest& nest, uint32_t page) {
+            if (!nest.cells.pages[page].layers.empty())
+                return true;
+
+            return nest.wideCells && !nest.cellOverflow[page].layers.empty();
+        }
+
+        bool BlockKeepsLayers(const MultiresNest& nest, uint32_t slot) {
+            const MrBlock& block = nest.blocks[slot];
+            if (MrIsUniform(block))
+                return !nest.cells.uniformLayers[slot].species.empty();
+
+            return PageKeepsLayers(nest, block.page);
+        }
+
+        std::vector<uint64_t> RebindLayers(std::span<const uint32_t> species, std::span<const uint64_t> layers,
+                                           const RxWideCell& cell) {
+            FX_ASSERT(species.size() == layers.size());
+            std::vector<uint64_t> bound(cell.speciesCount, 0);
+            for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+                for (size_t j = 0; j < species.size(); ++j) {
+                    if (species[j] == cell.species[i])
+                        bound[i] = std::min(layers[j], cell.amounts[i]);
+                }
+            }
+
+            return bound;
+        }
+
+        std::vector<uint64_t> LoadUniformLayers(const MultiresNest& nest, uint32_t slot) {
+            const MultiresUniformLayers& stored = nest.cells.uniformLayers[slot];
+            const RxWideCell value = LoadWideUniform(nest, slot);
+            if (stored.species.empty())
+                return std::vector<uint64_t>(value.speciesCount, 0);
+
+            return RebindLayers(stored.species, stored.layers, value);
+        }
+
+        void SetUniformLayers(MultiresNest& nest, uint32_t slot, const RxWideCell& value,
+                              std::span<const uint64_t> layers) {
+            FX_ASSERT(layers.size() <= value.speciesCount);
+            MultiresUniformLayers& stored = nest.cells.uniformLayers[slot];
+            stored = {};
+            for (uint32_t i = 0; i < layers.size(); ++i) {
+                if (layers[i] == 0)
+                    continue;
+
+                FX_ASSERT(layers[i] <= value.amounts[i]);
+                stored.species.push_back(value.species[i]);
+                stored.layers.push_back(layers[i]);
+            }
+        }
+
+        void ClearUniformLayers(MultiresNest& nest, uint32_t slot) {
+            nest.cells.uniformLayers[slot] = {};
+        }
+
+        void CopyCellToPage(MultiresNest& nest, uint32_t slot, uint32_t cell, uint32_t page, uint32_t index) {
+            // --- 層のある所から・層の並びを持つ頁へは層まで書く(書く先の古い層を残さない)---
+            if (BlockKeepsLayers(nest, slot) || PageKeepsLayers(nest, page)) {
+                StoreWidePageCellWithLayers(nest, page, index, LoadWideNestCell(nest, slot, cell),
+                                            LoadWideNestCellLayers(nest, slot, cell));
+                return;
+            }
+
+            // --- 層の無い所は前と同じ書き方(溢れを使う世界は溢れごと。T-0187)---
+            if (nest.wideCells)
+                StoreWidePageCell(nest, page, index, LoadWideNestCell(nest, slot, cell));
+            else
+                StorePageCell(nest, page, index, LoadNestCell(nest, slot, cell));
+        }
+
+        void FillPageFromUniform(MultiresNest& nest, uint32_t slot, uint32_t page) {
+            FX_ASSERT(MrIsUniform(nest.blocks[slot]));
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
+                CopyCellToPage(nest, slot, index, page, index);  // 一様の値の溢れごと(返された頁の溢れは空。T-0199)
+
+            ClearUniformLayers(nest, slot);  // 頁に移した(一様に戻る時は畳む道が書き直す)
+        }
+
+        bool HasFloatingGrain(const MultiresNest& nest, const RxWideCell& cell, std::span<const uint64_t> layers) {
+            if (!nest.cellLayers.enabled)
+                return false;
+
+            const std::vector<uint8_t>& grain = nest.cellLayers.grain;
+            for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+                const bool isGrain = cell.species[i] < grain.size() && grain[cell.species[i]] != 0;
+                const uint64_t layer = i < layers.size() ? layers[i] : 0;
+                if (isGrain && cell.amounts[i] > layer)
+                    return true;
+            }
+
+            return false;
+        }
+
+        uint64_t HashUniformLayers(uint64_t hash, const MultiresNest& nest, uint32_t slot, uint64_t address) {
+            if (nest.cells.uniformLayers[slot].species.empty())
+                return hash;
+
+            const RxWideCell value = LoadWideUniform(nest, slot);
+            const std::vector<uint64_t> layers = LoadUniformLayers(nest, slot);
+            for (uint32_t i = 0; i < layers.size(); ++i) {
+                if (layers[i] == 0)
+                    continue;
+
+                hash = FxHashCombine(hash, address);
+                hash = FxHashCombine(hash, value.species[i]);
+                hash = FxHashCombine(hash, layers[i]);
             }
 
             return hash;
@@ -233,17 +361,46 @@ namespace bicameral::sim {
 
     MrCellLayers LoadNestCellLayers(const MultiresNest& nest, uint32_t slot, uint32_t index) {
         const MrBlock& block = nest.blocks[slot];
-        if (MrIsUniform(block))
-            return {};  // 一様の枠の層は 0(1 段目。T-1220)
+        if (!MrIsUniform(block))
+            return nest_detail::LoadPageCellLayers(nest, block.page, index);
 
-        return nest_detail::LoadPageCellLayers(nest, block.page, index);
+        // --- 一様の枠は一様の値の層(インラインの成分の分。T-1220)---
+        MrCellLayers layers;
+        const std::vector<uint64_t> wide = LoadWideNestCellLayers(nest, slot, index);
+        for (uint32_t i = 0; i < std::min<size_t>(wide.size(), RX_MAX_CELL_SPECIES); ++i)
+            layers.amounts[i] = wide[i];
+
+        return layers;
     }
 
     void StoreNestCellWithLayers(MultiresNest& nest, uint32_t slot, uint32_t index, const RxCell& cell,
                                  const MrCellLayers& layers) {
-        FX_ASSERT(!nest.wideCells);  // 溢れの成分の層は T-1220
         FX_ASSERT(!MrIsUniform(nest.blocks[slot]));
-        nest_detail::StorePageCellWithLayers(nest, nest.blocks[slot].page, index, cell, layers);
+        if (!nest.wideCells) {
+            nest_detail::StorePageCellWithLayers(nest, nest.blocks[slot].page, index, cell, layers);
+            return;
+        }
+
+        // --- 溢れを使う世界はインラインに入りきるセルを上限の無い形で(溢れの成分の層も付け替える。T-1220)---
+        const std::span<const uint64_t> used(layers.amounts.data(), cell.speciesCount);
+        nest_detail::StoreWidePageCellWithLayers(nest, nest.blocks[slot].page, index, RxWidenCell(cell), used);
+    }
+
+    std::vector<uint64_t> LoadWideNestCellLayers(const MultiresNest& nest, uint32_t slot, uint32_t index) {
+        const MrBlock& block = nest.blocks[slot];
+        if (!MrIsUniform(block))
+            return nest_detail::LoadWidePageCellLayers(nest, block.page, index);
+
+        if (MrIsCoveredCell(block, index))
+            return {};  // 覆われたセルは空
+
+        return nest_detail::LoadUniformLayers(nest, slot);
+    }
+
+    void StoreWideNestCellWithLayers(MultiresNest& nest, uint32_t slot, uint32_t index, const RxWideCell& cell,
+                                     std::span<const uint64_t> layers) {
+        FX_ASSERT(!MrIsUniform(nest.blocks[slot]));
+        nest_detail::StoreWidePageCellWithLayers(nest, nest.blocks[slot].page, index, cell, layers);
     }
 
     uint64_t CountLayerMisfits(const MultiresNest& nest) {
@@ -265,6 +422,41 @@ namespace bicameral::sim {
                     misfits += fits ? 0u : 1u;
                 }
             }
+        }
+
+        // --- 一様の枠の層(T-1220): 一様な枠だけが持ち、物質は一様の値にあって 層 ≤ 量 ---
+        for (uint32_t slot = 0; slot < nest.cells.uniformLayers.size(); ++slot) {
+            const MultiresUniformLayers& stored = nest.cells.uniformLayers[slot];
+            if (stored.species.empty())
+                continue;
+
+            if (stored.layers.size() != stored.species.size() || !MrIsUniform(nest.blocks[slot])) {
+                misfits += 1;
+                continue;
+            }
+
+            const RxWideCell value = LoadWideUniform(nest, slot);
+            for (size_t k = 0; k < stored.species.size(); ++k) {
+                bool fits = false;
+                for (uint32_t i = 0; i < value.speciesCount; ++i)
+                    fits |= value.species[i] == stored.species[k] && stored.layers[k] <= value.amounts[i];
+
+                misfits += fits ? 0u : 1u;
+            }
+        }
+
+        // --- 溢れの成分の層(T-1220)---
+        for (const MultiresOverflowArea& area : nest.cellOverflow) {
+            if (area.layers.empty())
+                continue;
+
+            if (area.layers.size() != area.amounts.size()) {
+                misfits += 1;
+                continue;
+            }
+
+            for (size_t k = 0; k < area.layers.size(); ++k)
+                misfits += area.layers[k] <= area.amounts[k] ? 0u : 1u;
         }
 
         return misfits;
@@ -304,6 +496,18 @@ namespace bicameral::sim {
                 const RxCell& cell = image[uniformCount + (size_t{page} * MR_BLOCK_CELLS) + index];
                 nest_detail::StorePageCell(nest, page, index, cell);
             }
+        }
+
+        // --- 一様の値の層を新しい値と物質で結び直す(GPU は層を知らない。溢れを使う世界の一様の値の溢れは後で読むので T-1221)---
+        if (nest.wideCells)
+            return;
+
+        for (uint32_t slot = 0; slot < uniformCount; ++slot) {
+            if (nest.cells.uniformLayers[slot].species.empty())
+                continue;
+
+            const std::vector<uint64_t> layers = nest_detail::LoadUniformLayers(nest, slot);
+            nest_detail::SetUniformLayers(nest, slot, LoadWideUniform(nest, slot), layers);
         }
     }
 
