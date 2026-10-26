@@ -25,6 +25,8 @@
 // T-1141: event-merge [check=0] [every=n dump=<ファイル>](1 出来事の列を組ごとに 1 本の系にまとめ、列ごとに解いた値とビット一致か・
 //         組の数・費用の式での GPU の待ち。every= で n 出来事に 1 つ列の系を書く = gpu_time_step_span_test --events が解き比べて測る)
 //         [scene=night](T-1152: 池〔静かな夜〕の出来事。既定は火事)。出来事のセルの数の分布も出す
+// T-1153: place [offset=ずらし(m)] [heaterk=熱い物の温度(K)] [fuel=1] [rule=fixed|change|both] [ticks=n]
+//         (置く場所による違い: 熱い物の隣の床が着火の温度に届くか〔しきい値の近く〕・燃え広がり。毎刻みと長い刻みで)
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -142,6 +144,8 @@ namespace {
     // select= を書いた時は forward をその選び方だけで(T-1063。予算ごとに 1 通り目 + 前線の緩衝だけ確かめる)
     bool selectGiven = false;
     uint32_t bufferUnits = 0;  // 前線の緩衝を単位(groupShift の組)の数で(T-1074。0 = buffer= の形)
+    // 燃える物を置く所(T-1153。空 = どこにも置く。x〔m〕→ 置くか)
+    std::function<bool(double)> fuelAt;
 
     TimeTreeSetup MakeSetup(const Material& material, TimeStepRule rule) {
         TimeTreeSetup setup;
@@ -217,9 +221,12 @@ namespace {
 
                 const double x = (static_cast<double>(block.originX + MrCellX(index)) + 0.5) * size;
                 RxCell cell = RxMakeEmptyCell(std::llround(capacity * profile(x) * 1000.0));
-                cell.speciesCount = 1;
-                cell.species[0] = TIME_TREE_REACTANT;
-                cell.amounts[0] = amount;
+                if (!fuelAt || fuelAt(x)) {
+                    cell.speciesCount = 1;
+                    cell.species[0] = TIME_TREE_REACTANT;
+                    cell.amounts[0] = amount;
+                }
+
                 StoreNestCell(nest, slot, index, cell);
             }
         }
@@ -1201,6 +1208,203 @@ namespace {
         }
     }
 
+    // --- T-1153: 置く場所による違い(刻みを選ぶ単位〔4 m〕は世界の座標にそろう。同じ場面を 0〜3 m ずらして置く)---
+    // 場面(しきい値の近く・0.5 m の根だけの木 = shape=fine・単位 4 m = ブロック): 燃えない熱い物(幅 2 m・heaterk=)を x = 12 + o から置き、
+    // 0.5 m あけて燃える床(x ≥ 14.5 + o)。熱い物から伝わった熱で床の最も熱いセルが着火の温度(600 K)に届くかがしきい値。
+    // 着火の前は反応が 0 なので、燃える物を置かない走り(既定)の真実(歩の境目ごとの値 = 反応が読む値)の山で、着火するか・いつかが決まる。
+    // fuel=1: 燃える物を置いて、着火の刻み・前線(床の初めからの距離)の届いた刻み・燃えた量を見る(燃え広がりの場面)
+    constexpr double PLACE_HEATER_X = 12.0;
+    constexpr double PLACE_HEATER_METERS = 2.0;
+    constexpr double PLACE_GAP_METERS = 0.5;
+    constexpr uint64_t PLACE_TICKS = 8192;  // 山は約 110 秒(6,600 刻み)
+
+    double placeOffset = 0.0;           // offset=(m。セルの長さの倍数)
+    double placeHeaterKelvin = 1570.0;  // heaterk=
+    bool placeFuel = false;             // fuel=1
+    std::string placeRule = "both";     // rule=fixed|change|both
+
+    struct PlaceResult {
+        int64_t peakQ16 = 0;  // 床の範囲のセルの真実の温度の最大(mK × 2^16)
+        uint64_t peakTick = 0;
+        double peakDistance = 0.0;       // 床の初めからの距離(m)
+        int32_t peakExponent = 0;        // 山を取った刻みのその枠の e
+        uint64_t crossTick = 0;          // 真実が着火の温度に初めて届いた刻み(0 = 届かない)
+        uint64_t ignitedTick = 0;        // fuel=1: A が初めて減った刻み(0 = 減らない)
+        std::vector<uint64_t> arrivals;  // fuel=1: 床の初めから d m(1, 2, …)のセルが着火した刻み(0 = 届かない)
+        double burned = 0.0;             // fuel=1: 燃えた A ÷ 初めの A
+        double seconds = 0.0;
+        bool conserved = true;
+        TimeTreeSteps steps;
+        Snapshot last;
+    };
+
+    double PlaceFuelStart() {
+        return PLACE_HEATER_X + PLACE_HEATER_METERS + PLACE_GAP_METERS + placeOffset;
+    }
+
+    struct PlaceProbe {
+        uint32_t slot = 0;
+        uint32_t index = 0;
+        double distance = 0.0;  // 床の初めから(m)
+    };
+
+    std::vector<PlaceProbe> PlaceProbes(const TimeTreeWorld& world) {
+        const double fuelStart = PlaceFuelStart();
+        std::vector<PlaceProbe> probes;
+        for (const uint32_t slot : world.layout.blocks) {
+            const MrBlock& block = world.nest.blocks[slot];
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                const double x = (static_cast<double>(block.originX + MrCellX(index)) + 0.5) * CellMeters(block.level);
+                if (world.layout.stepped[slot * MR_BLOCK_CELLS + index] != 0 && x >= fuelStart)
+                    probes.push_back({slot, index, x - fuelStart});
+            }
+        }
+
+        return probes;
+    }
+
+    PlaceResult RunPlace(const TimeTreeSetup& setup, const Material& material, TimeTreeWorld world, uint64_t ticks) {
+        PlaceResult result;
+        const auto start = static_cast<int64_t>(std::llround(material.molPerCubic * LEVEL0_VOLUME * 1e6));
+        const std::vector<PlaceProbe> probes = PlaceProbes(world);
+        const auto distances = static_cast<size_t>(WorldLength(sceneShape) - PlaceFuelStart());
+        result.arrivals.assign(distances, 0);
+        const TimeTreeTotals first = ConservedTimeTree(world);
+        const auto begin = std::chrono::steady_clock::now();
+        for (uint64_t tick = 1; tick <= ticks; ++tick) {
+            StepTimeTree(setup, world, 1);
+
+            // --- 床のセルの真実(反応が読む値)の山と、着火の温度に届いた刻み ---
+            double farthest = -1.0;
+            for (const PlaceProbe& probe : probes) {
+                const int64_t temperature = TimeTreeTemperatureQ16(
+                    setup, LoadNestCell(world.nest, probe.slot, probe.index).energy);
+                if (temperature > result.peakQ16) {
+                    result.peakQ16 = temperature;
+                    result.peakTick = tick;
+                    result.peakDistance = probe.distance;
+                    result.peakExponent = world.steps.exponent[probe.slot];
+                }
+
+                if (result.crossTick == 0 && temperature >= setup.ignitionTemperatureQ16)
+                    result.crossTick = tick;
+
+                if (placeFuel && TimeTreeSettledReactant(world, probe.slot, probe.index) < start)
+                    farthest = std::max(farthest, probe.distance);
+            }
+
+            // --- 燃え広がり(fuel=1)---
+            if (farthest < 0.0)
+                continue;
+
+            if (result.ignitedTick == 0)
+                result.ignitedTick = tick;
+
+            for (size_t d = 1; d <= distances && static_cast<double>(d) <= farthest; ++d) {
+                if (result.arrivals[d - 1] == 0)
+                    result.arrivals[d - 1] = tick;
+            }
+        }
+
+        result.seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
+        result.conserved = first == ConservedTimeTree(world);
+        result.steps = world.steps;
+        result.last = TakeSnapshot(world);
+        double burned = 0.0;
+        for (const PlaceProbe& probe : probes)
+            burned += static_cast<double>(start - TimeTreeSettledReactant(world, probe.slot, probe.index));
+
+        result.burned = placeFuel && !probes.empty() ? burned / (static_cast<double>(start) * probes.size()) : 0.0;
+
+        return result;
+    }
+
+    std::string ArrivalText(const std::vector<uint64_t>& arrivals) {
+        std::string text;
+        for (const uint64_t tick : arrivals)
+            text += std::format("{}{}", text.empty() ? "" : ",", tick);
+
+        return text;
+    }
+
+    void LogPlace(std::string_view name, const PlaceResult& result, uint64_t ticks, uint64_t cells) {
+        const double perCellTick = static_cast<double>(result.steps.cellSteps) /
+                                   (static_cast<double>(cells) * static_cast<double>(ticks));
+        Log(Channel::Sim, Level::Info,
+            "置く場所 {}(ずらし {:.2f} m・熱い物 {:.4f} K{}): 床の山 {:.4f} K(刻み {}・床の初めから {:.2f} m・e {})・"
+            "着火の温度に届いた刻み {}・着火 {}・燃えた {:.4f} %・解き {:.5f} 回/セル/刻み・出来事 {}・保存 {}・{:.1f} "
+            "秒",
+            name, placeOffset, placeHeaterKelvin, placeFuel ? "・燃える物あり" : "",
+            static_cast<double>(result.peakQ16) / Q16 / 1000.0, result.peakTick, result.peakDistance,
+            result.peakExponent, result.crossTick, result.ignitedTick, result.burned * 100.0, perCellTick,
+            result.steps.events, result.conserved ? "厳密" : "崩れた", result.seconds);
+        Log(Channel::Sim, Level::Info,
+            "PLACE rule={} offset={:.2f} heater={:.4f} fuel={} peakQ16={} peakTick={} peakDistance={:.2f} peakE={} "
+            "cross={} ignited={} burned={:.6f} solves={:.6f} events={} arrivals={}",
+            name, placeOffset, placeHeaterKelvin, placeFuel ? 1 : 0, result.peakQ16, result.peakTick,
+            result.peakDistance, result.peakExponent, result.crossTick, result.ignitedTick, result.burned, perCellTick,
+            result.steps.events, ArrivalText(result.arrivals));
+    }
+
+    void CheckPlace() {
+        if (shapeName == "mixed") {
+            sceneShape = {.rootLevel = 0, .roots = 8, .refine = false};  // 0.5 m の根だけ(混ぜた木は x で一様でない)
+            shapeName = "fine";
+        }
+
+        const Material material = Fire();
+        const double heaterStart = PLACE_HEATER_X + placeOffset;
+        const double fuelStart = PlaceFuelStart();
+        const double ground = material.groundKelvin;
+        if (placeFuel)
+            fuelAt = [fuelStart](double x) {
+                return x >= fuelStart;
+            };
+        else
+            fuelAt = [](double) {
+                return false;
+            };
+
+        const Profile profile = [heaterStart, ground](double x) {
+            return x >= heaterStart && x < heaterStart + PLACE_HEATER_METERS ? placeHeaterKelvin : ground;
+        };
+        const uint64_t ticks = sceneTicks != 0 ? sceneTicks : PLACE_TICKS;
+        Log(Channel::Sim, Level::Info, "置く場所: {}・{} 刻み", TrialName(), ticks);
+
+        std::optional<PlaceResult> fixed;
+        std::optional<PlaceResult> change;
+        for (const TimeStepRule rule : {TimeStepRule::Fixed, TimeStepRule::Change}) {
+            const bool isFixed = rule == TimeStepRule::Fixed;
+            if (placeRule != "both" && placeRule != (isFixed ? "fixed" : "change"))
+                continue;
+
+            TimeTreeSetup setup = MakeSetup(material, rule);
+            setup.groupShift = groupShift;
+            const TimeTreeWorld world = MakeWorld(setup, material, sceneShape, profile);
+            uint64_t cells = 0;
+            for (const uint8_t stepped : world.layout.stepped)
+                cells += stepped;
+
+            PlaceResult result = RunPlace(setup, material, world, ticks);
+            LogPlace(isFixed ? "fixed" : "change", result, ticks, cells);
+            Expect(result.conserved, "置く場所: 保存");
+            (isFixed ? fixed : change) = std::move(result);
+        }
+
+        if (!fixed || !change)
+            return;
+
+        const Difference difference = Compare(
+            MakeWorld(MakeSetup(material, TimeStepRule::Fixed), material, sceneShape, profile), material, change->last,
+            fixed->last);
+        Log(Channel::Sim, Level::Info,
+            "置く場所 ずらし {:.2f} m: 床の山の差(長い刻み − 毎刻み){:.3f} mK・終わりのセルの温度の差の最大 {:.3f} "
+            "mK(x "
+            "{:.2f} m)",
+            placeOffset, static_cast<double>(change->peakQ16 - fixed->peakQ16) / Q16, difference.temperatureMk,
+            difference.worstX);
+    }
+
     // --- 3. 早送り = 待った(ビット一致)・6. 歩の途中のセーブ ---
 
     void CheckFastForward() {
@@ -1325,6 +1529,14 @@ namespace {
                 mergeDumpEvery = static_cast<uint32_t>(std::atoi(value.c_str()));
             else if (key == "scene")
                 mergeNight = value == "night";
+            else if (key == "offset")
+                placeOffset = std::atof(value.c_str());
+            else if (key == "heaterk")
+                placeHeaterKelvin = std::atof(value.c_str());
+            else if (key == "fuel")
+                placeFuel = value == "1";
+            else if (key == "rule")
+                placeRule = value;
         }
 
         const bool all = part == "all";
@@ -1357,6 +1569,9 @@ namespace {
 
         if (part == "forward-estimate")
             CheckForwardEstimate(fire, fireIgnition);
+
+        if (part == "place")
+            CheckPlace();
 
         if (part == "event-merge") {
             if (mergeNight)
