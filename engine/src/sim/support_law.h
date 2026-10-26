@@ -3,8 +3,8 @@
 // 範囲(1 チャット目): 縦の面(x と上)の平面・奥行 1 セル・1 つの細かさのセル(セルの大きさ cellMm で 0.25 / 0.5 / 2 m を作る)・
 //   横の縮み方 0(ν = 0。22 §3.2 ① の「この宇宙の法則として宣言」の仮)。3 次元(変位 3 + 回り 3)は T-0944。
 // 違う大きさのセル(T-1120): 場面の fine の印のセルを一辺 cellMm ÷ 2 の 2 × 2 に分ける(板の厚さ = 奥行は cellMm のまま)。
-//   違う大きさのセルの間は「細かい側の面ごとの梁」(MixedBeam::FaceOffset。長さ 0.75 × cellMm・面は細かい側の幅・粗い側の端は
-//   粗いセルの剛体の動きで面の位置へ)。成分を持つ節の系では粗いセルがレベル 0・細かいセルがレベル 1(細かいほど大きい。ADR-0462。T-1104 で直した)。Coupled だけ
+//   違う大きさのセルの間は「対の面」(MixedBeam::FacePair。粗いセルの面に並ぶ 2 つの細かいセルを 1 つの面としてつなぎ、ばねは面の点に置く。
+//   T-1191・ADR-0485)。成分を持つ節の系では粗いセルがレベル 0・細かいセルがレベル 1(細かいほど大きい。ADR-0462。T-1104 で直した)。Coupled だけ
 // 2 つの形(どちらも節 = セルの中心):
 //   - PerComponent: 変位の成分ごとに独立に解く(今の C-0 の口のまま。面ごとに伸び縮みとずれのばね。22 §3.2 ①)
 //   - BeamLattice: 節が変位 2 成分と回り φ(= 角 × セルの大きさ ÷ 2。長さの単位)を持ち、面ごとに梁のばね(伸び・ずれ・曲げ)を置く。
@@ -45,9 +45,19 @@ namespace bicameral::sim {
         BeamLattice,   // 格子の梁(回りを持つ。結合は遅らせる)
     };
 
-    // 違う大きさのセルの間の梁(T-1120 の 2 本)
+    // 違う大きさのセルの間の面(T-1120 の 2 本・T-1191 の 2 本)
     enum class MixedBeam : uint8_t {
-        FaceOffset,  // ② 細かい側の面ごとの梁: 粗い側の端は粗いセルの中心から横へ ±細かいセル ÷ 2 の点(剛体の動き)。既定
+        // ④ 対のずれ(T-1191・ADR-0485。既定): ③ の面の点のばねのうち、粗いセルの面に並ぶ 2 つの細かいセルの対を、ずれは対の平均で
+        //   粗いセルにつなぎ(対の横の伸び = 粗いセルが表せない歪みを止めない)、伸びは対の平均のずれの歪みを引いて読む(一様なずれで
+        //   2 つの細かいセルに逆向きの偽の伸びを出さない)。曲げの力の回りは ③ のまま 2 つの細かいセルの伸びの対で運ぶ。
+        //   つぎはぎの検査(一様な歪み 3 つ・回り・一様な曲げ)で面の力が全部細かい塊と同じになる。対の中の面が割れていく(残りの硬さ β)と ③ へ移る
+        FacePair,
+        // ③ 面の点のばね(T-1191 の切り分け用): 伸び・ずれ・曲げのばねを細かい側の面の中心の点に置く(両側のセルの剛体の動きで面の点へ)。
+        //   ずれの力は面の点で運ぶので、セルの回りの釣り合いに効くずれの力の腕は中心から面まで(同じ大きさの面と同じ)。
+        //   硬さは同じ大きさの面と同じ規則: 伸びとずれ = E × 面積 ÷ 中心の間の長さ・曲げ = E I ÷ 中心の間の長さ
+        FaceSpring,
+        FaceLever,  // ③' ずれは面の点で運ぶが、ずれの硬さは ② の梁のまま(12 E I / L³。T-1191 の切り分け用)
+        FaceOffset,  // ② 細かい側の面ごとの梁: 粗い側の端は粗いセルの中心から横へ ±細かいセル ÷ 2 の点(剛体の動き。T-1120 の既定・比べ用)
         CenterLine,  // ① 中心どうしの梁: 粗い側の端は粗いセルの中心(横のずれを見ない。比べ用)
     };
 
@@ -117,7 +127,7 @@ namespace bicameral::sim {
         EquilibriumBlockOptions blocks{.cycles = 2, .lineSearch = true, .conjugateAcrossTicks = true};
 
         // 違う大きさのセルの間の梁(T-1120)
-        MixedBeam mixedBeam = MixedBeam::FaceOffset;
+        MixedBeam mixedBeam = MixedBeam::FacePair;
 
         // 変位と回り(温めた始まり)を C-1 の温めた始まりの欄に置く(T-0922。値の数 ≥ 成分の数。節 = セル (x, 上, 0)・レベル 0)。
         // Coupled は blocks.warmStart、Lagged は成分 c を値 component + c に。既定は置かない(法則の控えだけ)
@@ -237,6 +247,32 @@ namespace bicameral::sim {
             std::array<int64_t, SUPPORT_COMPONENTS> gradientLow{};
             std::array<int64_t, SUPPORT_COMPONENTS> gradientHigh{};
             uint32_t intact = SUPPORT_INTACT_FULL;
+            bool negative = false;  // エネルギーが −½ c (…)²(対のずれの項。T-1191)
+        };
+
+        // 3 つの節の項 ½ c (Σ g · x)²(対のずれの伸び。nodes = 粗いセル・自分の細かいセル・対の相手の細かいセル。T-1191)
+        struct TripleTerm {
+            std::array<uint32_t, 3> nodes{};
+            std::array<std::array<int64_t, SUPPORT_COMPONENTS>, 3> gradients{};
+            uint64_t coefficient = 0;
+        };
+
+        // 違う大きさの面 1 つ(項 3 つの組。T-1191): 対として読む割合 β と β の分の硬さ
+        struct MixedGroup {
+            uint32_t beta = 0;           // Q16(0 = 面ごとの ③。FacePair で対の中の面と両方の面が割れていなければ全部)
+            uint64_t axialPair = 0;      // β の分の伸びの係数(対の平均のずれの歪みを引いて読む項 = TripleTerm)
+            uint64_t shearPair = 0;      // β の分のずれの係数(対の負の項の重み)
+            uint32_t pair = UINT32_MAX;  // m_mixedPairs の番号(無ければ UINT32_MAX)
+            bool upper = false;          // 対の +横の側(U)か
+        };
+
+        // 粗いセルの面に並ぶ 2 つの細かいセルの対(L = −横・U = +横)。ずれの負の項は m_pairTerms[pairTerm]・
+        // 伸びの 3 つの節の項は m_tripleTerms[firstTriple](L)と +1(U)
+        struct MixedPair {
+            uint32_t lower = 0;  // L の面の最初の項
+            uint32_t upper = 0;  // U の面の最初の項
+            uint32_t pairTerm = 0;
+            uint32_t firstTriple = 0;
         };
 
         // 遅らせた結合: 行の成分の式に K × (列の成分の値) が入る
@@ -255,7 +291,16 @@ namespace bicameral::sim {
         void AddFineClamps(uint32_t cell);
         void AddFineBraces(uint32_t cell);
         void AddMixedBond(uint32_t coarse, uint32_t fine, uint32_t axis, bool coarseLow, int64_t offset,
-                          uint32_t intact);
+                          uint32_t intact, uint32_t beta);
+        uint32_t PairBeta(uint32_t fine, uint32_t axis, uint32_t faceX, uint32_t faceUp) const;
+        void BuildMixedPairs();
+        void AddMixedPair(uint32_t lower, uint32_t upper);
+        void BuildMixedBlocks(std::vector<EquilibriumBlockFace>& faces) const;
+        void AddTriple(EquilibriumBlockFace& own, EquilibriumBlockFace& other, EquilibriumBlockFace& pairFace,
+                       const TripleTerm& triple) const;
+        int64_t TermProjection(const MixedTerm& term) const;
+        int64_t TermForce(const MixedTerm& term) const;  // c p(負の項は −c p)
+        int64_t TripleProjection(const TripleTerm& term) const;
         void BuildBlocks();
         void CarryCloseState(const SupportLaw& before);
         int64_t CellValue(uint32_t cell, uint32_t component) const;
@@ -294,6 +339,10 @@ namespace bicameral::sim {
         std::vector<uint32_t> m_index;      // [x + width × up] → セル(無ければ UINT32_MAX・分けたセルは SPLIT_CELL)
         std::vector<uint32_t> m_fineIndex;  // [fx + 2 width × fup] → 細かいセル(混ざる場面だけ。無ければ UINT32_MAX)
         std::vector<MixedTerm> m_mixedTerms;
+        std::vector<MixedGroup> m_mixedGroups;  // 違う大きさの面ごと(m_mixedTerms の 4 つの項の組)
+        std::vector<MixedPair> m_mixedPairs;
+        std::vector<MixedTerm> m_pairTerms;     // 対のずれの負の項(low = L の細かいセル・high = U の細かいセル)
+        std::vector<TripleTerm> m_tripleTerms;  // 対の伸び(対の平均のずれの歪みを引く)
         std::vector<uint32_t>
             m_mixedFaceAt;  // [(fx + 2 width × fup) × 2 + 軸] → 違う大きさの梁の最初の項(T-1067。無ければ UINT32_MAX)
         std::vector<Bond> m_bonds;
