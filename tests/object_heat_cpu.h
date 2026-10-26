@@ -22,6 +22,7 @@ namespace bicameral::test {
     struct OhCpuTable {
         sim::ReactionTableView view;
         std::span<const reaction::OhSpecies> objectSpecies;
+        std::span<const uint32_t> molarMasses{};  // mg/mol(層の流れだけが読む。T-1143)
 
         [[nodiscard]] reaction::RxSpecies Species(uint32_t id) const { return view.Species(id); }
         [[nodiscard]] reaction::RxRule Rule(uint32_t id) const { return view.Rule(id); }
@@ -29,6 +30,7 @@ namespace bicameral::test {
         [[nodiscard]] uint32_t RuleIndex(uint32_t position) const { return view.RuleIndex(position); }
         [[nodiscard]] uint64_t Rate(uint32_t rule, uint32_t kelvin) const { return view.Rate(rule, kelvin); }
         [[nodiscard]] reaction::OhSpecies ObjectSpecies(uint32_t id) const { return objectSpecies[id]; }
+        [[nodiscard]] uint32_t MolarMass(uint32_t id) const { return molarMasses[id]; }
     };
 
     // 対の面で混ざる気体(番号 → 物質 ID。0 = 使わない)

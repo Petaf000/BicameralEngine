@@ -1,4 +1,4 @@
-// object_shell_test.cpp — 物の箱が囲む空気の層(1 段目: 層 1 段・流れなし = 膜の形)で、紙・草・小枝の火が自分の炎で燃え広がるかを確かめる研究の試作
+// object_shell_test.cpp — 物の箱が囲む空気の層(1 段目 T-1142: 層 1 段・流れなし / 2 段目 T-1143: 層 k 段 + 流れ〔object_flow_cpu.h〕)で、紙・草・小枝の火が自分の炎で燃え広がるかを確かめる研究の試作
 // (T-1142・D-667・D-660・ADR-0469 3-4。CPU だけ。層を作る・返すの口は tests/object_shell_cpu.h、式は shaders/common/object_heat.hlsli)。
 // 場面: 0.5 m(または 0.25 m)の空気のセル 1 つの中に、細長い燃える物(骨格 24 × 1 × 3 ボクセル・箱 7.8 mm)を 1 つ。端の列 x = 0 に光(虫眼鏡の代わり)を当て、
 //   燃え始めてから 0.5 s で外す。列ごとの燃える固体が 90 % を切った刻みを「火が来た刻み」として、燃え広がりの速さを測る。
@@ -15,7 +15,7 @@
 #include <string_view>
 #include <vector>
 
-#include "object_shell_cpu.h"
+#include "object_flow_cpu.h"
 #include "sun_column_scene.h"
 
 namespace {
@@ -116,13 +116,29 @@ namespace {
              .rate = {.preExponentialMantissa = 14, .preExponentialExponent10 = 8, .activationEnergy = 125000}});
     }
 
+    // CO を作らない表(記録だけ。T-1143): 骨格の中も流れる比べでは、流れが紙の冷たいボクセルへ全部の気体を少しずつ運び、紙のボクセルの成分が
+    // cellulose・炭・levoglucosan・O2・N2・CO2・水・湯気・CO の 9 になってセルの成分の枠 8(RX_MAX_CELL_SPECIES。GPU の溢れ T-0176)を超える。
+    // 枠を広げるのは土台なので広げず、その比べだけ CO を作る規則(炭の不完全燃焼・Boudouard ほか)を外した試験の表で回す
+    // (骨格を壁にする既定の形では CO ありの表で枠に収まる)
+    void AddFuelGasWithoutMonoxide(sim::ReactionTableDefinition& definition) {
+        AddFuelGas(definition);
+        std::erase_if(definition.rules, [](const sim::RuleDefinition& rule) {
+            return std::ranges::any_of(rule.products,
+                                       [](const sim::RuleTerm& term) { return term.species == "carbon_monoxide"; });
+        });
+    }
+
     struct Tables {
         sim::BakedReactionTable table;
         test::OhTables object;
     };
 
-    Tables MakeTables(bool fuelGas) {
-        sim::BakedReactionTable table = fuelGas ? test::MakeSunTable(AddFuelGas) : test::MakeSunTable();
+    enum class TableKind : uint8_t { Plain, FuelGas, FuelGasWithoutMonoxide };
+
+    Tables MakeTables(TableKind kind) {
+        sim::BakedReactionTable table = kind == TableKind::Plain     ? test::MakeSunTable()
+                                        : kind == TableKind::FuelGas ? test::MakeSunTable(AddFuelGas)
+                                                                     : test::MakeSunTable(AddFuelGasWithoutMonoxide);
         const auto object = test::MakeObjectHeatTables(table, DEFAULT_DIFFUSIVITY_MM2_PER_S);
         EXPECT(object.has_value());
         if (!object)
@@ -337,7 +353,8 @@ namespace {
     }
 
     // --- 1 回の燃え ---
-    enum class ShellMode : uint8_t { None, OnDemand, OnDemandRelieved };
+    // Flow = 層 k 段 + 流れ(T-1143。object_flow_cpu.h)
+    enum class ShellMode : uint8_t { None, OnDemand, OnDemandRelieved, Flow };
 
     struct Burn {
         std::array<uint32_t, SKELETON_X> litTick{};  // 列に火が来た刻み(0 = 来ない)
@@ -346,7 +363,10 @@ namespace {
         uint32_t shellsReturned = 0;
         int32_t hottestShellKelvin = 0;
         int32_t hottestSkeletonKelvin = 0;
-        uint64_t voxelTicks = 0;  // 回したボクセルの数の和(費用)
+        int32_t hottestCellKelvin = 0;            // 囲むセル(閉じた 1 セル。燃えた熱が全部ここに溜まる)
+        uint64_t voxelTicks = 0;                  // 回したボクセルの数の和(費用)
+        int64_t fastestMillimetresPerSecond = 0;  // 流れ: 一番速い面
+        uint64_t limitedShares = 0;               // 流れ: 出る上限で縮めた(ボクセル × 小刻み)
         double cpuMilliseconds = 0;
         bool conserved = true;
         bool failed = false;
@@ -354,8 +374,11 @@ namespace {
     };
 
     Burn RunBurn(const Tables& tables, const Fuel& fuel, int32_t cellLevel, ShellMode mode, bool sleeping = true,
-                 bool probe = false) {
-        const test::OhCpuTable shared{.view = tables.table.View(), .objectSpecies = tables.object.species};
+                 bool probe = false, uint32_t layers = 1, bool skeletonWalls = true) {
+        const test::OhCpuTable shared{.view = tables.table.View(),
+                                      .objectSpecies = tables.object.species,
+                                      .molarMasses = tables.table.molarMasses};
+        test::OhShellFlow flow{.skeletonWalls = skeletonWalls};
         const test::OhGasList& gases = tables.object.gases;
         test::OhWorld world = MakeWorld(tables.table, fuel, cellLevel);
         world.sleeping = sleeping;
@@ -372,6 +395,9 @@ namespace {
                                                      : tick < burn.litTick[0] + LENS_AFTER_LIT_TICKS;
             test::StepObjectHeat(shared, gases, world, lensOn, WORLD_SEED, tick);
             burn.voxelTicks += world.voxels.size();
+            if (mode == ShellMode::Flow)
+                burn.failed = burn.failed || !test::StepShellFlow(shared, gases, world, 0, flow, tick);
+
             if (probe) {
                 size_t hottestVoxel = 0;
                 int32_t hottestMilliKelvin = 0;
@@ -403,16 +429,18 @@ namespace {
 
             // 層を作る・返す(刻みの終わり。状態だけ)
             const int32_t airKelvin = rx::RxComputeThermal(shared, world.cells[0]).temperature / 1000;
+            burn.hottestCellKelvin = std::max(burn.hottestCellKelvin, airKelvin);
             const int32_t hottest = HottestSkeletonKelvin(shared, world);
             burn.hottestSkeletonKelvin = std::max(burn.hottestSkeletonKelvin, hottest);
-            if (mode == ShellMode::OnDemandRelieved && world.objects[0].shellLayers == 1)
+            if (mode == ShellMode::OnDemandRelieved && world.objects[0].shellLayers != 0)
                 burn.failed = burn.failed || !RelieveShellPressure(shared, gases, world);
 
             if (mode != ShellMode::None && world.objects[0].shellLayers == 0 &&
                 hottest >= airKelvin + SHELL_MAKE_KELVIN) {
-                burn.failed = burn.failed || !test::AddObjectShell(shared, gases, world, 0, tick);
+                burn.failed = burn.failed || !test::AddObjectShell(shared, gases, world, 0, tick, layers);
+                test::ResetShellFlow(world, 0, flow);
                 ++burn.shellsMade;
-            } else if (world.objects[0].shellLayers == 1 && hottest < airKelvin + SHELL_KEEP_KELVIN &&
+            } else if (world.objects[0].shellLayers != 0 && hottest < airKelvin + SHELL_KEEP_KELVIN &&
                        ShellMatchesCell(shared, gases, world)) {
                 burn.failed = burn.failed || !test::RemoveObjectShell(shared, gases, world, 0);
                 ++burn.shellsReturned;
@@ -440,8 +468,12 @@ namespace {
         }
 
         // 終わりに層が残っていたら返す条件を見ずに返して保存を確かめる(返す口の保存)
-        if (world.objects[0].shellLayers == 1 && test::RemoveObjectShell(shared, gases, world, 0))
+        if (world.objects[0].shellLayers != 0 && test::RemoveObjectShell(shared, gases, world, 0))
             ++burn.shellsReturned;
+
+        // 1 小刻み 1/240 s・ボクセル 7.8125 mm: q(Q16)× 7.8125 × 240 ÷ 65536 × 1000 mm/s
+        burn.fastestMillimetresPerSecond = (flow.fastestQ16 * 1875) / 65536;
+        burn.limitedShares = flow.limitedShares;
 
         burn.conserved = burn.conserved && Totals(tables.table, tables.object, world) == start;
         burn.cpuMilliseconds = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began)
@@ -477,11 +509,17 @@ namespace {
         const Spread spread = SpreadOf(burn);
         std::printf(
             "%s・%s・%.2f m: 端に火 %u 刻み・火が来た一番遠い列 %u / %u・速さ %.2f mm/s・層 作った %u 返した %u・"
-            "一番熱い 骨格 %d K 層 %d K・刻み %u・ボクセル×刻み %llu・CPU %.0f ms・保存 %s%s\n",
+            "一番熱い 骨格 %d K 層 %d K セル %d K・刻み %u・ボクセル×刻み %llu・CPU %.0f ms・保存 %s%s\n",
             fuel, label, cellLevel == 0 ? 0.5 : 0.25, burn.litTick[0], spread.farthest, SKELETON_X - 1,
             spread.millimetresPerSecond, burn.shellsMade, burn.shellsReturned, burn.hottestSkeletonKelvin,
-            burn.hottestShellKelvin, burn.ticks, static_cast<unsigned long long>(burn.voxelTicks), burn.cpuMilliseconds,
-            burn.conserved ? "0" : "崩れた", burn.failed ? "・量が負 / 枠があふれた" : "");
+            burn.hottestShellKelvin, burn.hottestCellKelvin, burn.ticks,
+            static_cast<unsigned long long>(burn.voxelTicks), burn.cpuMilliseconds, burn.conserved ? "0" : "崩れた",
+            burn.failed ? "・量が負 / 枠があふれた" : "");
+        if (burn.fastestMillimetresPerSecond != 0)
+            std::printf("  流れ: 一番速い面 %lld mm/s・出る上限で縮めた %llu\n",
+                        static_cast<long long>(burn.fastestMillimetresPerSecond),
+                        static_cast<unsigned long long>(burn.limitedShares));
+
         std::printf("  列に火が来た刻み:");
         for (const uint32_t tick : burn.litTick)
             std::printf(" %u", tick);
@@ -493,18 +531,19 @@ namespace {
 
 int main(int argc, char** argv) {
     const bool quick = argc > 1 && std::string_view(argv[1]) == "--quick";
-    const Tables plain = MakeTables(false);
-    const Tables fuelGas = MakeTables(true);
+    const Tables plain = MakeTables(TableKind::Plain);
+    const Tables fuelGas = MakeTables(TableKind::FuelGas);
+    const Tables noMonoxide = MakeTables(TableKind::FuelGasWithoutMonoxide);
     if (argc > 1 && std::string_view(argv[1]) == "--probe") {
-        Print("紙", "調べ", 0, RunBurn(fuelGas, FUELS[0], 0, ShellMode::OnDemandRelieved, true, true));
+        Print("紙", "調べ", 0, RunBurn(noMonoxide, FUELS[0], 0, ShellMode::Flow, true, true, 2));
 
         return 0;
     }
 
-    // 1. 保存・決定的・眠らせても同じ(紙・層あり・燃える気体・流れの代わりあり)
-    const Burn first = RunBurn(fuelGas, FUELS[0], 0, ShellMode::OnDemandRelieved);
-    const Burn again = RunBurn(fuelGas, FUELS[0], 0, ShellMode::OnDemandRelieved);
-    const Burn awake = RunBurn(fuelGas, FUELS[0], 0, ShellMode::OnDemandRelieved, false);
+    // 1. 保存・決定的・眠らせても同じ(紙・層 2 段 + 流れ・燃える気体)
+    const Burn first = RunBurn(noMonoxide, FUELS[0], 0, ShellMode::Flow, true, false, 2);
+    const Burn again = RunBurn(noMonoxide, FUELS[0], 0, ShellMode::Flow, true, false, 2);
+    const Burn awake = RunBurn(noMonoxide, FUELS[0], 0, ShellMode::Flow, false, false, 2);
     std::printf("決定的(2 回で同じ)%s・眠らせても同じ %s・層を作った %u・返した %u\n",
                 first.digest == again.digest ? "はい" : "いいえ", first.digest == awake.digest ? "はい" : "いいえ",
                 first.shellsMade, first.shellsReturned);
@@ -518,8 +557,17 @@ int main(int argc, char** argv) {
         const Tables* tables;
         ShellMode mode;
         bool record;  // 記録だけ(保存を確かめない。流れなしの層は熱がこもって量が負になる = 研究の結果)
+        uint32_t layers = 1;
+        bool skeletonWalls = true;
     };
-    const std::array<Variant, 4> variants = {
+    // 流れの比べは CO を作らない表(草は CO ありの表で紙のボクセルの成分が枠 8 を超える。AddFuelGasWithoutMonoxide)。
+    // 記録だけ(--quick で飛ばす): 層 3 段(重い)・骨格の中も流れる・CO ありの表
+    const std::array<Variant, 9> variants = {
+        Variant{"燃える気体(CO なし)+ 層 2 段 + 流れ", &noMonoxide, ShellMode::Flow, false, 2},
+        Variant{"燃える気体(CO なし)+ 層 1 段 + 流れ", &noMonoxide, ShellMode::Flow, false, 1},
+        Variant{"燃える気体(CO なし)+ 層 3 段 + 流れ", &noMonoxide, ShellMode::Flow, true, 3},
+        Variant{"燃える気体(CO あり)+ 層 2 段 + 流れ", &fuelGas, ShellMode::Flow, true, 2},
+        Variant{"燃える気体(CO なし)+ 層 2 段 + 流れ・骨格の中も流れる", &noMonoxide, ShellMode::Flow, true, 2, false},
         Variant{"燃える気体 + 層 + 流れの代わり", &fuelGas, ShellMode::OnDemandRelieved, false},
         Variant{"燃える気体 + 層(流れなし)", &fuelGas, ShellMode::OnDemand, true},
         Variant{"燃える気体・層なし", &fuelGas, ShellMode::None, false},
@@ -529,8 +577,10 @@ int main(int argc, char** argv) {
             if (quick && variant.record)
                 continue;
 
-            const Burn coarse = RunBurn(*variant.tables, fuel, 0, variant.mode);
-            const Burn fine = RunBurn(*variant.tables, fuel, 1, variant.mode);
+            const Burn coarse = RunBurn(*variant.tables, fuel, 0, variant.mode, true, false, variant.layers,
+                                        variant.skeletonWalls);
+            const Burn fine = RunBurn(*variant.tables, fuel, 1, variant.mode, true, false, variant.layers,
+                                      variant.skeletonWalls);
             Print(fuel.name, variant.label, 0, coarse);
             Print(fuel.name, variant.label, 1, fine);
             const double a = SpreadOf(coarse).millimetresPerSecond;

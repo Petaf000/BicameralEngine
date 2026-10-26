@@ -99,7 +99,8 @@ target_link_libraries(grass_wake_test PRIVATE bicameral_reaction_script bicamera
 add_test(NAME grass_wake COMMAND grass_wake_test)
 add_executable(object_shell_test object_shell_test.cpp)  # 物の箱が囲む空気の層 1 段目(T-1142・D-667)
 target_link_libraries(object_shell_test PRIVATE bicameral_reaction_script bicameral_multires bicameral_core)
-add_test(NAME object_shell COMMAND object_shell_test)
+add_test(NAME object_shell COMMAND object_shell_test --quick)  # 全部(記録の比べも)は引数なしで run
+set_tests_properties(object_shell PROPERTIES TIMEOUT 1800)  # 層 2 段 + 流れの燃えを 8 回(release で約 870 秒。T-1143)
 # 世界の中の光: 距離ごとの段の CPU リファレンス(T-0958・23 §10 R-R1): 保存・決定的・壁の陰・解析解・筋と坂と費用の記録
 add_executable(sky_port_test sky_port_test.cpp)
 target_link_libraries(sky_port_test PRIVATE bicameral_reaction_script bicameral_multires bicameral_core)

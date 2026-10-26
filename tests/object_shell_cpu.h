@@ -1,4 +1,4 @@
-// object_shell_cpu.h — 物の箱が囲む空気の層(1 段目: 層 1 段・流れなし = 膜の形)を作る・返す CPU リファレンス(T-1142・D-667・ADR-0469 3-4)。
+// object_shell_cpu.h — 物の箱が囲む空気の層(骨格の外へ k 層。1 段目 T-1142 は k = 1・流れなし、2 段目 T-1143 は k 層 + 流れ〔object_flow_cpu.h〕)を作る・返す CPU リファレンス(D-667・ADR-0469 3-4)。
 // 層のボクセルの真実は囲むセルと同じ RxCell(ADR-0434 §1。物専用の式 0)。式は shaders/common/object_heat.hlsli(OhShellVoxelOf・OhGasFlowOf・
 // OhShellReturnable)、受け渡しは ③ の対の端数(OhSplitCarry)と ④(OhApplyToCell)= 帳簿の理由「物との受け渡し」と同じ口。
 // データの流れ:
@@ -79,12 +79,12 @@ namespace bicameral::test {
         return change.ok != 0;
     }
 
-    // --- 作る: 物 o の箱を骨格の外へ 1 層広げる(tick = 今の刻み。層のボクセルは「受け渡しで変わった」扱いで反応を評価する)---
+    // --- 作る: 物 o の箱を骨格の外へ layers 層広げる(tick = 今の刻み。層のボクセルは「受け渡しで変わった」扱いで反応を評価する)---
     inline bool AddObjectShell(const OhCpuTable& table, const OhGasList& gases, OhWorld& world, uint32_t o,
-                               uint64_t tick) {
+                               uint64_t tick, uint32_t layers = 1) {
         namespace rx = bicameral::reaction;
         const rx::OhObject object = world.objects[o];
-        if (object.shellLayers != 0)
+        if (object.shellLayers != 0 || layers == 0)
             return false;
 
         const rx::RxCell air = world.cells[object.cell];
@@ -96,9 +96,9 @@ namespace bicameral::test {
         const uint32_t sizeX = object.sizeX;
         const uint32_t sizeY = object.sizeY;
         const uint32_t sizeZ = object.voxelCount / (sizeX * sizeY);
-        const uint32_t outerX = sizeX + 2;
-        const uint32_t outerY = sizeY + 2;
-        const uint32_t outerZ = sizeZ + 2;
+        const uint32_t outerX = sizeX + (2 * layers);
+        const uint32_t outerY = sizeY + (2 * layers);
+        const uint32_t outerZ = sizeZ + (2 * layers);
         const size_t count = static_cast<size_t>(outerX) * outerY * outerZ;
         OhObjectVoxels next{.voxels = std::vector<rx::RxCell>(count),
                             .infos = std::vector<rx::OhVoxelInfo>(count),
@@ -111,7 +111,8 @@ namespace bicameral::test {
                 for (uint32_t x = 0; x < outerX; ++x) {
                     const size_t index = x + (static_cast<size_t>(outerX) * (y + (static_cast<size_t>(outerY) * z)));
                     const OhBoxFace face = BoxFaceOf(x, y, z, outerX, outerY, outerZ);
-                    const bool skeleton = x >= 1 && x <= sizeX && y >= 1 && y <= sizeY && z >= 1 && z <= sizeZ;
+                    const bool skeleton = x >= layers && x < layers + sizeX && y >= layers && y < layers + sizeY &&
+                                          z >= layers && z < layers + sizeZ;
                     if (!skeleton) {
                         next.voxels[index] = fill.cell;
                         next.infos[index] = {
@@ -122,7 +123,8 @@ namespace bicameral::test {
                     }
 
                     // 骨格: 外に面する面の数を「層を透かして放射する面」へ移す
-                    const uint32_t old = object.voxelBegin + (x - 1) + (sizeX * ((y - 1) + (sizeY * (z - 1))));
+                    const uint32_t old = object.voxelBegin + (x - layers) +
+                                         (sizeX * ((y - layers) + (sizeY * (z - layers))));
                     const uint32_t exposed = (world.infos[old].shape >> rx::OH_EXPOSED_SHIFT) & rx::OH_EXPOSED_MASK;
                     next.voxels[index] = world.voxels[old];
                     next.infos[index] = {.object = o, .shape = face.neighbours | (exposed << rx::OH_THROUGH_SHIFT)};
@@ -140,7 +142,7 @@ namespace bicameral::test {
 
         world.objects[o].sizeX = outerX;
         world.objects[o].sizeY = outerY;
-        world.objects[o].shellLayers = 1;
+        world.objects[o].shellLayers = layers;
         ReplaceObjectVoxels(world, o, next);
 
         return ExchangeThroughCarry(gases, world, o, toCell);
@@ -150,15 +152,16 @@ namespace bicameral::test {
     inline bool RemoveObjectShell(const OhCpuTable& table, const OhGasList& gases, OhWorld& world, uint32_t o) {
         namespace rx = bicameral::reaction;
         const rx::OhObject object = world.objects[o];
-        if (object.shellLayers != 1)
+        const uint32_t layers = object.shellLayers;
+        if (layers == 0)
             return false;
 
         const uint32_t outerX = object.sizeX;
         const uint32_t outerY = object.sizeY;
         const uint32_t outerZ = object.voxelCount / (outerX * outerY);
-        const uint32_t sizeX = outerX - 2;
-        const uint32_t sizeY = outerY - 2;
-        const uint32_t sizeZ = outerZ - 2;
+        const uint32_t sizeX = outerX - (2 * layers);
+        const uint32_t sizeY = outerY - (2 * layers);
+        const uint32_t sizeZ = outerZ - (2 * layers);
         const size_t count = static_cast<size_t>(sizeX) * sizeY * sizeZ;
         OhObjectVoxels next{.voxels = std::vector<rx::RxCell>(count),
                             .infos = std::vector<rx::OhVoxelInfo>(count),
@@ -178,8 +181,9 @@ namespace bicameral::test {
                         continue;
                     }
 
-                    const size_t index = (x - 1) + (static_cast<size_t>(sizeX) * ((y - 1) + (sizeY * (z - 1))));
-                    const OhBoxFace face = BoxFaceOf(x - 1, y - 1, z - 1, sizeX, sizeY, sizeZ);
+                    const size_t index = (x - layers) +
+                                         (static_cast<size_t>(sizeX) * ((y - layers) + (sizeY * (z - layers))));
+                    const OhBoxFace face = BoxFaceOf(x - layers, y - layers, z - layers, sizeX, sizeY, sizeZ);
                     const uint32_t through = (shape >> rx::OH_THROUGH_SHIFT) & rx::OH_EXPOSED_MASK;
                     next.voxels[index] = world.voxels[old];
                     next.infos[index] = {.object = o, .shape = face.neighbours | (through << rx::OH_EXPOSED_SHIFT)};

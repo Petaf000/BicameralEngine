@@ -708,6 +708,132 @@ FX_FN bool OhShellReturnable(Table table, RxCell cell) {
     return returnable;
 }
 
+// --- 層の流れ(D-667 の 2 段目・T-1143。物の箱の中の気体を、面の運動量と圧力で動かす)---
+// 形は案 B の R1(case_b_flow.h)の気体だけ・音より遅い流れの極限: 面の運動量 M(真実)・面の質量 m_f = 両側の平均・速さ q = M ÷ m_f。
+// 1 小刻み: ① 運動量を移した質量に比例して同じ軸の隣の面へ運ぶ(D-663)② 縦の面に浮力 ③ 圧力の射影(膨らみたい体積 e を
+// その小刻みで面から出す。外の面の向こう = 囲むセルの圧力)④ 風上のボクセルの気体を体積の割合で移す(運ぶ熱は運ぶ気体と同じ式)。
+// 単位(物の箱のレベル L・流れの小刻み N): 速さ q = 1 小刻みに動く体積(ボクセルの体積の Q16)・質量 = 量 × モル質量 >> 10
+// (量の数は濃さ × 0.125 m³ なので、ボクセルとセルで同じ尺度)・運動量 = 質量 × q。運動のエネルギーと浮力の仕事は数えない(音より遅い極限。T-1143)。
+FX_CONST uint32_t OH_FLOW_SHARE_LIMIT_Q16 = 32768;  // 1 小刻みにボクセルから出る気体の上限(半分。負にならない)
+FX_CONST int64_t OH_FLOW_SPEED_LIMIT_Q16 = 65536;   // 速さの上限(1 小刻みに 1 ボクセル。桁あふれの止め)
+
+// ボクセル(またはセル)の流れの見立て(小刻みの初めの値。両側が同じ値を読む = Jacobi)
+struct OhFlowCell {
+    uint64_t mass;            // 気体の質量(量 × mg/mol >> 10)
+    uint64_t pressureVolume;  // Σ 気体の量 × 温度(mK)>> 8(= pV/R の尺度)
+    uint32_t openQ16;         // 気体が占める体積の割合(凝縮相の体積を除く)
+    int32_t temperature;      // mK
+};
+
+template <typename Table>
+FX_FN OhFlowCell OhFlowCellOf(Table table, RxCell cell) {
+    OhFlowCell flowCell;
+    flowCell.mass = 0;
+    flowCell.pressureVolume = 0;
+    flowCell.temperature = RxComputeThermal(table, cell).temperature;
+    uint64_t moles = 0;
+    uint64_t solidVolume = 0;  // pL(量 × モル体積)
+    FX_UNROLL
+    for (uint32_t s = 0; s < RX_MAX_CELL_SPECIES; ++s) {
+        if (s >= cell.speciesCount)
+            continue;
+
+        const uint32_t species = RX_SPECIES_AT(cell, s);
+        const uint64_t amount = RX_AMOUNT_AT(cell, s);
+        if (table.ObjectSpecies(species).gasIndex == OH_NO_GAS) {
+            solidVolume += amount * (uint64_t)table.ObjectSpecies(species).molarVolumeMm3PerMol;
+            continue;
+        }
+
+        moles += amount;
+        flowCell.mass += (amount * (uint64_t)table.MolarMass(species)) >> 10;
+    }
+
+    flowCell.pressureVolume = (moles * (uint64_t)(flowCell.temperature > 0 ? flowCell.temperature : 0)) >> 8;
+    // 凝縮相の割合 = 量 × モル体積(pL)÷ 0.125 m³(= 1.25 × 10^14 pL = 125000 × 10^6 × 1000。32bit の定数の積で割る。T-1078)
+    const uint64_t solidShareQ16 = (uint64_t)OhMulDivToward0((int64_t)solidVolume, 65536,
+                                                             OH_BOX_MEGA_MM3 * OH_MEGA * (uint64_t)1000);
+    flowCell.openQ16 = solidShareQ16 >= 65536 ? 1u : (uint32_t)(65536 - solidShareQ16);
+
+    return flowCell;
+}
+
+// 膨らみたい体積(ボクセルの体積の Q16。正 = 出ていきたい): pV/R ÷ セルの pV/R − 気体の割合
+FX_FN int64_t OhFlowExcessQ16(OhFlowCell voxel, OhFlowCell cell) {
+    const uint64_t divisor = cell.pressureVolume > 0 ? cell.pressureVolume : 1;
+
+    return OhMulDivToward0((int64_t)voxel.pressureVolume, 65536, divisor) - (int64_t)voxel.openQ16;
+}
+
+// 面の質量(両側の平均。0 にしない)
+FX_FN uint64_t OhFlowFaceMass(OhFlowCell a, OhFlowCell b) {
+    const uint64_t mass = (a.mass + b.mass) >> 1;
+
+    return mass > 0 ? mass : 1;
+}
+
+// 面の速さ q = M ÷ m_f(上限で止める)
+FX_FN int64_t OhFlowSpeed(int64_t momentum, uint64_t faceMass) {
+    const int64_t speed = OhMulDivToward0(momentum, 1, faceMass);
+
+    return speed > OH_FLOW_SPEED_LIMIT_Q16 ? OH_FLOW_SPEED_LIMIT_Q16
+                                           : (speed < -OH_FLOW_SPEED_LIMIT_Q16 ? -OH_FLOW_SPEED_LIMIT_Q16 : speed);
+}
+
+// 重さの加速(1 小刻みの速さの変わり ÷ 1 小刻み。Q16): g Δt² ÷ s = 9806650 µm/s² × 2^L ÷ (500000 µm × 3600 × N²)
+FX_FN uint64_t OhFlowGravityQ16(int32_t bodyLevel, uint32_t flowSubsteps) {
+    const uint64_t numerator = ((uint64_t)9806650 << bodyLevel) * 65536;
+    const uint64_t steps = (uint64_t)flowSubsteps * (uint64_t)flowSubsteps;
+
+    return OhDivideU64(numerator, (uint64_t)500000 * 3600 * steps);
+}
+
+// 縦の面の浮力の力積(運動量。上向きが正): g × (同じ体積の囲むセルの気体の質量 − 面の質量)
+FX_FN int64_t OhFlowBuoyancy(uint64_t gravityQ16, OhFlowCell below, OhFlowCell above, OhFlowCell cell) {
+    const uint64_t openQ16 = ((uint64_t)below.openQ16 + (uint64_t)above.openQ16) >> 1;
+    const int64_t displaced = (int64_t)((cell.mass * openQ16) >> 16);
+    const int64_t difference = displaced - (int64_t)OhFlowFaceMass(below, above);
+
+    return OhMulDivToward0(difference, gravityQ16, 65536);
+}
+
+// 圧力の射影の面の重み β = (基準の質量 << 16)÷ m_f(Δq = (Ψ_i − Ψ_j)× β >> 16・ΔM = (Ψ_i − Ψ_j)× 基準の質量)
+FX_FN uint64_t OhFlowFaceWeight(uint64_t referenceMass, uint64_t faceMass) {
+    return OhDivideU64(referenceMass << 16, faceMass);
+}
+
+// 風上のボクセルから出る気体の割合(Q16。体積 ÷ 気体の体積)
+FX_FN uint64_t OhFlowShareQ16(int64_t speedQ16, OhFlowCell upwind) {
+    const uint64_t speed = FxAbsU64(speedQ16);
+    const uint64_t open = upwind.openQ16 > 0 ? (uint64_t)upwind.openQ16 : 1;
+
+    return OhDivideU64(speed << 16, open);
+}
+
+// 風上の気体を割合 share だけ移す流れ(風上 → 風下が正。運ぶ熱は運ぶ気体と同じ式 = OhInnerGas・OhShellVoxelOf)
+template <typename Table, typename GasList>
+FX_FN OhFlow OhFlowMoved(Table table, GasList gases, OhVoxelGas upwind, int32_t upwindMilliKelvin, uint64_t shareQ16) {
+    OhFlow flow = OhZeroFlow();
+    FX_UNROLL
+    for (uint32_t g = 0; g < OH_MAX_GASES; ++g) {
+        const uint32_t species = gases.GasSpecies(g);
+        if (species == 0)
+            continue;
+
+        const int64_t moved = (int64_t)((upwind.amounts[g] * shareQ16) >> 16);
+        if (moved == 0)
+            continue;
+
+        const RxSpecies values = table.Species(species);
+        const int64_t perUnit = (values.h0 * 1000000) + ((int64_t)values.heatCapacity * (int64_t)upwindMilliKelvin);
+        const int64_t carried = OhMulDivToward0(moved, FxAbsU64(perUnit), 1000000000);
+        flow.amounts[g] = moved;
+        flow.energy += perUnit < 0 ? -carried : carried;
+    }
+
+    return flow;
+}
+
 RX_NAMESPACE_END
 
 #endif  // BICAMERAL_OBJECT_HEAT_HLSLI
