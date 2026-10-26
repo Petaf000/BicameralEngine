@@ -561,8 +561,11 @@ namespace bicameral::sim {
                 if (state.releaseBlock != MR_NO_BLOCK)
                     nest.freeBlocks[nest.counters[MR_COUNTER_FREE_BLOCKS]++] = state.releaseBlock;
 
-                if (state.releasePage != MR_NO_PAGE)
-                    FreePageAt(nest, nest.counters[MR_COUNTER_FREE_PAGES]++) = state.releasePage;
+                if (state.releasePage == MR_NO_PAGE)
+                    continue;
+
+                nest_detail::ClearPageLayers(nest, state.releasePage);  // 次に使う所に古い層を残さない(T-1210)
+                FreePageAt(nest, nest.counters[MR_COUNTER_FREE_PAGES]++) = state.releasePage;
             }
 
             // --- 墓石が表の 1/4 を超えたら作り直す ---

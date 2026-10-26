@@ -79,6 +79,10 @@ namespace bicameral::sim {
         std::vector<uint8_t> counts;    // [セル] 成分の数
         std::vector<uint32_t> species;  // [セル × width]
         std::vector<uint64_t> amounts;  // [セル × width]
+
+        // --- 成分ごとの層の量(T-1210。ADR-0481 の 5)---
+        // [セル × width] の µmol(成分の並びの位置は species と同じ)。空 = 頁の層は全部 0(層の無い頁は何も持たない)
+        std::vector<uint64_t> layers;
     };
 
     // セルの置き場(T-0931): 一様の値(枠ごと。GPU と同じ RxCell)+ セルの頁(観察の枠の頁 + 世界の頁)。
@@ -312,6 +316,35 @@ namespace bicameral::sim {
 
     // 頁を持つ枠 slot のセル index に書く(溢れを使わない世界。T-0717)
     void StoreNestCell(MultiresNest& nest, uint32_t slot, uint32_t index, const reaction::RxCell& cell);
+
+    // --- セルの成分ごとの層の量(T-1210。ADR-0481 の 5・20 §10.5)---
+    // 成分(物質)ごとに「そのうち積もった層の量」(µmol。0 ≤ 層 ≤ 量)を持ち、残り(量 − 層)は舞う側。物質は 1 つのまま(反応は量の全部に当たる)。
+    // 層を書くのは層を動かす法則(積もる・舞い上がる・崩れる・層の流れ)だけで、StoreNestCellWithLayers で書く。
+    // ほかの書き方(StoreNestCell・刻み・GPU から読んだ列)は成分の量だけを書き、層は物質で結んで付け替える:
+    //   層 = min(前の層, 新しい量)(増えた分は残りへ。無くなった物質・新しい物質の層は 0)。並びの位置ではなく物質で結ぶ。
+    // 1 段目(T-1210): 頁のセルだけ。一様の値の層・溢れの成分の層・細かくする / 粗くする時の配り・GPU は T-1220・T-1221
+    // (今は一様の枠の層は 0・細かくする / 粗くすると層は 0 = 全部が残りになる〔量は保存〕・層のある頁は畳まない・溢れを使う世界は層を書けない)
+
+    // 成分の並びの位置ごとの層の量(位置は RxCell の species と同じ。成分の数の外は 0)
+    struct MrCellLayers {
+        std::array<uint64_t, reaction::RX_MAX_CELL_SPECIES> amounts{};
+    };
+
+    // 層がセルに収まるか(成分ごとに 0 ≤ 層 ≤ 量・成分の数の外は 0)
+    [[nodiscard]] bool MrLayersFit(const reaction::RxCell& cell, const MrCellLayers& layers);
+
+    // 枠 slot のセル index の層(一様の枠は 0)
+    [[nodiscard]] MrCellLayers LoadNestCellLayers(const MultiresNest& nest, uint32_t slot, uint32_t index);
+
+    // 頁を持つ枠 slot のセル index に、成分の量と層を書く(層を動かす法則が使う。層はセルに収まること。溢れを使わない世界)
+    void StoreNestCellWithLayers(MultiresNest& nest, uint32_t slot, uint32_t index, const reaction::RxCell& cell,
+                                 const MrCellLayers& layers);
+
+    // 層が収まらないセルの数(試験・検査用。0 でなければ不具合)
+    [[nodiscard]] uint64_t CountLayerMisfits(const MultiresNest& nest);
+
+    // セルの頁 1 つが持つバイト(エネルギー・成分の数・成分・層。測る用。T-0931・T-1210)
+    [[nodiscard]] uint64_t MeasureCellPageBytes(const MultiresCellPage& page);
 
     // 枠 slot をつつく(次の刻みに反応を評価する。刻みの段の外でセルを変えた時。T-0717)
     void PokeNestBlock(MultiresNest& nest, uint32_t slot);

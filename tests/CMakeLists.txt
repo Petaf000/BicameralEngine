@@ -475,6 +475,9 @@ add_test(NAME multires_sparse COMMAND multires_sparse_test)
 add_executable(multires_wide_test multires_wide_test.cpp)  # 溢れを使う世界の影・畳む・端数・静かな葉(T-0199)
 target_link_libraries(multires_wide_test PRIVATE bicameral_multires bicameral_core)
 add_test(NAME multires_wide COMMAND multires_wide_test)
+add_executable(multires_layers_test multires_layers_test.cpp)  # セルの成分ごとの層の量の付け替え・刻み・要約・頁を返す・眠る(T-1210)
+target_link_libraries(multires_layers_test PRIVATE bicameral_multires bicameral_core)
+add_test(NAME multires_layers COMMAND multires_layers_test)
 
 add_executable(multires_activity_test multires_activity_test.cpp)  # 木の上の活性(T-0100)
 target_link_libraries(multires_activity_test PRIVATE bicameral_multires bicameral_core)
@@ -1255,7 +1258,7 @@ add_test(NAME float_check_source_accepts
 # --- 試験の反応表(パッケージ)を使うテスト(T-0169。ファイルの先頭の bicameral_test_reaction_table)---
 foreach(_name IN ITEMS
     reaction_package_test reaction_package_scene_test reaction_species_remap_test reaction_test reaction_contention_test
-    reaction_wait_test multires_test multires_wide_test multires_activity_test multires_quiet_test multires_uniform_test
+    reaction_wait_test multires_test multires_wide_test multires_layers_test multires_activity_test multires_quiet_test multires_uniform_test
     multires_state_test field_storage_test sun_column_test sun_lens_test object_heat_test object_heat_nest_test grass_wake_test object_shell_test cascade_light_test sky_port_test cascade_light_swing_test cascade_tree_grid_test
     multires_conduction_test multires_edge_test multires_subcycle_test multires_implicit_test multires_implicit_tree_test lab_box_test
     gpu_reaction_test gpu_sun_column_test gpu_cascade_light_test gpu_object_heat_test gpu_object_heat_nest_test gpu_object_shell_flow_test gpu_multires_test gpu_multires_activity_test gpu_multires_quiet_test gpu_multires_uniform_test

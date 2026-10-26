@@ -69,6 +69,7 @@ namespace bicameral::sim {
             nest_fields::FoldPage(nest, slot);  // 登録した欄も値 1 つに(T-0711)
             MrBlock& block = nest.blocks[slot];
             ClearPageOverflow(nest, block.page);
+            nest_detail::ClearPageLayers(nest, block.page);  // 層の無い頁だけ畳むので空のはず(T-1210)
             FreePageAt(nest, nest.counters[MR_COUNTER_FREE_PAGES]++) = block.page;
             block.page = MR_NO_PAGE;
             nest.counters[MR_COUNTER_FOLDED] += 1;
@@ -94,6 +95,10 @@ namespace bicameral::sim {
             nest_fields::ReleaseZeroPages(nest, slot);                   // 眠る判定で全部 0 の欄の頁を返す(疎。T-0921)
             nest_detail::NarrowPageCells(nest, nest.blocks[slot].page);  // セルの頁の幅を詰める(T-0931)
             if (!nest_fields::PageFoldable(nest, slot))                  // 登録した欄が一様でなければ畳まない(T-0711)
+                return false;
+
+            if (nest_detail::PageHasLayers(nest,
+                                           nest.blocks[slot].page))  // 層のある頁は畳まない(1 段目。一様の層は T-1220)
                 return false;
 
             if (PageHasOverflow(nest, nest.blocks[slot].page)) {
@@ -248,6 +253,9 @@ namespace bicameral::sim {
         bool FoldNear(MultiresNest& nest, const ReactionTableView& view, uint32_t slot,
                       const MrFoldTolerance& tolerance) {
             if (!nest_fields::PageFoldable(nest, slot))  // 欄はビット単位で一様な時だけ畳む(仮。T-0711)
+                return false;
+
+            if (nest_detail::PageHasLayers(nest, nest.blocks[slot].page))  // 層のある頁は畳まない(1 段目。T-1210)
                 return false;
 
             if (nest.wideCells) {

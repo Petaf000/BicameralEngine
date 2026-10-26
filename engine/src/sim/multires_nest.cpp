@@ -321,6 +321,14 @@ namespace bicameral::sim {
                     hash = FxHashCombine(hash, HashReactionCell(nest_detail::LoadPageCell(nest, page, index)));
             }
 
+            // 成分ごとの層(T-1210。0 でない層だけ。層の無い世界はここで何も足さない)
+            for (uint32_t page = 0; page < cells.pages.size(); ++page) {
+                for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                    const uint64_t address = (uint64_t{page} * MR_BLOCK_CELLS) + index;
+                    hash = nest_detail::HashCellLayers(hash, nest, page, index, address);
+                }
+            }
+
             return hash;
         }
 
@@ -814,6 +822,8 @@ namespace bicameral::sim {
                     hash = FxHashCombine(hash, HashReactionCell(LoadNestCell(nest, slot, index)));
                     hash = FxHashCombine(hash, HashFraction(FractionAt(nest, block.fraction, index)));
                     hash = HashCellOverflow(hash, nest, slot, index);
+                    if (!MrIsUniform(block))
+                        hash = nest_detail::HashCellLayers(hash, nest, block.page, index, index);  // T-1210
                     hash = HashCellFields(hash, nest, slot, index, truthOnly);
                 }
             }
