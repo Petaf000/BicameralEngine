@@ -51,6 +51,12 @@ namespace bicameral::sim {
         CenterLine,  // ① 中心どうしの梁: 粗い側の端は粗いセルの中心(横のずれを見ない。比べ用)
     };
 
+    // 閉じた領域の続く刻みの種(T-1171 の 2 つの形)
+    enum class SupportCloseGrowth : uint8_t {
+        Grow,  // 前の解きの残差が残った節を種にする(種から同じ長さ = 領域が残差で広がる。2 次元の塊では塊の全部へ広がった)
+        Fixed,  // 変わったセルだけを種に、領域の残差が残る間は同じ領域を解き続ける(領域は広がらない)。既定(仮。T-1171)
+    };
+
     enum class SupportSolve : uint8_t {
         Coupled,  // 成分を持つ節で 1 つの系(T-0919。BeamLattice だけ。PerComponent は結合が無いので Lagged と同じ)
         Lagged,   // 成分ごと + 結合を遅らせる(T-0871)
@@ -121,6 +127,16 @@ namespace bicameral::sim {
         // (RegisterWarmStartField の discardOnSleep = true。起きた刻みは形が変わるので使わない。ADR-0469 の 2-3・T-1159)
         EquilibriumWarmStart conjugateDirection;
         EquilibriumWarmStart conjugateResidual;
+
+        // --- 閉じた領域(R-B3・T-1171。22 §3.1・20 §9.3。C-0 の閉じた領域〔T-1087〕を使う)---
+        // 掘る・割れるなどで系が変わった後(CarryFrom)、変わったセル(前と対角のブロックか荷が違う・前に無かった)を種に、
+        // 「変わった所の大きさ(無くなった・足されたセルの外接の箱の長い辺。形が変わらない時は変わったセルの箱)× closeMultiplier」
+        // の内のセルだけを解き、外は前の答えのまま。続く刻みの種は closeGrowth(種が尽きたら解かない)。0 = 閉じない(今とビット一致)。
+        // Coupled だけ。違う大きさのセルが混ざる場面・大きさの違う場面からの CarryFrom は閉じずに解く(1 本目)
+        uint32_t closeMultiplier = 0;
+        // 解き残しの種: 前の解きの残差の成分がセル 1 つの重さ ÷ これを超えたセルを次の刻みも解く(0 = 残差では種にしない)
+        uint32_t closeResidualDivisor = 1000;
+        SupportCloseGrowth closeGrowth = SupportCloseGrowth::Fixed;
     };
 
     // 帳簿(上向きの力。mN)
@@ -179,6 +195,10 @@ namespace bicameral::sim {
         uint64_t Hash() const;
         // 前の Step で節の値を解いた回数(全部の段。Lagged は成分ごとの和。費用の比べ)
         uint64_t LastNodeUpdates() const { return m_lastNodeUpdates; }
+        // 前の Step で未知数にした節の数・種の数(閉じた領域。閉じない時は全部・0)と、今の閉じる長さ(mm。0 = 閉じない)
+        uint32_t LastUnknowns() const { return m_lastUnknowns; }
+        uint32_t LastSeeds() const { return m_lastSeeds; }
+        uint64_t CloseLengthMm() const { return m_options.blocks.closeLengthMm; }
         uint32_t CellCount() const { return (uint32_t)m_cells.size(); }
 
         // 成分を持つ節の系と段と今の値(Coupled の時。GPU 版〔gpu_equilibrium_block。T-0970〕が同じ系を解いて比べる)
@@ -237,6 +257,7 @@ namespace bicameral::sim {
         void AddMixedBond(uint32_t coarse, uint32_t fine, uint32_t axis, bool coarseLow, int64_t offset,
                           uint32_t intact);
         void BuildBlocks();
+        void CarryCloseState(const SupportLaw& before);
         int64_t CellValue(uint32_t cell, uint32_t component) const;
         int64_t UpForceOnTerm(const MixedTerm& term) const;  // high のセルへ(low へは同じ値の逆)
         void StepCoupled();
@@ -289,6 +310,13 @@ namespace bicameral::sim {
         EquilibriumBlockGrid m_blockGrid;
         EquilibriumBlockState m_blockState;
         uint64_t m_lastNodeUpdates = 0;
+        uint32_t m_lastUnknowns = 0;
+        uint32_t m_lastSeeds = 0;
+        // 次の Step だけの種(CarryFrom で変わったセル。閉じた領域)
+        std::vector<uint32_t> m_closeSeeds;
+        // Fixed: 変わったセル(残差が閾値 m_closeResidual 以下になるまで毎刻み種にする)
+        std::vector<uint32_t> m_changedSeeds;
+        uint64_t m_closeResidual = 0;
     };
 
 }  // namespace bicameral::sim
