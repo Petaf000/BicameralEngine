@@ -80,9 +80,10 @@ namespace {
         return setup;
     }
 
-    double windowMeters = 0.0;  // window=: 滑る窓の半径(m。T-1174。0 = 外す)
-    double slopeMeters = 0.0;   // slope=: 窓の外の坂(1 段あたりの長さ m。0 = 枠ごとに 1 段 = 今)
-    double pileMeters = 0.0;    // pilemeters=: 面で積もる分を広げて見る長さ(m。0 = 境のセル 1 つ = 今)
+    // window=: 滑る窓の半径(m。T-1174。既定 2 m = D-669〔刻みを選ぶ単位は窓〕。0 = 外す = 格子の単位〔flowblock= など〕)
+    double windowMeters = 2.0;
+    double slopeMeters = 0.0;  // slope=: 窓の外の坂(1 段あたりの長さ m。0 = 枠ごとに 1 段 = 今)
+    double pileMeters = 0.0;   // pilemeters=: 面で積もる分を広げて見る長さ(m。0 = 境のセル 1 つ = 今)
     // T-1175: spread=1(積もる分を長い側の続きのセルへ広げる)・spreadcells=n・meanmeters=(望みを ±m の平均の変化で)・
     // slack=n(窓の打ち切りを歩の残りが上限の 2^n 倍を超える時だけ)
     bool spreadPile = false;
@@ -295,6 +296,16 @@ namespace {
             run.state.widestNeighborGap, run.state.negativeValues);
     }
 
+    // 既定の試験(all)の川・火事の単位: 窓なら 1 セル + 窓(D-669)、窓を外せば場面の格子(8 m のブロック)
+    TimeStepLabSetup WithDefaultUnit(TimeStepLabSetup setup, double cellMeters) {
+        if (windowMeters <= 0.0)
+            return setup;
+
+        setup.blockCells = 1;
+
+        return WithWindow(setup, cellMeters);
+    }
+
     // 合格の線への見積もり(未確認): CPU の試作の 1 回の解きの時間から、線の秒数で一晩(火事は FIRE_TICKS)を進められる
     // 起きたセルの数。本物は GPU で、世界の大きさ(起きたセルの数)と最低機は未確認(Q11)
     void LogBudget(std::string_view scene, const TimeStepLabSetup& setup, const RunResult& run, uint64_t ticks,
@@ -311,7 +322,7 @@ namespace {
 
     void CheckRiver() {
         const RiverParameters river = RiverAt(0.5);
-        const TimeStepLabSetup base = MakeRiverSetup(river);
+        const TimeStepLabSetup base = WithDefaultUnit(MakeRiverSetup(river), river.cellMeters);
         const TimeStepLabSetup referenceSetup = WithTrial(base, REFERENCE);
         const RunResult reference = Run(referenceSetup, FilledRiver(river, referenceSetup), NIGHT_TICKS, NIGHT_TICKS,
                                         {}, true);
@@ -377,7 +388,7 @@ namespace {
 
     void CheckFire() {
         FireParameters fire;
-        const TimeStepLabSetup base = MakeFireSetup(fire);
+        const TimeStepLabSetup base = WithDefaultUnit(MakeFireSetup(fire), fire.cellMeters);
         const TimeStepLabSetup referenceSetup = WithTrial(base, REFERENCE);
         const RunResult reference = Run(referenceSetup, FilledFire(fire, referenceSetup), FIRE_TICKS, FIRE_TICKS,
                                         FireIgnition(fire), true);
@@ -473,7 +484,7 @@ namespace {
     constexpr double AIR_MICROMOL_PPM = 41.6;  // 1 m³ の空気の 100 万分の 1(µmol)
     constexpr double FLOW_CELL_METERS = 0.5;
     constexpr double FLOW_LENGTH_METERS = 64.0;
-    double flowBlockMeters = 4.0;  // flowblock=(m)
+    double flowBlockMeters = 0.5;  // flowblock=(m。既定 1 セル = 窓の形 D-669。格子は flowblock=4 window=0)
     constexpr uint64_t FLOW_SAMPLE_EVERY = 64;
 
     constexpr FlowScene FLOW_SCENES[] = {
@@ -729,7 +740,7 @@ namespace {
     // 引数: place [placeblock=セル] [placearrival=0〜2] [placeheaterk=K] [placestart=刻み] [placeticks=n]
     //       placetime(ずらし 0 m で、始める刻みを 0・1・2・3・5・8・13・1000 にずらす)
     double placeHeaterKelvin = 1570.48;
-    uint32_t placeBlockCells = 8;
+    uint32_t placeBlockCells = 1;  // placeblock=(セル。既定 1 セル = 窓の形 D-669。格子は placeblock=8 window=0)
     uint32_t placeArrival = 4;
     uint64_t placeStartTick = 0;
     uint64_t placeTicks = 8192;
@@ -836,7 +847,7 @@ namespace {
     // 川(一晩)と火事(18 分)を、同じ単位の形(grainunit= m の格子。0 = 1 セル。window=・slope= で滑る窓)で各細かさで走らせ、
     // 0.5 m ごとの場所で選ばれた e を 1,024 刻みごとに比べる(0.5 m のセルと、1 m・2 m のセル)。毎刻みとの差(同じ細かさ)も。
     // 引数: grain [grainunit=m(既定 4)] [grainbudget=n(既定 100 = 0.1 K)] [grainscene=0 川・1 火(既定 両方)] [window=m] [slope=m]
-    double grainUnitMeters = 4.0;
+    double grainUnitMeters = 0.0;  // grainunit=(m。既定 0 = 1 セル = 窓の形 D-669。格子は grainunit=4 window=0)
     uint64_t grainBudget = 100;
     int grainScene = -1;
     constexpr double GRAIN_SAMPLE_METERS = 0.5;
@@ -942,6 +953,9 @@ namespace {
                 grain.run.conserved ? 1 : 0, meanExponent / std::max<size_t>(samples, 1), grain.run.seconds, T1175Tag(),
                 grain.run.state.spreads);
             Expect(grain.run.conserved, "細かさ(T-1174): 保存");
+            // D-669: D-640 は「結果がどちらの細かさ(0.5 m・1 m)でも予算の内」(選ぶ刻みの揃い方は記録だけ。GRAINPAIR)
+            if (windowMeters > 0.0 && dx <= 1.0)
+                Expect(WithinPrecision(grain.worst), "細かさ(D-669): 0.5 m と 1 m のセルで毎刻みと予算の内");
             Expect(grain.run.state.widestNeighborGap <= 1, "細かさ(T-1174): 隣どうしの e の差は 1 段まで");
         }
 
@@ -1123,7 +1137,11 @@ namespace {
         }
 
         CheckFastForward();
-        CheckGranularity();
+        if (windowMeters > 0.0)
+            CheckGrainScene(false);  // D-669: 川を 0.5・1・2 m で(0.5 m と 1 m は毎刻みと予算の内)
+        else
+            CheckGranularity();  // 格子の形(D-640 の元の線: 選ぶ e が 9 割 1 段の内)
+
         CheckRiver();
         CheckFire();
         if (failureCount != 0) {

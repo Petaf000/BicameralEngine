@@ -176,7 +176,8 @@ namespace bicameral::sim {
 
         // 揃える段(レベルごと): groupShift と、単位の物の長さ(D-640)に届くまでの段の大きい方
         uint32_t GroupShiftAt(const TimeTreeSetup& setup, int32_t level) {
-            const int32_t byLength = setup.unitByLength ? std::max(level - setup.unitLevel, 0) : 0;
+            const bool grid = setup.unitByLength && setup.windowLevel0Cells == 0;  // 窓は格子の境を持たない(D-669)
+            const int32_t byLength = grid ? std::max(level - setup.unitLevel, 0) : 0;
 
             return std::max(setup.groupShift, static_cast<uint32_t>(byLength));
         }
