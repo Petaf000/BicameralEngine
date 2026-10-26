@@ -9,6 +9,8 @@ RX_NAMESPACE_BEGIN
 FX_CONST uint32_t RD_GROUP_COUNT = 16;
 FX_CONST uint32_t RD_GROUP_DIRECTIONS = 32;
 FX_CONST uint32_t RD_DIRECTION_WORDS = 5;
+// 1 行 = 1 本の並びを保つ(整形しない)
+// clang-format off
 FX_CONST int32_t RD_DIRECTIONS[2560] = {
     45, 0, 1023, 16368, 31,
     -190, -174, 991, 15857, 30,
@@ -523,6 +525,7 @@ FX_CONST int32_t RD_DIRECTIONS[2560] = {
     -1014, 138, 33, 16226, 31,
     841, 584, 1, 13457, 26,
 };
+// clang-format on
 
 RX_NAMESPACE_END
 

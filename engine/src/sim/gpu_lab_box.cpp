@@ -96,9 +96,9 @@ namespace bicameral::sim {
 
             const D3D12_GPU_VIRTUAL_ADDRESS commandAddress = m_commands->GetGPUVirtualAddress();
             m_nest.SetExternalViews(commandAddress, 0);
-            m_nest.RecordExternalDispatch(list, debugRing, m_applyPipeline.Get(), 1,
-                                          {static_cast<uint32_t>(commands.size()), lab::LabPackShape(m_shape),
-                                           m_speciesCount, 0});
+            m_nest.RecordExternalDispatch(
+                list, debugRing, m_applyPipeline.Get(), 1,
+                {static_cast<uint32_t>(commands.size()), lab::LabPackShape(m_shape), m_speciesCount, 0});
         }
 
         m_nest.RecordStep(list, debugRing, LAB_WORLD_SEED, tick, LabStepOptions(m_shape));
@@ -137,7 +137,8 @@ namespace bicameral::sim {
         const D3D12_GPU_VIRTUAL_ADDRESS remapAddress = m_remap->GetGPUVirtualAddress();
         m_nest.SetExternalViews(remapAddress, 0);
         m_nest.RecordExternalDispatch(list, debugRing, m_remapPipeline.Get(),
-                                      (cellCount + REMAP_GROUP_THREADS - 1) / REMAP_GROUP_THREADS, {cellCount, 0, 0, 0});
+                                      (cellCount + REMAP_GROUP_THREADS - 1) / REMAP_GROUP_THREADS,
+                                      {cellCount, 0, 0, 0});
 
         return true;
     }

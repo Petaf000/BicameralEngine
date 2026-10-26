@@ -82,8 +82,8 @@ namespace bicameral::script {
         std::shared_ptr<const LoadedReactionTable> m_current;
         SpeciesChangePolicy m_policy = SpeciesChangePolicy::Reject;
         WorldCheck m_worldCheck;  // 無ければ聞かない
-        uint64_t m_seen = 0;     // 最後に読み直した(か作った時の)指紋
-        uint64_t m_pending = 0;  // 変わったのを見た指紋(次の Poll で同じなら読み直す)
+        uint64_t m_seen = 0;      // 最後に読み直した(か作った時の)指紋
+        uint64_t m_pending = 0;   // 変わったのを見た指紋(次の Poll で同じなら読み直す)
     };
 
 }  // namespace bicameral::script

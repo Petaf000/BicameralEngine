@@ -52,10 +52,13 @@ def main():
     print(f"FX_CONST uint32_t RD_GROUP_COUNT = {GROUPS};")
     print(f"FX_CONST uint32_t RD_GROUP_DIRECTIONS = {PER_GROUP};")
     print(f"FX_CONST uint32_t RD_DIRECTION_WORDS = 5;")
+    print("// 1 行 = 1 本の並びを保つ(整形しない)")
+    print("// clang-format off")
     print(f"FX_CONST int32_t RD_DIRECTIONS[{GROUPS * PER_GROUP * 5}] = {{")
     for row in rows:
         print("    " + ", ".join(str(v) for v in row) + ",")
     print("};")
+    print("// clang-format on")
     print()
     print("RX_NAMESPACE_END")
     print()
