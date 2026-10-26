@@ -171,6 +171,53 @@ FX_FN bool OhReactAwake(OhBlockState state, uint64_t tick) {
     return state.changedPass > state.reactPass || state.minWakeTick <= tick;
 }
 
+// --- 起きている物の一覧(T-1077。眠っている物を Dispatch しない。眠らせ方の印で、真実ではない)---
+// 一覧は段ごとに物の印から作り、一覧の物のブロックだけを ExecuteIndirect で回す。一覧に入れるのは「どれかのブロックが起きうる」物で、
+// 入れなかった物のブロックは、全部を回して OhExchangeAwake・OhReactAwake で見た時も眠っている(だから結果は一覧なしと同じ)。
+//   受け渡し: 最後に回した段(lastListed)の後に、物の中のどれかが変わった・静かでなかった(busyPass ≥ lastListed)・
+//             囲むセルが変わった(外に面する物で、セルの変わった段 ≥ lastListed)・光が当たる(光を吸う物)
+//   反応: この刻みの受け渡しで一覧に入った・物の中の起こす刻みの最小が来た
+// 物の中の変化はブロックの隣どうしだけで伝わり(OhNeighbourBlock は物の中)、セルを読む前(起こす段の前)に書かれたセルの段は
+// lastListed より小さい(セルの段は書いた段の番号)ので、この条件で眠っている物のブロックは、回しても起きない。
+FX_CONST uint32_t
+    OH_OBJECT_AWAKE_LEFT = 0x100u;  // 前に一覧に入れた(ブロックの awake が 1 のまま残りうる。外れる時に 0 に戻す)
+FX_CONST uint32_t OH_LIST_REACT = 0xFFFFFFFFu;  // 一覧を作る段の小刻みの番号: 反応の一覧
+FX_CONST uint32_t OH_LIST_HEADER = 4;           // 一覧の頭の語: [0] 一覧の物の数・[1] 一覧のブロックの数
+FX_CONST uint32_t OH_LIST_GROUP_OBJECTS = 256;  // 一覧を作る段の 1 グループの物の数
+FX_CONST uint32_t OH_LIST_ROW_GROUPS = 1024;    // 一覧で回す段のグループの x の数(超えたら y に折る)
+FX_CONST uint32_t OH_LIST_ARGS_WAKE = 0;        // 間接の引数の組: 起こす(1 スレッド = 1 ブロック)
+FX_CONST uint32_t OH_LIST_ARGS_BLOCKS = 1;      // 1 グループ = 1 ブロック
+FX_CONST uint32_t OH_LIST_ARGS_OBJECTS = 2;     // 1 グループ = 1 物
+FX_CONST uint32_t OH_LIST_ARGS_COUNT = 3;
+
+// 眠らせ方(段の定数 g_sleeping)
+FX_CONST uint32_t OH_SLEEP_ALL = 0;     // 全部のブロックを毎段回す(眠らせ方の厳密さの比べ)
+FX_CONST uint32_t OH_SLEEP_BLOCKS = 1;  // 全部のブロックを Dispatch し、眠っているブロックは 1 語読んで抜ける(T-1098)
+FX_CONST uint32_t OH_SLEEP_LISTED = 2;  // 起きている物の一覧のブロックだけ ExecuteIndirect で回す(T-1077)
+
+struct OhObjectState {
+    uint32_t lastListed;   // 受け渡しを最後に回した段(一覧に入れ、小刻みを飛ばさなかった)
+    uint32_t busyPass;     // 物の中のどれかのブロックが最後に変わった・静かでなかった段(InterlockedMax)
+    uint32_t reducedPass;  // ③ が粗い量を最後に書いた段(④ はこの段の物だけ足す)
+    uint32_t flags;        // OH_BLOCK_*(ブロックの和。変わらない)| OH_OBJECT_AWAKE_LEFT
+    uint64_t minWakeTick;  // 物の中のブロックの起こす刻みの最小(反応の後に一覧の物だけ直す)
+    uint32_t listedTick;   // 受け渡しの一覧に最後に入った刻み(下 32bit)
+    uint32_t padding;
+};
+
+// この受け渡しの段で物を一覧に入れるか
+FX_FN bool OhObjectExchangeListed(OhObjectState state, uint32_t cellChangedPass, bool lightOn) {
+    const bool cellChanged = (state.flags & OH_BLOCK_EXPOSED) != 0 && cellChangedPass >= state.lastListed;
+    const bool lit = lightOn && (state.flags & OH_BLOCK_LIT) != 0;
+
+    return state.busyPass >= state.lastListed || cellChanged || lit;
+}
+
+// この刻みの反応の段で物を一覧に入れるか
+FX_FN bool OhObjectReactListed(OhObjectState state, uint64_t tick) {
+    return state.listedTick == (uint32_t)tick || state.minWakeTick <= tick;
+}
+
 // ボクセルの変わらない値
 struct OhVoxelInfo {
     uint32_t object;  // 物の番号
@@ -336,6 +383,17 @@ FX_FN int64_t OhPairConduction(OhObject object, uint64_t airConductivity, int64_
                            (uint64_t)object.substeps * OH_CONDUCTION_DIVISOR_MEGA * OH_MEGA);
 }
 
+// 面の広さ s² の吸い込み(Q16): τ = Σ a·n ÷ (0.25 m² × 2^L)(n はボクセルの単位)。和を 2^L で割ってから τ にする
+// (τ にしてから割ると τ の飽和 32 が 32 ÷ 2^L に下がり、7.8 mm の箱では厚い紙・炭・草でも吸い込みが 1 − e^−0.5 = 0.39 で頭打ちだった。T-1097)
+FX_FN uint32_t OhAbsorptanceQ16(FxU128 sum, int32_t bodyLevel) {
+    const uint32_t shift = (uint32_t)bodyLevel;
+    FxU128 face;
+    face.hi = sum.hi >> shift;
+    face.lo = shift == 0 ? sum.lo : ((sum.lo >> shift) | (sum.hi << ((64 - shift) & 63)));
+
+    return RdAbsorptanceQ16(RdOpticalDepthQ32(face));
+}
+
 // 放射: ボクセルの吸い込み(長い帯)× 囲む所(吸い込み 1)。RdPairCoefficient は 0.25 m² の面の値なので、
 // 外に面する面の広さ(面の数 × s²)とボクセルの単位(× 8^L)にする: × 面の数 × 2^L
 template <typename Table>
@@ -349,8 +407,7 @@ FX_FN int64_t OhPairRadiation(Table table, OhObject object, uint32_t exposedFace
         sum = RdAddAbsorption(sum, absorption, RX_AMOUNT_AT(cell, i));
     }
 
-    // 面の広さ s² の吸い込み: τ = Σ a·n ÷ (0.25 m² × 2^L)(n はボクセルの単位)
-    const uint32_t absorptance = RdAbsorptanceQ16(RdOpticalDepthQ32(sum) >> object.bodyLevel);
+    const uint32_t absorptance = OhAbsorptanceQ16(sum, object.bodyLevel);
     const uint64_t weight = RdPairWeightQ32(absorptance, RD_ONE_Q16, RD_ONE_Q16);
     const uint64_t coefficient = (RdPairCoefficient((uint32_t)voxel.temperature, (uint32_t)airMilliKelvin, weight) *
                                   (uint64_t)exposedFaces)

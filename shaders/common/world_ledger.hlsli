@@ -34,7 +34,9 @@ FX_CONST uint32_t WL_REASON_REST_ROUNDING = 7;      // 静止の丸め(1 単位�
 FX_CONST uint32_t WL_REASON_FRICTION = 8;
 FX_CONST uint32_t WL_REASON_NO_OUTLET = 9;
 FX_CONST uint32_t WL_REASON_FOLLOW_MASS = 10;
-FX_CONST uint32_t WL_REASON_COUNT = 11;
+// 物との受け渡し(物の箱のボクセル ⇔ 囲むセルの対の面。ADR-0360・ADR-0434・T-1077。入 = 物からセルへ、出 = セルから物へ)
+FX_CONST uint32_t WL_REASON_OBJECT_EXCHANGE = 11;
+FX_CONST uint32_t WL_REASON_COUNT = 12;
 
 // --- 向きと欄 ---
 FX_CONST uint32_t WL_DIRECTION_OUT = 0;  // セルから減った(世界の外へ出た)

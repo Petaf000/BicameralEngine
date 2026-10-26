@@ -3,11 +3,13 @@
 // 式は shaders/common/object_heat.hlsli、段は shaders/sim/object_heat.hlsl、CPU は tests/object_heat_cpu.h。
 // 物は 3 種(箱 7.8 mm = レベル 6): A4 の紙(27 × 1 × 38・厚さ 0.1 mm を箱に薄めて両面が外)・小枝(2 × 2 × 38・Ø 1 cm の木を箱に薄めて)・
 // 薪(10 × 10 × 51・Ø 8 cm × 40 cm を四角の箱で)。木は試験の表の cellulose を薄めた量。外に面するボクセルを 900 K から始める(燃えている物)。
-//   既定: 紙 2・小枝 3(同じセル)・薪 1(別のセル)を 60 刻み、20 刻みごとにボクセル・セル・対の端数・待ち・ブロックの状態を読み戻して CPU と比べる。
+//   既定: 紙 2・小枝 3(同じセル)・薪 1 と小刻み 4 回の小枝 1(別のセル)を 60 刻み、20 刻みごとにボクセル・セル・対の端数・待ち・ブロックの状態を
+//         読み戻して CPU と比べる(GPU は起きている物の一覧の形と、全部を Dispatch して眠っているブロックを抜ける形の 2 つ。T-1077)。
 //         CPU の側で、眠らせた世界と全部回す世界が毎刻み同じこと(T-1098)と、エネルギーの保存(セル × 8^6 + ボクセル + 対の端数 − 入った光)も確かめる。
 //   --profile: 薪 100 本・焚き火を 600 刻み回し、60 刻みごとに段ごとの GPU の ms と起きているブロックの数を出す
-//   --measure(--measure-only は CPU と比べずに測るだけ): 薪 100 本・焚き火・紙 / 小枝 / 薪 1000 個(10 個ずつ同じセル)を、全部回す / 眠らせる で、
-//         暖機 4 刻みと 300 刻みの後の 1 刻みの GPU の時間(段ごとのタイムスタンプの和)を測る。
+//   --measure(--measure-only は CPU と比べずに測るだけ): 薪 100 本・焚き火・紙 / 小枝 / 薪 1000 個(10 個ずつ同じセル)を、全部回す / 眠らせる /
+//         起きている物の一覧 で、暖機 4 刻みと 300 刻みの後の 1 刻みの GPU の時間(段ごとのタイムスタンプの和)を測る。
+//         眠っている小枝 10,000 本 + 燃える小枝 10・100・1000 本は、眠らせる / 一覧 で 300 刻みの後(T-1077)。
 // 引数は gpu_test_options.h と --measure。
 #include <cstring>
 
@@ -19,6 +21,7 @@
 #include "gpu/device.h"
 #include "gpu/immediate_queue.h"
 #include "gpu/resources.h"
+#include "gpu_object_heat_stages.h"
 #include "gpu_test_options.h"
 #include "object_heat_cpu.h"
 #include "sim/reaction_table.h"
@@ -36,23 +39,12 @@ namespace {
     constexpr uint64_t AIR_OXYGEN_UNITS = 1092000;
     constexpr uint64_t AIR_NITROGEN_UNITS = 4108000;
     constexpr uint32_t DEFAULT_DIFFUSIVITY_MM2_PER_S = 20;
-    constexpr uint32_t GAS_CONDUCTIVITY_SCALE = 5000;  // 試験の表の伝導率の倍率を外す(object_heat_test と同じ)
-    constexpr uint32_t SOLID_CONDUCTIVITY_SCALE = 20000;
     constexpr int32_t BURNING_MILLIKELVIN = 900000;
     constexpr int64_t SPOT_LIGHT = 10000000;  // 物の最初のボクセルが 1 刻みに吸う光(ボクセルの単位。約 2.3 W)
     constexpr uint64_t WORLD_SEED = 0x1064;
     constexpr uint32_t COMPARE_TICKS = 60;
     constexpr uint32_t COMPARE_EVERY = 20;
     constexpr uint32_t OBJECTS_PER_CELL = 10;
-    constexpr uint32_t THREADS = 64;
-    constexpr uint32_t ROW_GROUPS = 1024;  // グループの数が 65535 を超える時の x の数
-    constexpr uint32_t ROOT_CONSTANT_COUNT = 13;
-    constexpr uint32_t SRV_COUNT = 11;
-    constexpr uint32_t TIMESTAMP_COUNT = 7;  // 刻みの初め + 6 つの段の後
-
-    // u0〜u9 / b0 / デバッグのリング / t0〜t10(object_heat.hlsl)
-    constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
-        .uavCount = 10, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = SRV_COUNT};
 
     // --- 物の形 ---
 
@@ -100,7 +92,7 @@ namespace {
 
     // 物を 1 つ足す(セルの順に足すこと)。外に面するボクセルは燃えている温度から
     void AddObject(const sim::BakedReactionTable& table, test::OhWorld& world, Kind kind, uint32_t cell, bool spot,
-                   bool burning = true) {
+                   bool burning = true, uint32_t substeps = 1) {
         const KindShape shape = ShapeOf(kind);
         const auto objectIndex = static_cast<uint32_t>(world.objects.size());
         const auto begin = static_cast<uint32_t>(world.voxels.size());
@@ -111,7 +103,7 @@ namespace {
                                  .cell = cell,
                                  .bodyLevel = BODY_LEVEL,
                                  .cellLevel = 0,
-                                 .substeps = 1,
+                                 .substeps = substeps,
                                  .filmUm = FILM_UM});
         world.carries.push_back(rx::OhZeroFlow());
         const std::vector<sim::SpeciesAmount> amounts = {
@@ -146,14 +138,8 @@ namespace {
     }
 
     sim::BakedReactionTable MakeTable() {
-        return test::MakeSunTable([](sim::ReactionTableDefinition& definition) {
-            for (sim::SpeciesDefinition& species : definition.species) {
-                if (species.phase == sim::SpeciesPhase::Gas)
-                    species.thermalConductivity /= GAS_CONDUCTIVITY_SCALE;
-                else if (species.name == "cellulose" || species.name == "carbon")
-                    species.thermalConductivity /= SOLID_CONDUCTIVITY_SCALE;
-            }
-        });
+        // 伝導率は表の現実の値のまま(試験の倍率は T-1066 で表から外した。ここで割っていたのを外す)
+        return test::MakeSunTable();
     }
 
     // 物を置いた後に呼ぶ: ブロックと眠らせ方の状態を作る
@@ -162,349 +148,7 @@ namespace {
         world.sleeping = sleeping;
     }
 
-    // --- GPU ---
-
-    enum Stage : uint8_t {
-        StageWake,
-        StagePrepare,
-        StageFlow,
-        StageReduce,
-        StageApplyCells,
-        StageReact,
-        STAGE_COUNT,
-    };
-
-    struct Pipelines {
-        ComPtr<ID3D12RootSignature> rootSignature;
-        std::array<ComPtr<ID3D12PipelineState>, STAGE_COUNT> stages;
-    };
-
-    std::expected<Pipelines, std::string> CreatePipelines(ID3D12Device5* device) {
-        Pipelines result;
-        result.rootSignature = gpu::CreateRootSignature(device, ROOT_LAYOUT);
-        if (!result.rootSignature)
-            return std::unexpected("ルート署名を作れない");
-
-        const std::array<const char*, STAGE_COUNT> names = {
-            "sim/object_heat_wake.cso",   "sim/object_heat_prepare.cso",     "sim/object_heat_flow.cso",
-            "sim/object_heat_reduce.cso", "sim/object_heat_apply_cells.cso", "sim/object_heat_react.cso"};
-        for (size_t i = 0; i < names.size(); ++i) {
-            const auto bytecode = gpu::LoadShader(names[i]);
-            if (!bytecode)
-                return std::unexpected(bytecode.error());
-
-            result.stages[i] = gpu::CreateComputePipeline(device, result.rootSignature.Get(), *bytecode);
-            if (!result.stages[i])
-                return std::unexpected(std::format("パイプラインを作れない: {}", names[i]));
-        }
-
-        return result;
-    }
-
-    // GPU の世界(既定のヒープ)。u の番号は object_heat.hlsl の並び
-    enum Uav : uint8_t {
-        UavVoxels,
-        UavHeats,
-        UavFlows,
-        UavCarries,
-        UavCoarse,
-        UavCells,
-        UavFailures,
-        UavBlockStates,
-        UavWaits,
-        UavCellChanged,
-        UAV_COUNT,
-    };
-
-    struct GpuWorld {
-        std::array<ComPtr<ID3D12Resource>, UAV_COUNT> uavs;
-        std::array<ComPtr<ID3D12Resource>, UAV_COUNT> uavUploads;  // 写しの元(初めの値)
-        std::array<gpu::ResidentBuffer, SRV_COUNT> tables;
-        ComPtr<ID3D12QueryHeap> timestamps;
-        ComPtr<ID3D12Resource> timestampReadback;
-        uint32_t voxelCount = 0;
-        uint32_t objectCount = 0;
-        uint32_t rangeCount = 0;
-        uint32_t blockCount = 0;
-        uint32_t passesPerTick = 2;  // 小刻みの段 + 反応の段(CPU の world.pass と同じ数え方)
-        bool sleeping = true;
-    };
-
-    template <typename T>
-    std::span<const std::byte> BytesOf(const std::vector<T>& values) {
-        return std::as_bytes(std::span(values));
-    }
-
-    std::expected<GpuWorld, std::string> CreateGpuWorld(ID3D12Device5* device, const sim::BakedReactionTable& table,
-                                                        const test::OhTables& tables, const test::OhWorld& world) {
-        GpuWorld result;
-        result.voxelCount = static_cast<uint32_t>(world.voxels.size());
-        result.objectCount = static_cast<uint32_t>(world.objects.size());
-        result.rangeCount = static_cast<uint32_t>(world.ranges.size());
-        result.blockCount = static_cast<uint32_t>(world.blocks.size());
-        result.sleeping = world.sleeping;
-        for (const rx::OhObject& object : world.objects)
-            result.passesPerTick = std::max(result.passesPerTick, object.substeps + 1);
-
-        const std::vector<rx::OhFlow> coarse(world.objects.size(), rx::OhZeroFlow());
-        const std::vector<uint32_t> failures(4, 0);
-        const std::array<std::span<const std::byte>, UAV_COUNT> initial = {
-            BytesOf(world.voxels), BytesOf(world.heats),
-            BytesOf(world.flows),  BytesOf(world.carries),
-            BytesOf(coarse),       BytesOf(world.cells),
-            BytesOf(failures),     BytesOf(world.blockStates),
-            BytesOf(world.waits),  BytesOf(world.cellChangedPasses)};
-        for (size_t i = 0; i < initial.size(); ++i) {
-            result.uavs[i] = gpu::CreateBuffer(device, initial[i].size(), gpu::BufferKind::UnorderedAccess);
-            result.uavUploads[i] = gpu::CreateFilledUpload(device, initial[i]);
-            if (!result.uavs[i] || !result.uavUploads[i])
-                return std::unexpected("世界のバッファを作れない");
-        }
-
-        const std::vector<uint32_t> gasSpecies(tables.gases.species.begin(), tables.gases.species.end());
-        const std::array<std::span<const std::byte>, SRV_COUNT> srvs = {
-            BytesOf(table.species),  BytesOf(table.rules),   BytesOf(table.ruleIndex), BytesOf(table.rates),
-            BytesOf(tables.species), BytesOf(world.objects), BytesOf(world.infos),     BytesOf(world.light),
-            BytesOf(world.ranges),   BytesOf(gasSpecies),    BytesOf(world.blocks)};
-        for (size_t i = 0; i < srvs.size(); ++i) {
-            result.tables[i] = gpu::CreateResidentBuffer(device, srvs[i]);
-            if (!result.tables[i].Valid())
-                return std::unexpected("表のバッファを作れない");
-        }
-
-        result.timestampReadback = gpu::CreateBuffer(device, TIMESTAMP_COUNT * sizeof(uint64_t),
-                                                     gpu::BufferKind::Readback);
-        const D3D12_QUERY_HEAP_DESC heapDesc{
-            .Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP, .Count = TIMESTAMP_COUNT, .NodeMask = 0};
-        if (FAILED(device->CreateQueryHeap(&heapDesc, IID_PPV_ARGS(&result.timestamps))) || !result.timestampReadback)
-            return std::unexpected("タイムスタンプを作れない");
-
-        return result;
-    }
-
-    // 初めの値を既定のヒープへ写す(リストの終わりで COMMON に戻り、次のリストで UAV / SRV へ暗黙に上がる)
-    bool UploadWorld(gpu::ImmediateQueue& queue, const GpuWorld& world) {
-        ID3D12GraphicsCommandList10* list = queue.Begin();
-        if (list == nullptr)
-            return false;
-
-        for (size_t i = 0; i < world.uavs.size(); ++i)
-            list->CopyResource(world.uavs[i].Get(), world.uavUploads[i].Get());
-
-        gpu::RecordResidentUploads(list, world.tables);
-
-        return queue.ExecuteAndWait();
-    }
-
-    // スレッドかグループの並び(65535 を超える時は y に折る)
-    struct Grid {
-        uint32_t groupsX;
-        uint32_t groupsY;
-    };
-
-    Grid GroupsFor(uint32_t groups) {
-        if (groups <= 65535)
-            return {std::max(groups, 1u), 1};
-
-        return {ROW_GROUPS, (groups + ROW_GROUPS - 1) / ROW_GROUPS};
-    }
-
-    Grid ThreadsFor(uint32_t threads) {
-        return GroupsFor((threads + THREADS - 1) / THREADS);
-    }
-
-    void Barrier(ID3D12GraphicsCommandList10* list) {
-        const D3D12_RESOURCE_BARRIER barrier = gpu::UavBarrier(nullptr);
-        list->ResourceBarrier(1, &barrier);
-    }
-
-    // 段の番号(CPU の world.pass と同じ: 刻み t の小刻み s は (t − 1) × 段の数 + s + 1、反応は t × 段の数)
-    uint32_t PassOf(const GpuWorld& world, uint64_t tick, uint32_t substep, bool react) {
-        const auto base = static_cast<uint32_t>((tick - 1) * world.passesPerTick);
-
-        return react ? base + world.passesPerTick : base + substep + 1;
-    }
-
-    void SetConstants(ID3D12GraphicsCommandList10* list, const GpuWorld& world, uint32_t substep, bool lightOn,
-                      uint64_t tick, uint32_t rowThreads, uint32_t pass) {
-        const std::array<uint32_t, ROOT_CONSTANT_COUNT> constants = {world.voxelCount,
-                                                                     world.objectCount,
-                                                                     world.rangeCount,
-                                                                     substep,
-                                                                     lightOn ? 1u : 0u,
-                                                                     static_cast<uint32_t>(tick),
-                                                                     static_cast<uint32_t>(tick >> 32),
-                                                                     static_cast<uint32_t>(WORLD_SEED),
-                                                                     static_cast<uint32_t>(WORLD_SEED >> 32),
-                                                                     rowThreads,
-                                                                     world.blockCount,
-                                                                     pass,
-                                                                     world.sleeping ? 1u : 0u};
-        list->SetComputeRoot32BitConstants(ROOT_LAYOUT.RootConstantIndex(), ROOT_CONSTANT_COUNT, constants.data(), 0);
-    }
-
-    // 1 段を記録する(後に UAV のバリア)
-    void RecordStage(ID3D12GraphicsCommandList10* list, const Pipelines& pipelines, const GpuWorld& world, Stage stage,
-                     bool lightOn, uint64_t tick, uint32_t substep) {
-        Grid grid = GroupsFor(world.blockCount);
-        if (stage == StageWake)
-            grid = ThreadsFor(world.blockCount);
-        else if (stage == StageReduce)
-            grid = Grid{world.objectCount, 1};
-        else if (stage == StageApplyCells)
-            grid = ThreadsFor(world.rangeCount);
-
-        SetConstants(list, world, substep, lightOn, tick, grid.groupsX * THREADS,
-                     PassOf(world, tick, substep, stage == StageReact));
-        list->SetPipelineState(pipelines.stages[stage].Get());
-        list->Dispatch(grid.groupsX, grid.groupsY, 1);
-        Barrier(list);
-    }
-
-    // 1 刻み(小刻みごとに 起こす・①〜④、最後に ⑤)を記録する。stamps なら段ごとにタイムスタンプ(1 + 段の番号。小刻み 1 の時だけ)
-    void RecordTick(ID3D12GraphicsCommandList10* list, const Pipelines& pipelines, const GpuWorld& world, bool lightOn,
-                    uint64_t tick, bool stamps) {
-        for (uint32_t sub = 0; sub + 1 < world.passesPerTick; ++sub) {
-            for (const Stage stage : {StageWake, StagePrepare, StageFlow, StageReduce, StageApplyCells}) {
-                RecordStage(list, pipelines, world, stage, lightOn, tick, sub);
-                if (stamps)
-                    list->EndQuery(world.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1 + stage);
-            }
-        }
-
-        RecordStage(list, pipelines, world, StageReact, lightOn, tick, 0);
-        if (stamps)
-            list->EndQuery(world.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1 + StageReact);
-    }
-
-    void BindRoot(ID3D12GraphicsCommandList10* list, const Pipelines& pipelines, const GpuWorld& world,
-                  gpu::DebugRing& debugRing) {
-        list->SetComputeRootSignature(pipelines.rootSignature.Get());
-        for (uint32_t i = 0; i < world.uavs.size(); ++i)
-            list->SetComputeRootUnorderedAccessView(i, world.uavs[i]->GetGPUVirtualAddress());
-
-        list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.DebugRingIndex(), debugRing.GpuAddress());
-        for (uint32_t i = 0; i < world.tables.size(); ++i)
-            list->SetComputeRootShaderResourceView(ROOT_LAYOUT.SrvIndex(i),
-                                                   world.tables[i].buffer->GetGPUVirtualAddress());
-    }
-
-    // 刻み [first, first + count) を 1 本のリストで流す。stamps なら段ごとのタイムスタンプ(ms)を返す(1 刻みの時だけ意味がある)
-    std::expected<std::array<double, STAGE_COUNT>, std::string> RunTicks(gpu::ImmediateQueue& queue,
-                                                                         const Pipelines& pipelines,
-                                                                         const GpuWorld& world,
-                                                                         gpu::DebugRing& debugRing, uint64_t first,
-                                                                         uint32_t count, bool lightOn, bool stamps) {
-        ID3D12GraphicsCommandList10* list = queue.Begin();
-        if (list == nullptr)
-            return std::unexpected("コマンドリストを始められない");
-
-        debugRing.RecordBegin(list);
-        BindRoot(list, pipelines, world, debugRing);
-        if (stamps)
-            list->EndQuery(world.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
-
-        for (uint32_t i = 0; i < count; ++i)
-            RecordTick(list, pipelines, world, lightOn, first + i, stamps);
-
-        if (stamps)
-            list->ResolveQueryData(world.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, TIMESTAMP_COUNT,
-                                   world.timestampReadback.Get(), 0);
-
-        debugRing.RecordReadbackAndReset(list);
-        if (!queue.ExecuteAndWait())
-            return std::unexpected("GPU での実行に失敗");
-
-        const gpu::DebugRingContents debugOutput = debugRing.Drain();
-        if (debugOutput.assertCount > 0)
-            return std::unexpected(std::format("GPU の FX_ASSERT が {} 件", debugOutput.assertCount));
-
-        std::array<double, STAGE_COUNT> stages{};
-        if (!stamps)
-            return stages;
-
-        std::array<uint64_t, TIMESTAMP_COUNT> times{};
-        uint64_t frequency = 0;
-        if (!gpu::ReadBuffer(world.timestampReadback.Get(), std::as_writable_bytes(std::span(times))) ||
-            FAILED(queue.Native()->GetTimestampFrequency(&frequency)) || frequency == 0)
-            return std::unexpected("タイムスタンプを読めない");
-
-        for (size_t stage = 0; stage < STAGE_COUNT; ++stage)
-            stages[stage] = static_cast<double>(times[stage + 1] - times[stage]) * 1000.0 /
-                            static_cast<double>(frequency);
-
-        return stages;
-    }
-
-    double Sum(const std::array<double, STAGE_COUNT>& stages) {
-        double total = 0.0;
-        for (const double value : stages)
-            total += value;
-
-        return total;
-    }
-
-    // UAV の中身を読み戻す(前のリストの終わりで COMMON に戻っているので、UAV に上げてから写す)
-    template <typename T>
-    std::expected<std::vector<T>, std::string> ReadUav(ID3D12Device5* device, gpu::ImmediateQueue& queue,
-                                                       ID3D12Resource* resource, size_t count) {
-        const ComPtr<ID3D12Resource> readback = gpu::CreateBuffer(device, count * sizeof(T), gpu::BufferKind::Readback);
-        ID3D12GraphicsCommandList10* list = queue.Begin();
-        if (!readback || list == nullptr)
-            return std::unexpected("読み戻しを作れない");
-
-        const D3D12_RESOURCE_BARRIER toUav = gpu::Transition(resource, D3D12_RESOURCE_STATE_COMMON,
-                                                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        list->ResourceBarrier(1, &toUav);
-        gpu::RecordCopyToReadback(list, resource, readback.Get());
-        std::vector<T> values(count);
-        if (!queue.ExecuteAndWait() || !gpu::ReadBuffer(readback.Get(), std::as_writable_bytes(std::span(values))))
-            return std::unexpected("読み戻せない");
-
-        return values;
-    }
-
-    template <typename T>
-    size_t CountDifferent(std::span<const T> cpu, std::span<const T> gpuValues, const char* label) {
-        size_t different = 0;
-        for (size_t i = 0; i < cpu.size(); ++i) {
-            if (std::memcmp(&cpu[i], &gpuValues[i], sizeof(T)) == 0)
-                continue;
-
-            if (different++ < 3) {
-                std::array<int64_t, sizeof(T) / 8> a{};
-                std::array<int64_t, sizeof(T) / 8> b{};
-                std::memcpy(a.data(), &cpu[i], sizeof(a));
-                std::memcpy(b.data(), &gpuValues[i], sizeof(b));
-                Log(Channel::Gpu, Level::Error, "{} [{}]: cpu {} / gpu {}", label, i, a, b);
-            }
-        }
-
-        if (different != 0)
-            Log(Channel::Gpu, Level::Error, "{}: 食い違い {} / {}", label, different, cpu.size());
-
-        return different;
-    }
-
-    // GPU の世界の真実(ボクセル・セル・対の端数・待ち・ブロックの状態)を CPU と比べる。食い違いの数
-    std::expected<size_t, std::string> CompareWorld(ID3D12Device5* device, gpu::ImmediateQueue& queue,
-                                                    const GpuWorld& gpuWorld, const test::OhWorld& cpu) {
-        const auto voxels = ReadUav<rx::RxCell>(device, queue, gpuWorld.uavs[UavVoxels].Get(), cpu.voxels.size());
-        const auto cells = ReadUav<rx::RxCell>(device, queue, gpuWorld.uavs[UavCells].Get(), cpu.cells.size());
-        const auto carries = ReadUav<rx::OhFlow>(device, queue, gpuWorld.uavs[UavCarries].Get(), cpu.carries.size());
-        const auto waits = ReadUav<rx::OhVoxelWait>(device, queue, gpuWorld.uavs[UavWaits].Get(), cpu.waits.size());
-        const auto states = ReadUav<rx::OhBlockState>(device, queue, gpuWorld.uavs[UavBlockStates].Get(),
-                                                      cpu.blockStates.size());
-        const auto failures = ReadUav<uint32_t>(device, queue, gpuWorld.uavs[UavFailures].Get(), 4);
-        if (!voxels || !cells || !carries || !waits || !states || !failures)
-            return std::unexpected("読み戻せない");
-
-        return CountDifferent<rx::RxCell>(cpu.voxels, *voxels, "ボクセル") +
-               CountDifferent<rx::RxCell>(cpu.cells, *cells, "セル") +
-               CountDifferent<rx::OhFlow>(cpu.carries, *carries, "対の端数") +
-               CountDifferent<rx::OhVoxelWait>(cpu.waits, *waits, "待ち") +
-               CountDifferent<rx::OhBlockState>(cpu.blockStates, *states, "ブロックの状態") + (*failures)[0];
-    }
+    using namespace test::object_heat_gpu;  // GPU の段を回す道具(gpu_object_heat_stages.h)
 
     // --- CPU の検査 ---
 
@@ -539,7 +183,8 @@ namespace {
         const test::OhTables& tables;
     };
 
-    // 比べる場面: 紙 2・小枝 3(同じセル)・薪 1(別のセル)。最初の物は光を吸う
+    // 比べる場面: 紙 2・小枝 3(同じセル)・薪 1・小刻み 4 回の小枝 1(別のセル)。最初の物は光を吸う。
+    // 小刻み 4 回の小枝は、ほかの物が小刻みを飛ばす段(一覧に入れても受け渡しを回さない)を作るため(形は同じ箱で、対の面を細かい時間で回すだけ)
     test::OhWorld CompareScene(const sim::BakedReactionTable& table, bool sleeping) {
         test::OhWorld world;
         AddAirCells(table, world, 2);
@@ -549,6 +194,7 @@ namespace {
         AddObject(table, world, Kind::Twig, 0, false);
         AddObject(table, world, Kind::Twig, 0, false);
         AddObject(table, world, Kind::Log, 1, true);
+        AddObject(table, world, Kind::Twig, 1, false, true, 4);
         Finish(world, sleeping);
 
         return world;
@@ -561,16 +207,21 @@ namespace {
         auto queue = gpu::ImmediateQueue::Create(context.device, context.queueType);
         auto debugRing = gpu::DebugRing::Create(context.device);
         auto pipelines = CreatePipelines(context.device);
-        auto gpuWorld = CreateGpuWorld(context.device, context.table, context.tables, world);
-        if (!queue || !debugRing || !pipelines || !gpuWorld || !UploadWorld(*queue, *gpuWorld))
+        auto listed = CreateGpuWorld(context.device, context.table, context.tables, world, WORLD_SEED, true);
+        auto blocks = CreateGpuWorld(context.device, context.table, context.tables, world, WORLD_SEED, false);
+        if (!queue || !debugRing || !pipelines || !listed || !blocks || !UploadWorld(*queue, *listed) ||
+            !UploadWorld(*queue, *blocks))
             return std::unexpected("GPU の準備に失敗");
 
+        const std::array<const GpuWorld*, 2> gpuWorlds = {&*listed, &*blocks};
         const test::OhCpuTable cpuTable{.view = context.table.View(), .objectSpecies = context.tables.species};
         const int64_t initialEnergy = TotalEnergy(world);
         for (uint32_t tick = 1; tick <= COMPARE_TICKS; tick += COMPARE_EVERY) {
-            const auto ran = RunTicks(*queue, *pipelines, *gpuWorld, *debugRing, tick, COMPARE_EVERY, true, false);
-            if (!ran)
-                return std::unexpected(ran.error());
+            for (const GpuWorld* gpuWorld : gpuWorlds) {
+                const auto ran = RunTicks(*queue, *pipelines, *gpuWorld, *debugRing, tick, COMPARE_EVERY, true, false);
+                if (!ran)
+                    return std::unexpected(ran.error());
+            }
 
             for (uint32_t t = tick; t < tick + COMPARE_EVERY; ++t) {
                 test::StepObjectHeat(cpuTable, context.tables.gases, world, true, WORLD_SEED, t);
@@ -582,9 +233,13 @@ namespace {
                     return std::unexpected(std::format("眠らせると結果が変わった(刻み {})", t));
             }
 
-            const auto different = CompareWorld(context.device, *queue, *gpuWorld, world);
-            if (!different || *different != 0)
-                return std::unexpected(std::format("刻み {} で GPU と CPU が食い違った", tick + COMPARE_EVERY - 1));
+            for (const GpuWorld* gpuWorld : gpuWorlds) {
+                const auto different = CompareWorld(context.device, *queue, *gpuWorld, world);
+                if (!different || *different != 0)
+                    return std::unexpected(std::format("刻み {} で GPU({})と CPU が食い違った",
+                                                       tick + COMPARE_EVERY - 1,
+                                                       gpuWorld == gpuWorlds[0] ? "一覧" : "全部を Dispatch"));
+            }
         }
 
         uint64_t digest = 0;
@@ -595,7 +250,7 @@ namespace {
             digest = fx::FxHashCombine(digest, sim::HashReactionCell(cell));
 
         Log(Channel::Gpu, Level::Info,
-            "ボクセル {}・ブロック {}・物 {}・セル {}・{} 刻み: GPU と CPU "
+            "ボクセル {}・ブロック {}・物 {}・セル {}・{} 刻み: GPU(一覧・全部を Dispatch)と CPU "
             "がビット一致・眠らせても同じ・エネルギーの保存 0"
             "(回したブロック 受け渡し {} / {}・反応 {} / {})",
             world.voxels.size(), world.blocks.size(), world.objects.size(), world.cells.size(), COMPARE_TICKS,
@@ -611,6 +266,14 @@ namespace {
         std::vector<std::pair<Kind, uint32_t>> parts;  // 物の種類と数(10 個ずつ同じセル)
         uint32_t burning = UINT32_MAX;                 // 初めの何個が燃えているか(残りは冷えた物)
     };
+
+    // 測る形(全部回す・眠らせる〔全部を Dispatch〕・起きている物の一覧)
+    const char* ModeName(uint32_t mode) {
+        if (mode == rx::OH_SLEEP_ALL)
+            return "全部回す";
+
+        return mode == rx::OH_SLEEP_BLOCKS ? "眠らせる" : "一覧";
+    }
 
     test::OhWorld BuildScene(const sim::BakedReactionTable& table, const Scene& scene, bool sleeping) {
         test::OhWorld world;
@@ -631,13 +294,14 @@ namespace {
     }
 
     // 暖機 warm 刻みの後、1 刻みずつ 8 回測る(最小・中央)。起きているブロックの数(最後の段)も
-    std::expected<void, std::string> MeasureOne(const Context& context, const Scene& scene, bool sleeping,
+    std::expected<void, std::string> MeasureOne(const Context& context, const Scene& scene, uint32_t mode,
                                                 uint32_t warm) {
-        const test::OhWorld world = BuildScene(context.table, scene, sleeping);
+        const test::OhWorld world = BuildScene(context.table, scene, mode != rx::OH_SLEEP_ALL);
         auto queue = gpu::ImmediateQueue::Create(context.device, context.queueType);
         auto debugRing = gpu::DebugRing::Create(context.device);
         auto pipelines = CreatePipelines(context.device);
-        auto gpuWorld = CreateGpuWorld(context.device, context.table, context.tables, world);
+        auto gpuWorld = CreateGpuWorld(context.device, context.table, context.tables, world, WORLD_SEED,
+                                       mode == rx::OH_SLEEP_LISTED);
         if (!queue || !debugRing || !pipelines || !gpuWorld || !UploadWorld(*queue, *gpuWorld))
             return std::unexpected("GPU の準備に失敗");
 
@@ -651,12 +315,15 @@ namespace {
         }
 
         std::vector<double> times;
+        std::array<double, STAGE_COUNT> stageSums{};
         for (uint32_t i = 0; i < 8; ++i) {
             auto ran = RunTicks(*queue, *pipelines, *gpuWorld, *debugRing, tick++, 1, false, true);
             if (!ran)
                 return std::unexpected(ran.error());
 
             times.push_back(Sum(*ran));
+            for (size_t stage = 0; stage < STAGE_COUNT; ++stage)
+                stageSums[stage] += (*ran)[stage] / 8;
         }
 
         rng::sort(times);
@@ -674,8 +341,13 @@ namespace {
             "費用: {}(ボクセル {}・ブロック {}・{}・{} 刻み目から): 1 刻み 最小 {:.3f} ms・中央 {:.3f} ms・最大 {:.3f} "
             "ms・"
             "起きているブロック {}・GPU の失敗 {}",
-            scene.name, world.voxels.size(), world.blocks.size(), sleeping ? "眠らせる" : "全部回す", tick - 8,
-            times.front(), times[times.size() / 2], times.back(), awake, (*failures)[0]);
+            scene.name, world.voxels.size(), world.blocks.size(), ModeName(mode), tick - 8, times.front(),
+            times[times.size() / 2], times.back(), awake, (*failures)[0]);
+        Log(Channel::Gpu, Level::Info,
+            "  段の平均 ms: 起こす(一覧を作るを含む){:.3f}・下ごしらえ {:.3f}・流れ {:.3f}・物ごと {:.3f}・セル "
+            "{:.3f}・"
+            "反応(反応の一覧と物の起こす刻みを含む){:.3f}",
+            stageSums[0], stageSums[1], stageSums[2], stageSums[3], stageSums[4], stageSums[5]);
 
         return {};
     }
@@ -687,7 +359,7 @@ namespace {
         auto queue = gpu::ImmediateQueue::Create(context.device, context.queueType);
         auto debugRing = gpu::DebugRing::Create(context.device);
         auto pipelines = CreatePipelines(context.device);
-        auto gpuWorld = CreateGpuWorld(context.device, context.table, context.tables, world);
+        auto gpuWorld = CreateGpuWorld(context.device, context.table, context.tables, world, WORLD_SEED);
         if (!queue || !debugRing || !pipelines || !gpuWorld || !UploadWorld(*queue, *gpuWorld))
             return std::unexpected("GPU の準備に失敗");
 
@@ -776,16 +448,37 @@ namespace {
         }
 
         if (measure) {
-            const std::array<Scene, 4> scenes = {
+            const std::array<Scene, 5> scenes = {
                 logs, campfire, Scene{"薪の山 100 本(燃えているのは 10 本)", {{Kind::Log, 100}}, 10},
-                Scene{"紙の山 1000 枚(燃えているのは 100 枚)", {{Kind::Paper, 1000}}, 100}};
+                Scene{"紙の山 1000 枚(燃えているのは 100 枚)", {{Kind::Paper, 1000}}, 100},
+                Scene{"薪の山 1000 本(燃えているのは 10 本)", {{Kind::Log, 1000}}, 10}};
             for (const Scene& scene : scenes) {
-                for (const bool sleeping : {false, true}) {
+                for (const uint32_t mode : {rx::OH_SLEEP_ALL, rx::OH_SLEEP_BLOCKS, rx::OH_SLEEP_LISTED}) {
                     for (const uint32_t warm : {4u, 300u}) {
-                        if (auto measured = MeasureOne(context, scene, sleeping, warm); !measured) {
+                        if (auto measured = MeasureOne(context, scene, mode, warm); !measured) {
                             Log(Channel::Gpu, Level::Error, "gpu_object_heat_test: FAILED(計測: {})", measured.error());
                             return 1;
                         }
+                    }
+                }
+            }
+
+            // --- 眠っている物 10,000 個(冷えた小枝)の中で、燃える小枝 10・100・1000 本(T-1077)---
+            for (const uint32_t burning : {10u, 100u, 1000u}) {
+                // 比べ: 燃える小枝だけ(眠っている物なし)
+                const std::string alone = std::format("燃える小枝 {} 本だけ", burning);
+                const Scene aloneScene{alone.c_str(), {{Kind::Twig, burning}}, burning};
+                if (auto measured = MeasureOne(context, aloneScene, rx::OH_SLEEP_LISTED, 300); !measured) {
+                    Log(Channel::Gpu, Level::Error, "gpu_object_heat_test: FAILED(計測: {})", measured.error());
+                    return 1;
+                }
+
+                const std::string name = std::format("眠っている小枝 10000 本 + 燃える小枝 {} 本", burning);
+                const Scene scene{name.c_str(), {{Kind::Twig, 10000 + burning}}, burning};
+                for (const uint32_t mode : {rx::OH_SLEEP_BLOCKS, rx::OH_SLEEP_LISTED}) {
+                    if (auto measured = MeasureOne(context, scene, mode, 300); !measured) {
+                        Log(Channel::Gpu, Level::Error, "gpu_object_heat_test: FAILED(計測: {})", measured.error());
+                        return 1;
                     }
                 }
             }
