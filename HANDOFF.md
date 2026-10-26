@@ -1,6 +1,20 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-26(本体の作業役・wt4・wt2・wt5 の 3 本を main へ・番号の訂正)
+最終更新: 2026-10-26(本体の作業役・T-1159 芯 2 の GPU の回しと 2-3)
+
+## この仕事でしたこと(2026-10-26・本体の作業役・T-1159)
+- **T-1159 Done(t-1159-c1-gpu を main へ)**: 置かれ方で配るの GPU の回し `shaders/sim/placement_refine.hlsli`(1 スレッド = 子 1 つ・子の番号は MrChildCell の j)と入口 `sim/placement_refine_check.hlsl`。
+  state_field.hlsli の置かれ方の式が初めて DXC(-WX)を通った。`gpu_placement_refine`(・_warp)で sim::PlaceRefineCell と 1 値ずつビット一致(乱数 2000 + 端の場面 9 × 子の体積 3 通り。4 m は 32bit を超える)。
+  子の番号の写し替え `sim::PlaceIndexOfMrChild`。2-3 眠る時に捨てる印 `SF_FLAG_SLEEP_DISCARD`(導かれる値だけ)・`SfSleepValueOf`・`RegisterWarmStartField` の discardOnSleep。今の世界は印も口も無いので結果は変わらない。
+- **GPU の食い違い(直した・注意)**: `SfOpenVolume`(64bit の差を 0 で止める)が RTX 3070 Ti だけで差の上の 32bit が別の値(物質の数の 5)になった。差だけ・比べだけなら正しく、
+  2 つを並べると(select・印 0/1 の掛け算・上下に分けた select のどれでも)壊れる。DXIL は正しく WARP は合う。T-1078 と同じ根で、定数でなくても起きる。直し = 32bit の 2 つに分けて借りを手で回す。
+  → **司令塔へ: CLAUDE.md §4 の約束を「64bit の引き算と同じ値どうしの比べ(0 で止める・min・選ぶ)を並べない」に広げることを勧める**(T-1159 のメモ)。同じ形の残り(SfSurfaceSlopeQ16・SfClampColumnSlopeQ16)は T-1176 で GPU の試験に。
+- 分けた: **T-1176**(木の細かくする段のセルの中身を置かれ方で・隣の親の読み方・GPU の欄・影)・**T-1177**(2-2 内訳。wt3 T-1136 の後)・**T-1178**(2-5 支えを世界の木へ。wt2 T-1134 の形 1〜5。(4) 子の中身 = 据わる固体は SAME はここで確かめた)。
+- 判断待ち(仮): 【エンジン】眠る時に捨てるは欄ごとの印(取り消しは印を外すだけ)。
+- 試験(release・警告 0・archmap OK): placement_refine・field_storage・warm_start_save・multires・multires_state・multires_edge・multires_gas 403 s・multires_liquid 413 s・gpu_placement_refine・gpu_placement_refine_warp・gpu_multires・gpu_multires_uniform。
+- 次の番号は **D-669・ADR-0479・T-1182・Q173**(T-1179〜T-1181 は wt4 に配った)。
+
+(前の版の最終更新: 2026-10-26 本体の作業役・wt4・wt2・wt5 の 3 本を main へ・番号の訂正)
 
 ## この仕事でしたこと(2026-10-26・本体の作業役・3 本のマージ)
 - **wt4 t-1063-rt2-budget の c38ac3c2 を --no-ff**(衝突なし): R-T2 の GPU(T-1111 長い刻みの GPU 版・T-1109 CyclesFor・T-1141 1 出来事を 1 本の系に・T-1152 費用の式と起動時の測り ProbeTimeTreeSolveCost・T-1140 GPU の時計)・ADR-0472 Accepted。T-1152 の判断待ち 1 つ(起動時の測りで GPU の時計を上げるか。仮 = 上げる・heatNs 0.4 秒・0 で取り消せる)はチケットに。wt4 はこの後に T-1153・T-1169・T-1170 を積んでいる(先頭 7fdae61c。次のマージで)。

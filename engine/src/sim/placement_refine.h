@@ -2,7 +2,8 @@
 // 親のセル 1 つの物質ごとの量(mg)を、横 n 列(3 次元なら n × n 列)× 縦 n 段の子へ配る:
 //   凝縮相(粒・液体)は横の表面の傾きに沿って列に分け、列ごとに重さの向き(−y)に下の子から沈み固まった体積で詰める。
 //   気体は子の空きの体積の重みで配る。据わる固体を含む・凝縮相が無い・詰まり切ったセルは同じ数で配る(SAME と同じ)。
-// 1 つずつの式は shaders/common/state_field.hlsli(GPU と 1 つの源)。ここは回しだけ。wt3 の案 B の場面の作り方(T-1106 の
+// 1 つずつの式は shaders/common/state_field.hlsli(GPU と 1 つの源)。ここは回しだけ(GPU の回しは shaders/sim/placement_refine.hlsli。
+// tests/gpu_placement_refine_test.cpp でビット一致。T-1159)。wt3 の案 B の場面の作り方(T-1106 の
 // SettleColumn・SettlePictureCell)と同じ答えを出す(tests/placement_refine_test.cpp)。物質ごとの和はビット単位で保つ。
 // 欄(登録の印 SF_FLAG_PLACE_*)へは PlaceChildWeights の重みを MultiresNest::refinePlacement で渡す(multires_fields の nest_fields::Refine)。
 #pragma once
@@ -51,6 +52,12 @@ namespace bicameral::sim {
             return (((z * columns) + x) * columns) + row;
         }
     };
+
+    // 世界の木の子の番号 j(MrChildCell の j: x が bit 0・重さの向き y が bit 1・z が bit 2)→ PlacedChildren の番号。
+    // 世界の木の細かくする(columns = 2・depth = 2)と GPU の回し(shaders/sim/placement_refine.hlsli)はこの並び(T-1159)
+    [[nodiscard]] inline uint32_t PlaceIndexOfMrChild(const PlacedChildren& children, uint32_t j) {
+        return children.ChildIndex(j & 1u, j >> 2, (j >> 1) & 1u);
+    }
 
     // 親のセルを横 n 列 × (depth が n なら z も n 列)× 縦 n 段へ。x で分けてから z で分け、列ごとに縦へ寄せる。
     // 気体は子の空きの体積で配り直す。childVolumeMm3 は子 1 つの体積

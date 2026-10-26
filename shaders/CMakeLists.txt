@@ -304,5 +304,8 @@ endforeach()
 bicameral_add_shader(sim/surface_detail.hlsl PROFILE cs_6_8 ENTRY Contacts NAME surface_detail_contacts)
 bicameral_add_shader(sim/surface_detail.hlsl PROFILE cs_6_8 ENTRY Openness NAME surface_detail_openness)
 
+# 細かくする時の「置かれ方で配る」(T-1159。D-664・20 §10.5)。state_field.hlsli と placement_refine.hlsli を DXC で通す入口を兼ねる
+bicameral_add_shader(sim/placement_refine_check.hlsl PROFILE cs_6_8 ENTRY Main)
+
 get_property(BICAMERAL_SHADER_OUTPUTS GLOBAL PROPERTY BICAMERAL_SHADER_OUTPUTS)
 add_custom_target(bicameral_shaders ALL DEPENDS ${BICAMERAL_SHADER_OUTPUTS} ${BICAMERAL_FLOAT_SOURCE_STAMP})

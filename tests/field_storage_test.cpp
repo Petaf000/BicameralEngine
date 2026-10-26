@@ -67,6 +67,15 @@ namespace {
         Expect(!SfDescValid(derivedVolume) && !SfDescValid(derivedHashed) && !SfDescValid(derivedBlock) &&
                    !SfDescValid(warmAlone),
                "種類: 量・保存量・HASHED の導かれる値、ブロックの導かれる値、導かれる値でない温めた始まりは登録しない");
+
+        // --- 眠る時に捨てる(T-1159): 導かれる値だけ。捨てる欄は 0・ほかは平均 ---
+        SfFieldDesc discard = warm;
+        discard.flags |= SF_FLAG_SLEEP_DISCARD;
+        SfFieldDesc truthDiscard = truth;
+        truthDiscard.flags |= SF_FLAG_SLEEP_DISCARD;
+        Expect(SfDescValid(discard) && !SfDescValid(truthDiscard) && SfSleepValueOf(discard, 12) == 0 &&
+                   SfSleepValueOf(warm, 12) == SfSleepValue(12),
+               "種類: 眠る時に捨てる印は導かれる値だけ・捨てる欄は 0 を残す");
     }
 
     int64_t MeanOf(std::initializer_list<int64_t> values) {
@@ -100,6 +109,7 @@ namespace {
         uint32_t pressure = MULTIRES_NO_FIELD;  // 導かれる値・セル
         uint32_t force = MULTIRES_NO_FIELD;     // 導かれる値・面 ×3
         uint32_t warm = MULTIRES_NO_FIELD;      // 温めた始まり・セル(前の刻みの答えから解き始める)
+        uint32_t discard = MULTIRES_NO_FIELD;   // 温めた始まり・セル・眠る時に捨てる(T-1159。ADR-0469 の 2-3)
     };
 
     constexpr uint32_t CONSERVED = SF_FLAG_CONSERVED | SF_FLAG_HASHED;
@@ -130,6 +140,9 @@ namespace {
                                          SfMakeDerivedDesc(SF_PLACE_FACE, SF_TYPE_I64, SF_PHASE_NONE, false, 3));
         fields.warm = RegisterNestField(nest, "derived.warm",
                                         SfMakeDerivedDesc(SF_PLACE_CELL, SF_TYPE_I64, SF_PHASE_NONE, true, 1));
+        SfFieldDesc discard = SfMakeDerivedDesc(SF_PLACE_CELL, SF_TYPE_I64, SF_PHASE_NONE, true, 1);
+        discard.flags |= SF_FLAG_SLEEP_DISCARD;
+        fields.discard = RegisterNestField(nest, "derived.discard", discard);
 
         // --- 根 8 つ(枠 0・1 は燃え尽きる木箱、残りは空気。真実の欄はブロックごとに一様な値)---
         const std::vector<RxCell> air(MR_BLOCK_CELLS, test::MakeAirCell(table));
@@ -170,6 +183,7 @@ namespace {
 
                 const int64_t previous = LoadNestField(nest, fields.warm, slot, index, 0);
                 StoreNestField(nest, fields.warm, slot, index, 0, (previous + pressure) >> 1);
+                StoreNestField(nest, fields.discard, slot, index, 0, pressure + 7);
             }
         }
     }
@@ -205,6 +219,7 @@ namespace {
     struct SleepRecord {
         int checkedSleeps = 0;     // 眠った時に平均が残ったのを確かめた数
         int wrongSleeps = 0;       // 平均と違った数
+        int wrongDiscards = 0;     // 眠る時に捨てる欄が 0 でなかった数
         bool checkedWake = false;  // 起こした時に眠った値が配られたのを確かめた
         bool wrongWake = false;
     };
@@ -238,6 +253,7 @@ namespace {
             record->checkedSleeps += 1;
             const int64_t kept = LoadNestField(nest, world.fields.warm, slot, 0, 0);
             record->wrongSleeps += kept == SfSleepValue(means[slot]) ? 0 : 1;
+            record->wrongDiscards += LoadNestField(nest, world.fields.discard, slot, 0, 0) == 0 ? 0 : 1;
         }
 
         // --- 起こす(起こした直後の頁は、眠った値が子は親と同じ数で配られている)---
@@ -304,6 +320,7 @@ namespace {
                "往復: 眠る世界だけ頁を畳んだ");
         Expect(record.checkedSleeps > 0 && record.wrongSleeps == 0,
                "往復: 眠る時に導かれる値は覆われていないセルの平均を残す");
+        Expect(record.wrongDiscards == 0, "往復: 眠る時に捨てる印の欄は 0 を残す(T-1159)");
         Expect(record.checkedWake && !record.wrongWake, "往復: 起こすと眠った値を子は親と同じ数で配る");
         Expect(truthMismatches == 0, "往復: 眠らせて起こしても真実の要約が起きたままの世界と毎刻みビット一致");
         Expect(unbalanced == 0, "往復: Σ 保存量 − 帳簿が両方の世界で毎刻み最初と同じ");

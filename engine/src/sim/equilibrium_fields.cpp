@@ -32,9 +32,12 @@ namespace bicameral::sim {
 
     }  // namespace
 
-    uint32_t RegisterWarmStartField(MultiresNest& nest, std::string name, uint32_t phase, uint32_t components) {
-        return RegisterNestField(nest, std::move(name),
-                                 SfMakeDerivedDesc(SF_PLACE_CELL, SF_TYPE_I64, phase, true, components));
+    uint32_t RegisterWarmStartField(MultiresNest& nest, std::string name, uint32_t phase, uint32_t components,
+                                    bool discardOnSleep) {
+        SfFieldDesc desc = SfMakeDerivedDesc(SF_PLACE_CELL, SF_TYPE_I64, phase, true, components);
+        desc.flags |= discardOnSleep ? SF_FLAG_SLEEP_DISCARD : 0u;
+
+        return RegisterNestField(nest, std::move(name), desc);
     }
 
     uint32_t StoreWarmStart(const EquilibriumWarmStart& warm, std::span<const EquilibriumNode> nodes,

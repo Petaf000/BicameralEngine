@@ -391,8 +391,9 @@ namespace bicameral::sim {
                     continue;
 
                 for (uint32_t c = 0; c < field.desc.components; ++c) {
-                    const int64_t value = SfDerived(field.desc) ? SfSleepValue(SleepMean(nest, field, slot, c))
-                                                                : FoldValue(nest, field, slot, c);
+                    const int64_t value = SfDerived(field.desc)
+                                              ? SfSleepValueOf(field.desc, SleepMean(nest, field, slot, c))
+                                              : FoldValue(nest, field, slot, c);
                     field.store.uniform[UniformAddress(field, slot, c)] = value;
                 }
 
