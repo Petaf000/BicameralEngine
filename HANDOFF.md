@@ -1,6 +1,17 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-26(本体の作業役 9 回目・wt6 T-1164・wt2 T-1191・wt4 T-1112 を main へ・ユーザーの答え D-677〜D-682 の記録)
+最終更新: 2026-10-27(本体の作業役 10 回目・wt3 T-1160・wt5 T-1200/T-1201 を main へ・ADR-0486 Accepted・T-1201 Done)
+
+## この仕事でしたこと(2026-10-27・本体の作業役・10 回目: wt3 t-1160・wt5 t-1200 のマージ)
+- **マージ(--no-ff・衝突なし)**: wt3 cd764aac(T-1160 の 1 回目: 相の層の共通の核 shaders/common/phase_layer.hlsli・tests/phase_layer_test.cpp・ADR-0486。世界へつなぐのは T-1211)→ **ADR-0486 Accepted(D-682)**・T-1160 の判断待ち 3 点を閉じた → push 7074ac45。
+  wt5 308a4ead(T-1200 物のまわりの空気の層の流れを GPU に〔物 1 つ = 1 グループ・CPU とビット一致〕・T-1201 圧力の反復の規則)→ tests/CMakeLists.txt・shaders/CMakeLists.txt・docs/perf.md は自動で両方残った。
+  **T-1201 Done**(判断待ち 2 つを D-677 で閉じた: 収まるまで解く・上限 1,024 が既定。道 B の多重格子は必須の T-1202)。T-1200 の判断待ちの 2 つ目も D-677 で閉じた(1 つ目 = groupshared に載らない物は T-1202 で見直す)。
+- 試験(release・警告 0): t-1160 後 = phase_layer・probe_phase_porous_stone・float_check 5 本(7 本 702 s。PC が重い時で、wt3 では 214 s)合格。t-1200 後 = object_shell(--quick)・gpu_object_shell_flow・float_check 5 本 合格(object_shell 787 s)。
+- clang-format 23(--dry-run --Werror)を変わった 6 ファイルに: ずれ無し。archmap --check OK(225 本)。
+- COMMANDER の「番号の配り方」に 2026-10-26 22:06〜 の司令塔の配り(wt3 T-1220〜・wt5 T-1222〜・wt2 T-1224〜・wt6 T-1227〜・wt4 T-1230〜。司令塔の次は T-1233・ADR-0494)。
+- 次の番号は **D-683・ADR-0479・T-1189・Q174**(本体。この仕事では使っていない)。
+
+(前の版の最終更新: 2026-10-26(本体の作業役 9 回目・wt6 T-1164・wt2 T-1191・wt4 T-1112 を main へ・ユーザーの答え D-677〜D-682 の記録))
 
 ## この仕事でしたこと(2026-10-26・本体の作業役・9 回目: wt6 t-1164・wt2 t-1191 のマージ・答えの記録)
 - **マージ(--no-ff・衝突なし)**: wt6 278c9469(T-1164: 放射の持ち越しを鍵で引く密な表・刻みの偶奇で 2 つ〔ADR-0484〕・D-670・D-671 の既定・GPU の正負 2 側・combustion_test の地面 300 K)→ push c97d803f。
