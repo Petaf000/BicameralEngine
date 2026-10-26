@@ -1,12 +1,12 @@
 // gpu_cascade_light.cpp — 距離ごとの段の GPU 側(gpu_cascade_light.h)。CPU リファレンスは sim/cascade_light.cpp の StepCascadeLight。
-// 置き場の並びは shaders/common/cascade_light.hlsli の RcGpuParams。1 刻み = 6 + 3 × (段 − 1) + 1 回の起動(間に UAV のバリア)。世界の全部を掃くのは RcSources の読みだけ(T-1010)。
+// 置き場の並びは shaders/common/cascade_light.hlsli の RcGpuParams。1 刻み = 6 + 3 × (段 − 1) 回の起動(間に UAV のバリア)。
+// 世界の全部を掃くのは RcSources の読みと、RcCarryIn の持ち越しの表(鍵で引く密な表。溢れない。T-1164・ADR-0484)の読み。
 #include "sim/gpu_cascade_light.h"
 
 #include <algorithm>
 #include <cstddef>
 #include <cstring>
 #include <span>
-#include <tuple>
 
 #include "gpu/resources.h"
 
@@ -46,7 +46,6 @@ namespace bicameral::sim {
             LevelWalk,
             ClearBags,
             ResetBags,
-            CarryOut,
             PipelineCount,
         };
 
@@ -56,7 +55,7 @@ namespace bicameral::sim {
             "sim/cascade_light_carry_in.cso",       "sim/cascade_light_clear_faces.cso",
             "sim/cascade_light_level0_prepare.cso", "sim/cascade_light_level0_walk.cso",
             "sim/cascade_light_level_walk.cso",     "sim/cascade_light_clear_bags.cso",
-            "sim/cascade_light_reset_bags.cso",     "sim/cascade_light_carry_out.cso",
+            "sim/cascade_light_reset_bags.cso",
         };
 
         uint64_t AlignUp(uint64_t value) {
@@ -100,11 +99,11 @@ namespace bicameral::sim {
             };
             place(params.stateEmitted, cells * 16);
             place(params.stateAbsorbed, cells * 16);
-            place(params.stateCarryList0, uint64_t{capacity.carry} * 16);
-            place(params.stateCarryList1, uint64_t{capacity.carry} * 16);
+            // 持ち越しの表 2 つ(鍵 = (セル × 6 + 面) × 2 + 帯 で引く 64bit の語。溢れない。T-1164・ADR-0484)
+            place(params.stateCarry0, cells * rx::RC_FACES * rx::LT_BANDS * WORD_BYTES);
+            place(params.stateCarry1, cells * rx::RC_FACES * rx::LT_BANDS * WORD_BYTES);
             readbackBytes = at;
             place(params.stateSources, cells * rx::RC_FACES * 16);
-            place(params.stateCarryDense, cells * rx::RC_FACES * 16);
             place(params.stateFaces, uint64_t{capacity.faces} * 4);
             place(params.stateFaceFlags, cells * rx::RC_FACES * 4);
             place(params.stateFaceInfo, uint64_t{capacity.faces} * rx::RC_GPU_FACE_INFO_WORDS * WORD_BYTES);
@@ -210,7 +209,8 @@ namespace bicameral::sim {
         gpu.texelsPerFace = perFace;
         gpu.bagCapacity = capacity.bags;
         gpu.faceCapacity = capacity.faces;
-        gpu.carryCapacity = capacity.carry;
+        gpu.carryKeys = static_cast<uint32_t>(cells * rx::RC_FACES * rx::LT_BANDS);
+        gpu.initialCarryCapacity = capacity.carry;
         gpu.workTexels = static_cast<uint32_t>(WORK_PARAMS_BYTES);
         gpu.workLights = static_cast<uint32_t>(AlignUp(gpu.workTexels + (texels->size() * 4)));
         gpu.workTemperatures = static_cast<uint32_t>(AlignUp(gpu.workLights + (cells * LIGHT_BYTES)));
@@ -278,7 +278,7 @@ namespace bicameral::sim {
 
     bool GpuCascadeLight::RecordUploadWith(ID3D12GraphicsCommandList10* list, GpuMultires* nest,
                                            D3D12_GPU_VIRTUAL_ADDRESS debugRing, const CascadeCarry& carry) {
-        if (carry.entries.size() > m_params.carryCapacity)
+        if (carry.entries.size() > m_params.initialCarryCapacity)
             return false;
 
         // --- 作業を写す(シェーダーが毎回読むので既定のヒープへ。T-0374)---
@@ -341,7 +341,7 @@ namespace bicameral::sim {
         Dispatch(list, nest, debugRing, BeginTick, rx::RC_GPU_HEADER_WORDS, {tickLow, in, 0, 0});
         Dispatch(list, nest, debugRing, Sources, cells, {tickLow, in, 0, 0});
         const uint32_t out = 1 - in;
-        Dispatch(list, nest, debugRing, CarryIn, m_params.carryCapacity, {tickLow, in, 0, 0});
+        Dispatch(list, nest, debugRing, CarryIn, m_params.carryKeys, {tickLow, in, 0, 0});
         Dispatch(list, nest, debugRing, Level0Prepare, m_params.faceCapacity, {tickLow, in, 0, 0});
         Dispatch(list, nest, debugRing, Level0Walk, uint64_t{m_params.faceCapacity} * m_params.texelsPerFace,
                  {tickLow, in, 0, out << 1});
@@ -356,8 +356,7 @@ namespace bicameral::sim {
             Dispatch(list, nest, debugRing, ResetBags, 1, {tickLow, level, 0, table});
         }
 
-        // --- 照り返しを次の刻みへ ---
-        Dispatch(list, nest, debugRing, CarryOut, m_params.carryCapacity, {tickLow, out, 0, 0});
+        // 照り返しと組を待つ光は、歩く間に表 out へ足してある(次の刻みが読む)
         if (nest != nullptr)
             nest->SetExternalViews(0, 0);
 
@@ -406,20 +405,18 @@ namespace bicameral::sim {
         result.emitted.assign(emitted, emitted + static_cast<std::ptrdiff_t>(values));
         result.absorbed.assign(absorbed, absorbed + static_cast<std::ptrdiff_t>(values));
 
-        const uint32_t list = m_parity == 0 ? m_params.stateCarryList0 : m_params.stateCarryList1;
-        const uint64_t count = std::min<uint64_t>(words[rx::RC_GPU_CARRY_COUNT + m_parity], m_params.carryCapacity);
-        for (uint64_t at = 0; at < count; ++at) {
-            const uint64_t key = words[(list / WORD_BYTES) + (at * 2)];
-            const uint64_t amount = words[(list / WORD_BYTES) + (at * 2) + 1];
+        // 持ち越しの表は鍵の順(= セル・面・帯の順)に並ぶ密な表。0 でない鍵だけを拾う
+        const uint32_t table = m_parity == 0 ? m_params.stateCarry0 : m_params.stateCarry1;
+        for (uint64_t key = 0; key < m_params.carryKeys; ++key) {
+            const uint64_t amount = words[(table / WORD_BYTES) + key];
+            if (amount == 0)
+                continue;
+
             result.carry.entries.push_back({.cell = static_cast<uint32_t>(key / (rx::RC_FACES * rx::LT_BANDS)),
                                             .face = static_cast<uint8_t>((key / rx::LT_BANDS) % rx::RC_FACES),
                                             .band = static_cast<uint8_t>(key % rx::LT_BANDS),
                                             .amount = amount});
         }
-
-        std::ranges::sort(result.carry.entries, [](const CascadeCarryEntry& a, const CascadeCarryEntry& b) {
-            return std::tie(a.cell, a.face, a.band) < std::tie(b.cell, b.face, b.band);
-        });
 
         return read;
     }

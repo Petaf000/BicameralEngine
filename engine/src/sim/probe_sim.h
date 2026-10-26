@@ -168,6 +168,11 @@ namespace bicameral::sim {
         // --- デバッグ ---
         uint32_t debugAssertCount = 0;  // シェーダーの assert の数(中身はログに出る)
 
+        // 熱の放射の段の置き場(T-1164。release でも見える。段が無ければ 0)。溢れた刻みからは結果が原子的な取り合いの順で変わる
+        uint32_t radiationOverflow = 0;  // 溢れの印(側の OR。1 = 放つ面・2 = 袋・4 = 持ち越し。作ってからずっと残る)
+        uint32_t radiationFaces = 0;     // 最後の刻みの放つ面の数(側の大きい方)
+        uint32_t radiationBagPeak = 0;   // 段 1 つの袋の数の最大(作ってから。側の大きい方)
+
         // 伝導のグラフのノードごとのカウンタ(このフレームの全部の刻みの合計。T-0008)
         gpu::GraphStatsSnapshot graphStats;
         uint32_t graphFindingCount = 0;  // 上限に当たった・近づいたものの数(中身は Warning でログに出る)
@@ -430,6 +435,8 @@ namespace bicameral::sim {
             // --- 読み戻し ---
             ComPtr<ID3D12Resource> timestampReadback;  // (MAX_UNITS_PER_FRAME + 2) × 8 バイト
             ComPtr<ID3D12Resource> hashReadback;       // PROBE_HASH_BYTES
+            ComPtr<ID3D12Resource>
+                radiationHeaderReadback;  // 放射の段の状態の頭(側ごとに RC_GPU_HEADER_WORDS 語。T-1164)
 
             // 反応表を差し替えたフレームの、表のアップロードと差し替える前の表(このリストを GPU が終えるまで持つ。T-0139)
             std::vector<ComPtr<ID3D12Resource>> keepAlive;
@@ -555,6 +562,8 @@ namespace bicameral::sim {
 
         // --- 読み戻し ---
         void RecordReadbacks(ID3D12GraphicsCommandList10* list, uint32_t slot, bool hasHash) const;
+        void RecordRadiationHeaderReadback(ID3D12GraphicsCommandList10* list, uint32_t slot) const;
+        void ReadRadiationHeader(const FrameSlot& frame, ProbeFrameReadback& result);
 
         // --- 巻き戻し(sim/probe_save_point.cpp)---
         // 保存点に写す世界の部分。generationBytes > 0 のもの(セル・熱)は S(tick) の世代だけを写し、戻すときは 2 世代に写す
@@ -653,6 +662,7 @@ namespace bicameral::sim {
             m_cascade;  // 距離ごとの段(自分のルート署名。作業と状態のバッファ)。参照の温度の形では正の側
         // 参照の温度の形(D-671・T-1164)の負の側(参照 − 自分。作業と状態の並びは正の側と同じ。0 K の空の世界では無い)
         std::optional<GpuCascadeLight> m_cascadeNegative;
+        bool m_radiationOverflowLogged = false;          // 溢れを 1 度だけ Error に出す
         ComPtr<ID3D12Resource> m_radiationLights;        // 物質の光の値(表ごと。段の間は u17 に結ぶ)
         ComPtr<ID3D12Resource> m_radiationLightsUpload;  // その写しの元
         std::array<ComPtr<ID3D12PipelineState>, 3>

@@ -1069,8 +1069,9 @@ FX_FN void RcPassToNextLevel(FX_IN(RcStepConstants) constants, FX_IN(RcLevelRay)
 
 // --- GPU 版の置き場(shaders/sim/cascade_light.hlsl・sim/gpu_cascade_light.cpp。T-0959)----------------------------------------
 // 作業のバッファ(u4。CPU が書いて既定のヒープへ写す。読むだけ)= [RcGpuParams][升目の表][セルの光の値][セルの温度][初めの持ち越し]
-// 状態のバッファ(u5。uint64 の語)= [頭の語][放った][吸った][持ち越しの表 × 2][放つ面の量][照り返しの密な受け][放つ面の列][面ごとの分け方]
-//   [袋の表 × 2][袋の列 × 2]。袋の表は開いた番地の hash(鍵の CAS + 量の 64bit の atomic の足し算・溜めの atomic min)。
+// 状態のバッファ(u5。uint64 の語)= [頭の語][放った][吸った][持ち越しの表 × 2][放つ面の量][放つ面の列][面ごとの分け方]
+//   [袋の表 × 2][袋の列 × 2]。持ち越しの表は (セル・面・帯) の鍵で引く密な表(セル × 12 語)を刻みの偶奇で 2 つ持つので、溢れない
+//   (T-1164・ADR-0484。前は鍵を並べる疎な表で、溢れると取り合いの順で結果が変わった)。袋の表は開いた番地の hash(鍵の CAS + 量の 64bit の atomic の足し算・溜めの atomic min)。
 //   どれも可換な整数の足し算か min なので、光線と袋の処理の順によらず CPU リファレンスとビット一致する(R3・R4)。
 // 位置はすべてバイト(< 2^32)。
 struct RcGpuParams {
@@ -1090,7 +1091,7 @@ struct RcGpuParams {
     uint32_t texelsPerFace;  // 段 0 の放つ面 1 つの升目の数
     uint32_t bagCapacity;    // 袋の表 1 つの番地の数(2 の冪)
     uint32_t faceCapacity;   // 1 刻みに放つ面の数の上限
-    uint32_t carryCapacity;  // 持ち越しの表 1 つの上限
+    uint32_t carryKeys;      // 持ち越しの表 1 つの鍵の数(セル × 面 6 × 帯 2。鍵 = (セル × 6 + 面) × 2 + 帯)
     uint32_t initialCarryCount;
     uint32_t workTexels;  // 作業のバッファの中の位置
     uint32_t workLights;
@@ -1098,10 +1099,10 @@ struct RcGpuParams {
     uint32_t workCarry;
     uint32_t stateEmitted;  // 状態のバッファの中の位置
     uint32_t stateAbsorbed;
-    uint32_t stateCarryList0;
-    uint32_t stateCarryList1;
+    uint32_t stateCarry0;  // 持ち越しの表(鍵で引く密な表。刻み t は表 t & 1 を読んで 0 に戻し、他方へ足す)
+    uint32_t stateCarry1;
     uint32_t stateSources;
-    uint32_t stateCarryDense;
+    uint32_t initialCarryCapacity;  // 作業のバッファの初めの持ち越しの数の上限
     uint32_t stateFaces;
     uint32_t stateFaceInfo;
     uint32_t stateBags0;
@@ -1121,8 +1122,8 @@ FX_CONST uint32_t RC_GPU_RAYS = 10;         // 段ごとの光線の本数(8)
 FX_CONST uint32_t RC_GPU_STEPS = 18;        // 通ったセルの数
 FX_CONST uint32_t RC_GPU_FACE_COUNT = 19;   // 放つ面の数
 FX_CONST uint32_t RC_GPU_BAG_COUNT = 20;    // 袋の表ごとの袋の数(2)
-FX_CONST uint32_t RC_GPU_CARRY_COUNT = 22;  // 持ち越しの表ごとの数(2)
-FX_CONST uint32_t RC_GPU_OVERFLOW = 24;     // 溢れの印(1 = 放つ面・2 = 袋・4 = 持ち越し)
+FX_CONST uint32_t RC_GPU_CARRY_COUNT = 22;  // 持ち越しの表ごとの 0 でない鍵の数(2。測りの目安)
+FX_CONST uint32_t RC_GPU_OVERFLOW = 24;     // 溢れの印(1 = 放つ面・2 = 袋。持ち越しは密な表なので溢れない)
 FX_CONST uint32_t RC_GPU_BAG_PEAK = 25;     // 段 1 つの袋の数の最大(置き場の大きさを決める目安。作ってからの最大)
 FX_CONST uint32_t RC_GPU_HELD = 26;         // 帯ごとの、熱で放って組の刻みまで待たせた量(2。T-1010)
 FX_CONST uint32_t RC_GPU_KEPT = 28;         // 帯ごとの、持ち越しの表で次の刻みへそのまま送った量(2)

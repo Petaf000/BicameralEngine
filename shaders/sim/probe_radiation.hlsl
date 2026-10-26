@@ -21,7 +21,8 @@
 
 RWByteAddressBuffer rcWork : register(u15);    // 距離ごとの段の作業(RcGpuParams・升目の表・光の値・温度)
 RWByteAddressBuffer rcSecond : register(u16);  // 段ごとに違う(上の頭の表): 負の側の作業 / その側の状態
-RWByteAddressBuffer rcThird : register(u17);   // 段ごとに違う: 物質の光の値(LtSpeciesLight × 物質の数。表ごと)/ 負の側の状態
+RWByteAddressBuffer rcThird
+    : register(u17);  // 段ごとに違う: 物質の光の値(LtSpeciesLight × 物質の数。表ごと)/ 負の側の状態
 
 static const uint32_t RC_CELL_LIGHT_BYTES = 24;  // RcCellLight
 static const uint32_t RC_SPECIES_LIGHT_BYTES = 16;
@@ -108,8 +109,8 @@ int64_t RadiationRoundedNet(uint64_t gain, uint64_t loss) {
     return (int64_t)(((uint64_t)resultHigh << 32) | (uint64_t)resultLow);
 }
 
-    // --- セルへ当てる(1 スレッド = 1 セル。丸めは CPU の RoundToMilliJoules と同じ: 半分は +∞ 側・算術シフト)---
-    [numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void RadiationApply(uint3 dispatchThreadId : SV_DispatchThreadID) {
+// --- セルへ当てる(1 スレッド = 1 セル。丸めは CPU の RoundToMilliJoules と同じ: 半分は +∞ 側・算術シフト)---
+[numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void RadiationApply(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const uint32_t cell = dispatchThreadId.x;
     if (cell >= PROBE_CELL_COUNT)
         return;
@@ -142,15 +143,13 @@ int64_t RadiationRoundedNet(uint64_t gain, uint64_t loss) {
     StoreBlockMark(PROBE_SCHEDULE_WAKE_WORD, block, ProbeChangeMark(tick));
 }
 
-// --- 次の刻みへの持ち越しを状態 S(tick + 1) のハッシュへ(持ち越しの表 1 − (tick & 1)。歩幅は起動したスレッドの数)---
-[numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void RadiationHash(uint3 dispatchThreadId : SV_DispatchThreadID) {
+    // --- 次の刻みへの持ち越しを状態 S(tick + 1) のハッシュへ(持ち越しの表 1 − (tick & 1) の 0 でない鍵。歩幅は起動したスレッドの数)---
+    [numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void RadiationHash(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const RcGpuParams params = LoadRcParams();
     const uint32_t faceTag = (params.referenceWord & RC_REFERENCE_NEGATIVE) != 0u ? 8u : 0u;  // 負の側は面の番号 | 8
     const uint64_t tick = CurrentTick();
     const uint32_t outTable = 1u - (uint32_t)(tick & 1);
-    const uint32_t carryList = outTable == 0 ? params.stateCarryList0 : params.stateCarryList1;
-    const uint32_t listed = (uint32_t)rcSecond.Load<uint64_t>((RC_GPU_CARRY_COUNT + outTable) * 8);
-    const uint32_t count = min(listed, params.carryCapacity);
+    const uint32_t carryTable = outTable == 0 ? params.stateCarry0 : params.stateCarry1;
     const uint32_t stride = argument;  // 起動したスレッドの数(RecordRadiationHash が単位の定数に入れる)
 
     if (dispatchThreadId.x == 0) {
@@ -159,9 +158,8 @@ int64_t RadiationRoundedNet(uint64_t gain, uint64_t loss) {
     }
 
     uint64_t hash = 0;
-    for (uint32_t entry = dispatchThreadId.x; entry < count; entry += stride) {
-        const uint32_t key = (uint32_t)rcSecond.Load<uint64_t>(carryList + (entry * 16));
-        const uint64_t amount = rcSecond.Load<uint64_t>(carryList + (entry * 16) + 8);
+    for (uint32_t key = dispatchThreadId.x; key < params.carryKeys; key += stride) {
+        const uint64_t amount = rcSecond.Load<uint64_t>(carryTable + (key * 8));
         if (amount == 0)
             continue;
 

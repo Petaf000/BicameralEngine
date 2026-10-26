@@ -25,8 +25,10 @@ namespace bicameral::sim {
         constexpr std::array<const char*, 3> RADIATION_SHADER_NAMES = {
             "sim/probe_radiation_grid.cso", "sim/probe_radiation_apply.cso", "sim/probe_radiation_hash.cso"};
 
-        // 置き場の大きさ(溢れたら RadiationHash の assert)。放つ面は 1 刻みに組 1 つ分(D-658 の 15 組)、持ち越しは照り返しと組を待つ光
-        constexpr GpuCascadeCapacity RADIATION_CAPACITY{.faces = 1u << 17, .bags = 1u << 20, .carry = 1u << 19};
+        // 置き場の大きさ(溢れたら RadiationHash の assert と ProbeFrameReadback::radiationOverflow)。放つ面は 1 刻みに組 1 つ分
+        // (D-658 の 15 組)。持ち越し(照り返しと組を待つ光)は鍵で引く密な表なので溢れない(T-1164・ADR-0484)。
+        // carry は初めの持ち越しを写す数の上限で、仮の世界は空から始めるので小さくてよい
+        constexpr GpuCascadeCapacity RADIATION_CAPACITY{.faces = 1u << 17, .bags = 1u << 20, .carry = 1u << 10};
 
     }  // namespace
 

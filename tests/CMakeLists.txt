@@ -800,6 +800,8 @@ bicameral_add_gpu_test_case(gpu_probe_physics_warp gpu_probe_physics_test warp -
 bicameral_add_gpu_test_case(gpu_probe_physics_compute gpu_probe_physics_test gpu --broadphase-compute)
 # 環境の値のホットリロード(T-0444): 表の差し替えの刻みから物理の重力が替わり、CPU の物理(同じ刻みに SetGravity)とビット一致
 bicameral_add_gpu_test_case(gpu_probe_physics_gravity_swap gpu_probe_physics_test gpu --gravity-swap)
+# 物理 + 熱の放射の段(窓のサンプルの世界と同じ組み合わせ。T-1164): 放射を既定のまま流しても CPU とビット一致・2 回の実行が同じ・置き場が溢れない
+bicameral_add_gpu_test_case(gpu_probe_physics_radiation gpu_probe_physics_test gpu --radiation)
 
 # 巻き戻し(T-0143): 保存点へ写して戻し、コマンドを足し直すと最初から流した時と同じハッシュ列
 bicameral_add_gpu_test(gpu_probe_rewind_test)
