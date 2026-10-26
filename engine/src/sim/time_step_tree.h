@@ -5,7 +5,7 @@
 //          成分 TIME_TREE_REACTANT = 反応物 A・TIME_TREE_PRODUCT = 生まれた物 P(µmol。そのレベルの単位)
 //   解き = C-0 の SolveEquilibrium(長さ N を C・g・源に入れる。外の隣と地面は値を固定した面。部品は時間を知らない)
 //   導かれる値 = 解いた温度を登録した導かれる値の欄(LoadNestField)に。眠った所(一様のブロック)には書かない(T-0854 の申し送り)
-//   歩の記録(ブロックの e・区間・セルの歩の変化・セルと面の記録)= この試作の仮の口 TimeTreeSteps(C-1 の型は変えない。
+//   歩の記録(刻みを選ぶ単位〔既定はセル。T-1089〕の e・区間・セルの歩の変化・セルと面の記録)= この試作の仮の口 TimeTreeSteps(C-1 の型は変えない。
 //   要る口は docs/tickets/T-0950)
 // 面は木の隣(MrFindFaceNeighbor)から 1 回だけ作る(同じレベル = − 側のセルから・違うレベル = 細かい側から)。面の流れは細かい側の単位で、
 //   粗い側へは 8^差 で割った値を決まった乱数で丸めて送る(広がる家族の丸め D-552。細かい側は送った分 × 8^差 を失う = 保存は厳密)。
@@ -95,12 +95,16 @@ namespace bicameral::sim {
         // 前線の緩衝を揃える単位(groupShift の枠の組)の数で(T-1074。0 = 上の frontBuffer の形): 動いている単位(どれかの枠の
         // 望みの e が 0)から面の隣をたどってこの数の単位までを e = 0 に。単位の物の長さ × これ が緩衝の幅
         uint32_t frontBufferUnits = 0;
-        // 滑る窓(D-669・T-1175。既定 4 = レベル 0 のセル〔0.5 m〕で半径 2 m。0 = 外す = 上の単位の格子): 歩を始める枠の e を、窓の半径の内にある枠の望みの e の最小までにする(歩の途中の枠が
-        // それより長ければ打ち切る)。望みは局所の上限までで、世界の時計にそろえる上限は入れない(T-1174)。窓の外は今の隣の差 1 段。
-        // 半径はレベル 0 のセルの長さの数(0.5 m のセルで 4 = 2 m)。距離は枠どうしの最も近いセルの中心の、軸ごとの差の最大(立方体の窓)。
-        // 枠(8³ セル)の e のままなので、窓より細かい所は枠の大きさで決まる(セルごとの e は T-1089 の作り。置く場所の帯はそれまで残る)
+        // 滑る窓(D-669・T-1175。既定 4 = レベル 0 のセル〔0.5 m〕で半径 2 m。0 = 外す = 上の単位の格子): 歩を始める単位の e を、窓の半径の内にある
+        // 単位の望みの e の最小までにする(歩の途中の単位がそれより長ければ打ち切る)。望みは局所の上限までで、世界の時計にそろえる上限は
+        // 入れない(T-1174)。窓の外は今の隣の差 1 段。半径はレベル 0 のセルの長さの数(0.5 m のセルで 4 = 2 m)。
+        // 距離はセルを最も細かいレベルの格子(layout の窓の格子)に置いた時の、格子のセルの中心どうしの軸ごとの差の最大(立方体の窓)。
+        // 粗いセルは中の細かい格子のどれかから測る(同じレベルどうしは セルの中心の差 と同じ。T-1089)
         // 窓の時は単位の格子(unitByLength)を使わない(格子の境を持たない。groupShift は比べのために残す)
         uint32_t windowLevel0Cells = 4;
+        // 刻みを選ぶ単位の一辺のセルの数(T-1089。1 = セルごと〔既定〕・2・4・8 = 枠〔T-1175 まで〕)。窓の時だけ効く:
+        // 窓を外した時(格子・groupShift・unit=block の比べ)と退く道(Jump)は枠のまま
+        uint32_t unitEdgeCells = 1;
 
         // --- 見る口(結果に効かない)---
         const TimeTreeSpanObserver* spanObserver = nullptr;  // 列の解き(T-1111)
@@ -110,21 +114,38 @@ namespace bicameral::sim {
     struct TimeTreeFace {
         uint32_t a = 0;  // セルの番号(枠 × MR_BLOCK_CELLS + セル)
         uint32_t b = 0;
-        uint32_t blockA = 0;
-        uint32_t blockB = 0;
+        uint32_t unitA = 0;  // a・b の刻みを選ぶ単位(TimeTreeLayout::unitOf)
+        uint32_t unitB = 0;
         uint32_t gap = 0;
         fx::FxU128 coefficient{};
     };
 
-    // 木の形から 1 回だけ作る(木を変えたら作り直す。眠る・起こす〔頁を畳む・広げる〕は形を変えない)
+    // 窓の格子(T-1089): 刻むセルを最も細かいレベルの格子に置いた形。窓の最小は軸ごとの 3 回の最小で取る
+    struct TimeTreeWindowGrid {
+        int32_t level = 0;                // 格子のレベル(刻むセルの最も細かいレベル)
+        std::array<int64_t, 3> origin{};  // 格子のセル(level の座標)の最小の角
+        std::array<uint32_t, 3> size{};
+        uint32_t radius = 0;           // 窓の半径(格子のセルの数)
+        std::vector<uint32_t> unitOf;  // 格子のセル(x が最も速い)→ 単位(無ければ NO_TIME_TREE_UNIT)
+    };
+
+    inline constexpr uint32_t NO_TIME_TREE_UNIT = UINT32_MAX;
+
+    // 木の形から 1 回だけ作る(木を変えたら作り直す。眠る・起こす〔頁を畳む・広げる〕は形を変えない)。
+    // 刻みを選ぶ単位(T-1089): 枠の中の unitEdge³ セルの組。単位の番号 = 組の最初の(座標の小さい角の)セルの番号。
+    // 単位ごとの配列(neighbors など・TimeTreeSteps の単位ごと)はセルの数の大きさで、単位の番号の所だけ使う
     struct TimeTreeLayout {
         std::vector<uint32_t> blocks;  // 刻む世界の本物のブロックの枠(枠の順)
         std::vector<uint8_t> stepped;  // セルごと: 刻むセル(覆われていない)
         std::vector<TimeTreeFace> faces;
-        std::vector<std::vector<uint32_t>> blockFaces;  // 枠ごと: 触れる面
-        std::vector<std::vector<uint32_t>> neighbors;   // 枠ごと: 面でつながる枠(枠の順)
-        std::vector<std::vector<uint32_t>> mates;       // 枠ごと: 同じ e に揃える枠(groupShift。自分は入れない)
-        std::vector<std::vector<uint32_t>> window;      // 枠ごと: 窓の内の枠(windowLevel0Cells。自分は入れない)
+        uint32_t unitEdge = 8;                         // 単位の一辺のセルの数(1・2・4・8 = 枠)
+        std::vector<uint32_t> units;                   // 刻む単位(番号の順)
+        std::vector<uint32_t> unitOf;                  // セルごと: 単位(刻まないセルは NO_TIME_TREE_UNIT)
+        std::vector<std::vector<uint32_t>> unitCells;  // 単位ごと: 刻むセル(番号の順)
+        std::vector<std::vector<uint32_t>> unitFaces;  // 単位ごと: 触れる面
+        std::vector<std::vector<uint32_t>> neighbors;  // 単位ごと: 面でつながる単位(番号の順)
+        std::vector<std::vector<uint32_t>> mates;      // 単位ごと: 同じ e に揃える単位(groupShift。自分は入れない)
+        TimeTreeWindowGrid window;                     // 窓の格子(windowLevel0Cells > 0 の時)
         int32_t finestLevel = 0;
     };
 
@@ -147,7 +168,7 @@ namespace bicameral::sim {
         uint64_t tick = 0;
         bool processed = false;
 
-        // --- 枠ごと ---
+        // --- 単位ごと(layout.units の番号の所。歩の始めは 2^e の倍数の刻みなので、記録では e と刻みから出せる)---
         std::vector<int32_t> exponent;
         std::vector<int32_t> desired;
         std::vector<uint8_t> open;
@@ -191,7 +212,8 @@ namespace bicameral::sim {
         // --- 眠る・起こす(T-0854 の申し送りを確かめる)。sleepMean は眠った時の導かれる値の覆われていないセルの平均 ---
         uint64_t sleeps = 0;
         uint64_t wakes = 0;
-        std::vector<int64_t> sleepMean;  // 枠ごと
+        std::vector<int64_t> sleepMean;     // 枠ごと
+        std::vector<uint32_t> quietBlocks;  // 歩を閉じた単位が変化なしだった枠(眠らせてみる。結果の状態ではない)
     };
 
     struct TimeTreeWorld {
@@ -226,15 +248,20 @@ namespace bicameral::sim {
     int64_t TimeTreeSettledEnergy(const TimeTreeWorld& world, uint32_t slot, uint32_t index);
     int64_t TimeTreeSettledReactant(const TimeTreeWorld& world, uint32_t slot, uint32_t index);
 
+    // セルの刻みを選ぶ単位(T-1089)と、その今の歩の e
+    uint32_t TimeTreeUnitOf(const TimeTreeWorld& world, uint32_t slot, uint32_t index);
+    int32_t TimeTreeExponentAt(const TimeTreeWorld& world, uint32_t slot, uint32_t index);
+
     // 温度(mK × 2^16)
     int64_t TimeTreeTemperatureQ16(const TimeTreeSetup& setup, int64_t energy);
 
-    // 歩の記録をセーブに入れる時の大きさ(この刻みで生きている記録だけ。最小 = 枠の見出し 11 B + セルの記録 16 B + 面の記録 24 B。
+    // 歩の記録をセーブに入れる時の大きさ(この刻みで生きている記録だけ。最小 = 単位の見出し 11 B + セルの記録 16 B + 面の記録 24 B。
     // 持ったまま = + セルの歩の変化 16 B/セル)
     struct TimeTreeRecordBytes {
         uint64_t minimal = 0;
         uint64_t held = 0;
         uint64_t cells = 0;  // 刻むセルの数
+        uint64_t units = 0;  // 刻みを選ぶ単位の数(T-1089)
     };
     TimeTreeRecordBytes MeasureTimeTreeRecords(const TimeTreeWorld& world);
 
@@ -290,7 +317,7 @@ namespace bicameral::sim {
             0;  // 余裕を見込んだ上の値(× marginPercent ÷ 100。ゲームはこちらで決めるのがおすすめ)
     };
 
-    // 今の枠ごとの刻みの長さ e が、この先 ticks 刻みの間そのまま続くと見なして数える(見積もり。結果にも状態にも効かない)。
+    // 今の単位ごとの刻みの長さ e が、この先 ticks 刻みの間そのまま続くと見なして数える(見積もり。結果にも状態にも効かない)。
     // 出来事は最も短い歩の終わりごと(長い歩の終わりはそれに重なり、同じ刻みの列は 1 本の系にまとめる)。
     // 前線は動くが毎刻みの範囲の大きさは保たれる見込み(T-1089)。眠る・起こす・前線の広がりは数に入れない。
     // levelsAt[e] = e の列の系の部品の段の数(法則の係数で決まる。GPU の早送りが前に作った段から渡す。空・範囲の外は 1)。
