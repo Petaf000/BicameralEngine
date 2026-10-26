@@ -349,6 +349,10 @@ namespace bicameral::sim {
         uint64_t levelCycleNs = 20500;  // V 1 回の、粗い段 1 つぶんの固定費
         uint64_t cellPs = 860;          // 段 0 + 段の重みのセル 1 つ
         uint64_t cellCyclePs = 2570;    // V 1 回のセル 1 つ
+        // 刻みを選ぶ段(GpuTimeTreeChoose。出来事ごとに木の全部の単位で 1 回。T-1214): 固定費 + 単位 × 傾き。
+        // 既定は T-1213 の測り(RTX 3070 Ti・release・火事の出来事の同じ出来事 4 回の最小の平均: 4,096 単位 21.5 µs・65,536 単位 42.1 µs)
+        uint64_t chooseNs = 20100;
+        uint64_t chooseUnitPs = 334;
         // 測りの揺れの余裕(D-662。見積もりの上の値 = 式 × これ ÷ 100。GPU の時計が下がった時・測りの揺れ。T-1140)
         uint32_t marginPercent = 200;
     };
@@ -356,11 +360,15 @@ namespace bicameral::sim {
     // 1 組の GPU の待ち(ns)。cells = 解くセル、cellCycles = Σ セル × V の回数(V の回数は平均を切り上げ)、levels = 部品の段の数
     uint64_t TimeTreeEventNs(const TimeTreeSolveCost& cost, uint64_t cells, uint64_t cellCycles, uint32_t levels = 1);
 
+    // 1 出来事の刻みを選ぶ段の GPU の待ち(ns)。units = 木の単位の数(T-1214)
+    uint64_t TimeTreeChooseNs(const TimeTreeSolveCost& cost, uint64_t units);
+
     struct TimeTreeForwardEstimate {
-        uint64_t events = 0;      // 出来事(解く刻み)の数
-        uint64_t cellSolves = 0;  // セル × 解く回数
-        uint64_t cellCycles = 0;  // セル × V の回数(e ごとの表)
-        uint64_t waitMicroseconds = 0;
+        uint64_t events = 0;              // 出来事(解く刻み)の数
+        uint64_t cellSolves = 0;          // セル × 解く回数
+        uint64_t cellCycles = 0;          // セル × V の回数(e ごとの表)
+        uint64_t waitMicroseconds = 0;    // 解き + 刻みを選ぶ段
+        uint64_t chooseMicroseconds = 0;  // そのうち刻みを選ぶ段(T-1214)
         uint64_t waitUpperMicroseconds =
             0;  // 余裕を見込んだ上の値(× marginPercent ÷ 100。ゲームはこちらで決めるのがおすすめ)
     };
@@ -370,6 +378,7 @@ namespace bicameral::sim {
     // 前線は動くが毎刻みの範囲の大きさは保たれる見込み(T-1089)。眠る・起こす・前線の広がりは数に入れない。
     // levelsAt[e] = e の列の系の部品の段の数(法則の係数で決まる。GPU の早送りが前に作った段から渡す。空・範囲の外は 1)。
     // 1 出来事は (V の回数・段の数) が同じ e の列を 1 組に数える(GroupTimeTreeEvent と同じ見立て)
+    // 出来事ごとに刻みを選ぶ段の待ち(TimeTreeChooseNs。木の全部の単位)も足す(T-1214。chooseMicroseconds に分けても出す)
     TimeTreeForwardEstimate EstimateTimeTreeForward(const TimeTreeSetup& setup, const TimeTreeWorld& world,
                                                     uint64_t ticks, const TimeTreeSolveCost& cost,
                                                     std::span<const uint32_t> levelsAt = {});

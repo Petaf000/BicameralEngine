@@ -623,8 +623,10 @@ namespace {
     }
 
     std::string CostText(const sim::TimeTreeSolveCost& cost) {
-        return std::format("固定費 {} ns・段 {} ns・V {} ns・段の V {} ns・セル {} ps・セル × V {} ps", cost.eventNs,
-                           cost.levelNs, cost.cycleNs, cost.levelCycleNs, cost.cellPs, cost.cellCyclePs);
+        return std::format(
+            "固定費 {} ns・段 {} ns・V {} ns・段の V {} ns・セル {} ps・セル × V {} ps・選ぶ段 {} ns + 単位 {} ps",
+            cost.eventNs, cost.levelNs, cost.cycleNs, cost.levelCycleNs, cost.cellPs, cost.cellCyclePs, cost.chooseNs,
+            cost.chooseUnitPs);
     }
 
     double PredictMs(const sim::TimeTreeSolveCost& cost, const sim::TimeTreeEventGroup& group) {
@@ -703,11 +705,12 @@ namespace {
             "起動時の測り {}(箱 {}・{}・段の多い箱 e {} = 段 {}・{:.1f} 秒の時点): 熱した {} 回 {:.1f} ms・小 V 1 {} "
             "ns・"
             "小 V 2 {} ns・大 V 1 {} ns・大 V 2 {} ns・段の多い大 V 1 {} ns・V 2 {} ns・GPU {:.2f} ms・全体 {:.1f} ms "
-            "→ {}",
+            "・選ぶ段 {} 単位 {} ns・{} 単位 {} ns → {}",
             name, options.smallSide, options.largeSide, options.levelExponent, probe->times.levels, at,
             probe->heatBatches, (double)probe->heatNs * 1.0e-6, probe->times.solveNs[0], probe->times.solveNs[1],
             probe->times.solveNs[2], probe->times.solveNs[3], probe->times.solveNs[4], probe->times.solveNs[5],
-            (double)probe->gpuNs * 1.0e-6, (SecondsSince(context) - at) * 1000.0, CostText(probe->cost));
+            (double)probe->gpuNs * 1.0e-6, (SecondsSince(context) - at) * 1000.0, probe->times.chooseUnits[0],
+            probe->times.chooseNs[0], probe->times.chooseUnits[1], probe->times.chooseNs[1], CostText(probe->cost));
 
         return probe;
     }

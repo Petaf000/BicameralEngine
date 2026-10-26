@@ -1430,6 +1430,13 @@ namespace bicameral::sim {
         return launches + slope;
     }
 
+    uint64_t TimeTreeChooseNs(const TimeTreeSolveCost& cost, uint64_t units) {
+        if (units == 0)
+            return 0;
+
+        return cost.chooseNs + ((units * cost.chooseUnitPs) / 1000);
+    }
+
     namespace {
 
         // まとめてよい列の組の鍵(V の回数・段の数・節のレベル)。まとめられない列は own = true(その列だけの組)
@@ -1553,6 +1560,7 @@ namespace bicameral::sim {
         // 列は (V の回数・段の数) ごとの組にまとまる
         TimeTreeForwardEstimate estimate;
         uint64_t nanoseconds = 0;
+        const uint64_t chooseNs = TimeTreeChooseNs(cost, world.layout.units.size());  // 出来事ごとに 1 回(T-1214)
         std::vector<EstimateGroup> groups;
         for (size_t j = 0; j < exponents; ++j) {
             const auto exponent = static_cast<int32_t>(j);
@@ -1578,6 +1586,9 @@ namespace bicameral::sim {
             nanoseconds += events * eventNs;
         }
 
+        const uint64_t chooseTotalNs = estimate.events * chooseNs;
+        nanoseconds += chooseTotalNs;
+        estimate.chooseMicroseconds = chooseTotalNs / 1000;
         estimate.waitMicroseconds = nanoseconds / 1000;
         estimate.waitUpperMicroseconds = (nanoseconds / 1000) * cost.marginPercent / 100;
 
