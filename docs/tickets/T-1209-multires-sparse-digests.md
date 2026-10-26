@@ -29,7 +29,9 @@
 - 要約の作り方(`HashWholeNest`)は変えない(GPU の保存点・写しと同じ区画の一覧を回るので、区画の中身の読み方を変えると GPU 側との約束が変わる)。
 
 ## 確かめ
-- multires_sparse_test 合格(release)。multires 系の CPU の試験は下の作業ログ。
+- release のビルド警告 0・archmap OK。CPU の試験 18 本を実行ファイルで直に回して全部合格(2026-10-26): multires_sparse(67 秒)・multires_state・field_storage・placement_refine・
+  multires・multires_wide・multires_uniform・multires_quiet・multires_activity・multires_edge・multires_grading・multires_graded・multires_gas・multires_liquid・
+  multires_implicit・multires_conduction・multires_subcycle・multires_implicit_tree。
 
 ## 司令塔へ
 - この試験はマージの確かめの組に入っていなかったので 1 日気づかなかった(main の全部の CPU の試験は 10-24 の T-1066 の時が最後)。
