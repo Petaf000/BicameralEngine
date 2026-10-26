@@ -6,6 +6,7 @@
 // 表: 試験の表(標準の cellulose は「炭 + 水蒸気」だけ)に、熱分解で燃える気体を出す行を足した表(下の AddFuelGas。値と出典は T-1142)。
 // 確かめる: 保存(セル + ボクセル + 対の端数 − 入った光。エネルギーと元素。ビット単位)・決定的・眠らせても同じ・層を作って返しても保存。
 // 記録: 燃え広がりの速さ(mm/s)・0.5 m と 0.25 m の差・層の一番熱い温度・ボクセルの数と 1 刻みの CPU の時間。
+// T-1144: 世界の流れのある場面(object_shell_nest.h)と、箱の細かさ(7.8 mm / 3.9 mm)・層の数・紙の長さを選んで 1 回だけ燃やす口(--case)。
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -16,6 +17,7 @@
 #include <vector>
 
 #include "object_flow_cpu.h"
+#include "object_shell_nest.h"
 #include "sun_column_scene.h"
 
 namespace {
@@ -81,6 +83,27 @@ namespace {
                                                 .sizeY = 1,
                                                 .sizeZ = 1,
                                                 .lensMilliwatts = 4000}};
+
+    // 箱の細かさと紙の長さ(T-1144)。レベル L の箱は 7.8 mm × 2^(6−L)。紙・草の面密度・光の面あたりの強さは同じに保つ
+    struct Grid {
+        int32_t bodyLevel = BODY_LEVEL;
+        uint32_t columns = SKELETON_X;  // 骨格の x の数
+    };
+
+    // レベル L の燃える物(薄い物は 1 ボクセルの面が 1/4^(L−6)・単位が 8^(L−6) 倍 → 量 × 2^(L−6)・高さ × 2^(L−6)。光はボクセルの面に比例)
+    Fuel FuelAt(const Fuel& fuel, const Grid& grid) {
+        const auto finer = static_cast<uint32_t>(grid.bodyLevel - BODY_LEVEL);
+        Fuel scaled = fuel;
+        scaled.sizeZ = fuel.sizeZ << finer;
+        scaled.lensMilliwatts = fuel.lensMilliwatts >> (2 * finer);
+        if (fuel.exposedFaces == 2) {
+            scaled.celluloseUnits = fuel.celluloseUnits << finer;
+        } else {
+            scaled.sizeY = fuel.sizeY << finer;
+        }
+
+        return scaled;
+    }
 
     // --- 表: 熱分解で燃える気体を出す(D-660)。値と出典は T-1142 の作業ログ ---
     // セルロースの熱分解は Bradbury–Sakai–Shafizadeh(1979)の 2 本の枝を、活性セルロースを通さず直接に(600〜900 K では開始の段が 2 本の枝より速い)。
@@ -148,17 +171,20 @@ namespace {
     }
 
     // --- 場面 ---
-    test::OhWorld MakeWorld(const sim::BakedReactionTable& table, const Fuel& fuel, int32_t cellLevel) {
+    test::OhWorld MakeWorld(const sim::BakedReactionTable& table, const Fuel& base, int32_t cellLevel,
+                            const Grid& grid) {
         test::OhWorld world;
-        const uint32_t count = SKELETON_X * fuel.sizeY * fuel.sizeZ;
+        const Fuel fuel = FuelAt(base, grid);
+        const uint32_t columns = grid.columns;
+        const uint32_t count = columns * fuel.sizeY * fuel.sizeZ;
         world.objects.push_back({.voxelBegin = 0,
                                  .voxelCount = count,
-                                 .sizeX = SKELETON_X,
+                                 .sizeX = columns,
                                  .sizeY = fuel.sizeY,
                                  .cell = 0,
-                                 .bodyLevel = BODY_LEVEL,
+                                 .bodyLevel = grid.bodyLevel,
                                  .cellLevel = cellLevel,
-                                 .substeps = 1,
+                                 .substeps = 1u << static_cast<uint32_t>(2 * (grid.bodyLevel - BODY_LEVEL)),
                                  .filmUm = FILM_UM,
                                  .shellLayers = 0});
         const std::vector<sim::SpeciesAmount> solid = {
@@ -167,11 +193,11 @@ namespace {
             {.species = table.SpeciesId("nitrogen"), .amount = AIR_NITROGEN_UNITS}};
         const rx::RxCell voxel = sim::MakeReactionCell(table, solid, test::SUN_ROOM_TEMPERATURE_MK);
         // 1 W = 1000 / 60 mJ / 刻み × 8^6(ボクセルの単位)
-        const int64_t lens = (fuel.lensMilliwatts * (int64_t{1} << (3 * BODY_LEVEL))) / 60;
+        const int64_t lens = (fuel.lensMilliwatts * (int64_t{1} << (3 * grid.bodyLevel))) / 60;
         for (uint32_t z = 0; z < fuel.sizeZ; ++z) {
             for (uint32_t y = 0; y < fuel.sizeY; ++y) {
-                for (uint32_t x = 0; x < SKELETON_X; ++x) {
-                    const test::OhBoxFace face = test::BoxFaceOf(x, y, z, SKELETON_X, fuel.sizeY, fuel.sizeZ);
+                for (uint32_t x = 0; x < columns; ++x) {
+                    const test::OhBoxFace face = test::BoxFaceOf(x, y, z, columns, fuel.sizeY, fuel.sizeZ);
                     world.infos.push_back(
                         {.object = 0, .shape = face.neighbours | (fuel.exposedFaces << rx::OH_EXPOSED_SHIFT)});
                     world.voxels.push_back(voxel);
@@ -195,7 +221,7 @@ namespace {
     std::vector<int64_t> Totals(const sim::BakedReactionTable& table, const test::OhTables& tables,
                                 const test::OhWorld& world) {
         const size_t elementCount = table.elementNames.size();
-        const int64_t scaleShift = 3 * (BODY_LEVEL - world.objects[0].cellLevel);
+        const int64_t scaleShift = 3 * (world.objects[0].bodyLevel - world.objects[0].cellLevel);
         std::vector<int64_t> totals(1 + elementCount, 0);
         totals[0] = (world.cells[0].energy << scaleShift) - world.sunIn;
         const std::vector<uint64_t> cellCounts = sim::CountElements(table, world.cells[0]);
@@ -357,7 +383,12 @@ namespace {
     enum class ShellMode : uint8_t { None, OnDemand, OnDemandRelieved, Flow };
 
     struct Burn {
-        std::array<uint32_t, SKELETON_X> litTick{};  // 列に火が来た刻み(0 = 来ない)
+        std::vector<uint32_t> litTick;  // 列に火が来た刻み(0 = 来ない)
+        int32_t bodyLevel = BODY_LEVEL;
+        int32_t hottestAboveKelvin = 0;  // 世界の場面: 囲むセルの 1 つ上のセル
+        bool objectConserved = true;     // 世界の場面: 物 + 帳簿の物との受け渡し
+        bool worldBalanced = true;       // 世界の場面: 世界の Σ − 帳簿
+        bool worldStored = true;
         uint32_t ticks = 0;
         uint32_t shellsMade = 0;
         uint32_t shellsReturned = 0;
@@ -373,26 +404,53 @@ namespace {
         uint64_t digest = 0;
     };
 
+    // grid: 箱の細かさと紙の長さ・inWorld: 世界の流れのある場面(object_shell_nest.h)に置く(T-1144)
     Burn RunBurn(const Tables& tables, const Fuel& fuel, int32_t cellLevel, ShellMode mode, bool sleeping = true,
-                 bool probe = false, uint32_t layers = 1, bool skeletonWalls = true) {
+                 bool probe = false, uint32_t layers = 1, bool skeletonWalls = true, const Grid& grid = {},
+                 bool inWorld = false) {
         const test::OhCpuTable shared{.view = tables.table.View(),
                                       .objectSpecies = tables.object.species,
                                       .molarMasses = tables.table.molarMasses};
-        test::OhShellFlow flow{.skeletonWalls = skeletonWalls};
+        // 流れの小刻みは箱が細かいほど多く(1 小刻みに 1 ボクセルの上限が同じ 1.875 m/s になるように)
+        test::OhShellFlow flow{.substeps = 4u << static_cast<uint32_t>(grid.bodyLevel - BODY_LEVEL),
+                               .skeletonWalls = skeletonWalls};
         const test::OhGasList& gases = tables.object.gases;
-        test::OhWorld world = MakeWorld(tables.table, fuel, cellLevel);
+        test::OhWorld world = MakeWorld(tables.table, fuel, cellLevel, grid);
         world.sleeping = sleeping;
-        const std::vector<int64_t> start = Totals(tables.table, tables.object, world);
-        std::array<uint64_t, SKELETON_X> initial{};
-        for (uint32_t x = 0; x < SKELETON_X; ++x)
+        std::unique_ptr<test::object_shell_nest::ShellNest> nest;
+        if (inWorld) {
+            nest = test::object_shell_nest::MakeShellNest(tables.table, cellLevel, WORLD_SEED);
+            test::object_shell_nest::AttachCells(*nest, world);
+            const rx::RxCell air = world.cells[0];
+            std::printf("  世界の囲むセル(初め): %d mK・成分", rx::RxComputeThermal(shared, air).temperature);
+            for (uint32_t i = 0; i < air.speciesCount; ++i)
+                std::printf(" %s=%llu", tables.table.speciesNames[air.species[i]].c_str(),
+                            static_cast<unsigned long long>(air.amounts[i]));
+
+            std::printf("\n");
+        }
+
+        const auto totals = [&] {
+            return nest ? test::object_shell_nest::ObjectTotals(tables.table, tables.object, world, *nest)
+                        : Totals(tables.table, tables.object, world);
+        };
+        const std::vector<int64_t> start = totals();
+        const uint32_t columns = grid.columns;
+        std::vector<uint64_t> initial(columns, 0);
+        for (uint32_t x = 0; x < columns; ++x)
             initial[x] = ColumnFuel(tables.table, world, x);
 
         Burn burn;
+        burn.litTick.assign(columns, 0);
+        burn.bodyLevel = grid.bodyLevel;
         uint32_t lastLitTick = 0;
         const auto began = std::chrono::steady_clock::now();
         for (uint32_t tick = 1; tick <= TICK_LIMIT; ++tick) {
             const bool lensOn = burn.litTick[0] == 0 ? tick < LENS_LIMIT_TICKS
                                                      : tick < burn.litTick[0] + LENS_AFTER_LIT_TICKS;
+            if (nest)
+                test::object_shell_nest::BeforeObject(tables.table, *nest, world, WORLD_SEED, tick);
+
             test::StepObjectHeat(shared, gases, world, lensOn, WORLD_SEED, tick);
             burn.voxelTicks += world.voxels.size();
             if (mode == ShellMode::Flow)
@@ -452,16 +510,36 @@ namespace {
                         burn.hottestShellKelvin, rx::RxComputeThermal(shared, world.voxels[v]).temperature / 1000);
             }
 
+            if (nest)
+                test::object_shell_nest::AfterObject(tables.table, shared, *nest, world, tick % 60 == 0);
+
             // 列に火が来た(燃える固体が 90 % を切った)
-            for (uint32_t x = 0; x < SKELETON_X; ++x) {
+            for (uint32_t x = 0; x < columns; ++x) {
                 if (burn.litTick[x] == 0 && ColumnFuel(tables.table, world, x) * 10 < initial[x] * 9) {
                     burn.litTick[x] = tick;
                     lastLitTick = tick;
                 }
             }
 
-            if (tick % 60 == 0)
-                burn.conserved = burn.conserved && Totals(tables.table, tables.object, world) == start;
+            if (tick % 60 == 0) {
+                const bool same = totals() == start;
+                if (!same && burn.objectConserved && nest) {
+                    const std::vector<int64_t> now = totals();
+                    std::printf("  物の保存が崩れた刻み %u:", tick);
+                    for (size_t i = 0; i < now.size(); ++i)
+                        std::printf(" %lld", static_cast<long long>(now[i] - start[i]));
+
+                    std::printf("\n");
+                }
+
+                burn.objectConserved = burn.objectConserved && same;
+                burn.conserved = burn.conserved && same;
+            }
+
+            if (nest && burn.worldBalanced && !nest->balanced) {
+                std::printf("  世界の保存が崩れた刻み %u\n", tick);
+                burn.worldBalanced = false;
+            }
 
             if (!lensOn && tick > std::max(lastLitTick, burn.litTick[0]) + QUIET_TICKS)
                 break;
@@ -471,11 +549,19 @@ namespace {
         if (world.objects[0].shellLayers != 0 && test::RemoveObjectShell(shared, gases, world, 0))
             ++burn.shellsReturned;
 
-        // 1 小刻み 1/240 s・ボクセル 7.8125 mm: q(Q16)× 7.8125 × 240 ÷ 65536 × 1000 mm/s
+        if (nest) {
+            test::object_shell_nest::AfterObject(tables.table, shared, *nest, world, true);
+            burn.conserved = burn.conserved && nest->balanced && nest->stored;
+            burn.worldBalanced = nest->balanced;
+            burn.worldStored = nest->stored;
+            burn.hottestAboveKelvin = nest->hottestAboveKelvin;
+        }
+
+        // 1 小刻み・1 ボクセル の速さ = 1.875 m/s(7.8 mm・1/240 s。細かい箱も小刻みを同じ割合で増やすので同じ): q(Q16)× 1875 ÷ 65536 mm/s
         burn.fastestMillimetresPerSecond = (flow.fastestQ16 * 1875) / 65536;
         burn.limitedShares = flow.limitedShares;
 
-        burn.conserved = burn.conserved && Totals(tables.table, tables.object, world) == start;
+        burn.conserved = burn.conserved && totals() == start;
         burn.cpuMilliseconds = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began)
                                    .count();
         burn.digest = Digest(world);
@@ -489,16 +575,20 @@ namespace {
         double millimetresPerSecond = 0;
     };
 
+    // 測り始めは端から 15.6 mm の列(7.8 mm の箱の列 2。細かい箱でも同じ位置)
     Spread SpreadOf(const Burn& burn) {
         Spread spread;
-        for (uint32_t x = 0; x < SKELETON_X; ++x) {
+        for (uint32_t x = 0; x < burn.litTick.size(); ++x) {
             if (burn.litTick[x] != 0)
                 spread.farthest = x;
         }
 
-        if (spread.farthest > 2 && burn.litTick[2] != 0 && burn.litTick[spread.farthest] > burn.litTick[2]) {
-            const double millimetres = (spread.farthest - 2) * 7.8125;
-            const double seconds = (burn.litTick[spread.farthest] - burn.litTick[2]) / 60.0;
+        const auto finer = static_cast<uint32_t>(burn.bodyLevel - BODY_LEVEL);
+        const uint32_t begin = 2u << finer;
+        if (spread.farthest > begin && burn.litTick[begin] != 0 &&
+            burn.litTick[spread.farthest] > burn.litTick[begin]) {
+            const double millimetres = (spread.farthest - begin) * 7.8125 / (1u << finer);
+            const double seconds = (burn.litTick[spread.farthest] - burn.litTick[begin]) / 60.0;
             spread.millimetresPerSecond = millimetres / seconds;
         }
 
@@ -510,11 +600,16 @@ namespace {
         std::printf(
             "%s・%s・%.2f m: 端に火 %u 刻み・火が来た一番遠い列 %u / %u・速さ %.2f mm/s・層 作った %u 返した %u・"
             "一番熱い 骨格 %d K 層 %d K セル %d K・刻み %u・ボクセル×刻み %llu・CPU %.0f ms・保存 %s%s\n",
-            fuel, label, cellLevel == 0 ? 0.5 : 0.25, burn.litTick[0], spread.farthest, SKELETON_X - 1,
-            spread.millimetresPerSecond, burn.shellsMade, burn.shellsReturned, burn.hottestSkeletonKelvin,
-            burn.hottestShellKelvin, burn.hottestCellKelvin, burn.ticks,
-            static_cast<unsigned long long>(burn.voxelTicks), burn.cpuMilliseconds, burn.conserved ? "0" : "崩れた",
-            burn.failed ? "・量が負 / 枠があふれた" : "");
+            fuel, label, cellLevel == 0 ? 0.5 : 0.25, burn.litTick[0], spread.farthest,
+            static_cast<uint32_t>(burn.litTick.size() - 1), spread.millimetresPerSecond, burn.shellsMade,
+            burn.shellsReturned, burn.hottestSkeletonKelvin, burn.hottestShellKelvin, burn.hottestCellKelvin,
+            burn.ticks, static_cast<unsigned long long>(burn.voxelTicks), burn.cpuMilliseconds,
+            burn.conserved ? "0" : "崩れた", burn.failed ? "・量が負 / 枠があふれた" : "");
+        if (burn.hottestAboveKelvin != 0)
+            std::printf("  世界: 囲むセルの 1 つ上のセルの一番熱い %d K・物 + 帳簿 %s・世界の Σ − 帳簿 %s・書けた %s\n",
+                        burn.hottestAboveKelvin, burn.objectConserved ? "0" : "崩れた",
+                        burn.worldBalanced ? "0" : "崩れた", burn.worldStored ? "はい" : "いいえ");
+
         if (burn.fastestMillimetresPerSecond != 0)
             std::printf("  流れ: 一番速い面 %lld mm/s・出る上限で縮めた %llu\n",
                         static_cast<long long>(burn.fastestMillimetresPerSecond),
@@ -534,6 +629,50 @@ int main(int argc, char** argv) {
     const Tables plain = MakeTables(TableKind::Plain);
     const Tables fuelGas = MakeTables(TableKind::FuelGas);
     const Tables noMonoxide = MakeTables(TableKind::FuelGasWithoutMonoxide);
+    // 1 回だけ燃やす(T-1144): --case <燃える物 0 紙 / 1 草> <セルのレベル 0 / 1> <層の数> <箱のレベル 6 / 7> <骨格の x の数>
+    //   <場面 0 = 閉じた 1 セル / 1 = 世界の流れ> [表 0 = CO なし / 1 = CO あり]
+    if (argc >= 8 && std::string_view(argv[1]) == "--case") {
+        const auto fuelIndex = static_cast<size_t>(std::atoi(argv[2]));
+        const int32_t cellLevel = std::atoi(argv[3]);
+        const auto layers = static_cast<uint32_t>(std::atoi(argv[4]));
+        const Grid grid{.bodyLevel = std::atoi(argv[5]), .columns = static_cast<uint32_t>(std::atoi(argv[6]))};
+        const bool inWorld = std::atoi(argv[7]) != 0;
+        const bool monoxide = argc >= 9 && std::atoi(argv[8]) != 0;
+        const Burn burn = RunBurn(monoxide ? fuelGas : noMonoxide, FUELS[fuelIndex], cellLevel, ShellMode::Flow, true,
+                                  false, layers, true, grid, inWorld);
+        char label[160];
+        std::snprintf(label, sizeof(label), "層 %u 段・箱 %.2f mm・骨格 %u 列・%s%s", layers,
+                      7.8125 / (1 << (grid.bodyLevel - BODY_LEVEL)), grid.columns,
+                      inWorld ? "世界の流れ" : "閉じた 1 セル", monoxide ? "・CO あり" : "");
+        Print(FUELS[fuelIndex].name, label, cellLevel, burn);
+
+        return burn.conserved && !burn.failed ? 0 : 1;
+    }
+
+    // 世界だけの保存の調べ(T-1144): --world-check <セルのレベル>。物なしで 120 刻み、反応と伝導の段・気体の段の後ごとに Σ − 帳簿 を見る
+    if (argc >= 3 && std::string_view(argv[1]) == "--world-check") {
+        const int32_t level = std::atoi(argv[2]);
+        auto nest = test::object_shell_nest::MakeShellNest(noMonoxide.table, level, WORLD_SEED);
+        uint32_t brokenAfterNest = 0;
+        uint32_t brokenAfterGas = 0;
+        for (uint64_t tick = 1; tick <= 120; ++tick) {
+            sim::ConservedTotals before = sim::ComputeConservedTotals(nest->nest, noMonoxide.table, level);
+            sim::StepNest(nest->nest, noMonoxide.table, WORLD_SEED, tick, {.conduction = true});
+            sim::ConservedTotals after = sim::ComputeConservedTotals(nest->nest, noMonoxide.table, level);
+            brokenAfterNest += after == before ? 0u : 1u;
+            std::vector<uint32_t> changedSlots;
+            (void)nest->gas.Step(nest->nest, noMonoxide.table, tick, changedSlots);
+            before = after;
+            after = sim::ComputeConservedTotals(nest->nest, noMonoxide.table, level);
+            brokenAfterGas += after == before ? 0u : 1u;
+        }
+
+        std::printf("世界だけ・レベル %d・120 刻み: Σ − 帳簿 が変わった刻み 反応と伝導の段 %u・気体の段 %u\n", level,
+                    brokenAfterNest, brokenAfterGas);
+
+        return 0;
+    }
+
     if (argc > 1 && std::string_view(argv[1]) == "--probe") {
         Print("紙", "調べ", 0, RunBurn(noMonoxide, FUELS[0], 0, ShellMode::Flow, true, true, 2));
 
