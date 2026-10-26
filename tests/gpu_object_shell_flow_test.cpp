@@ -6,8 +6,9 @@
 //   既定: 紙 24 列の層 2 段と層 4 段を 2 枚(別々のセル)で 12 刻み、4 刻みごとにボクセル・セル・対の端数・面の運動量・待ち・ブロックの状態・
 //         セルの変わった段・数え上げ(出る上限で縮めた数・一番速い面)を比べる。圧力の値を groupshared に置く形と作業場に置く形の両方。
 //   --measure(--measure-only は比べを飛ばす): 紙 24 列・A4(27 × 38)の層 4・6 段を、物 1 つと 46 個(RTX 3070 Ti の SM の数)で、
-//         暖機 4 刻みの後 20 刻みの 1 刻みの平均の GPU の時間を出す。
+//         暖機 30 刻みの後 20 刻みの 1 刻みの平均の GPU の時間を出す。
 // 引数は gpu_test_options.h と --measure / --measure-only。
+#include <cstdlib>
 #include <cstring>
 
 #include "core/aliases.h"
@@ -41,7 +42,7 @@ namespace {
     constexpr int32_t HOT_SHELL_MK = 1500000;
     constexpr uint32_t COMPARE_TICKS = 12;
     constexpr uint32_t COMPARE_EVERY = 4;
-    constexpr uint32_t WARM_TICKS = 4;
+    constexpr uint32_t WARM_TICKS = 30;  // GPU の時計が上がるまで
     constexpr uint32_t MEASURE_TICKS = 20;
     constexpr uint32_t SM_COUNT = 46;  // RTX 3070 Ti
 
@@ -60,8 +61,11 @@ namespace {
         uint64_t outShare;
         uint32_t changed;
         uint32_t padding;
+        uint64_t recipMultiplier;
+        uint32_t recipShift1;
+        uint32_t recipShift2;
     };
-    static_assert(sizeof(ShellVoxelWork) == 64);
+    static_assert(sizeof(ShellVoxelWork) == 80);
 
     struct ShellFaceWork {
         uint64_t mass;
@@ -243,6 +247,7 @@ namespace {
         uint32_t faceCount = 0;
         uint32_t passBase = 0;
         uint32_t sharedPotential = 0;
+        uint32_t pressureSweeps = 24;  // 圧力の赤黒の回数(CPU の OhShellFlow と同じ既定。--sweeps は測るだけ)
     };
 
     template <typename T>
@@ -272,11 +277,17 @@ namespace {
         const std::vector<ShellVoxelWork> voxelWork(world.voxels.size(), ShellVoxelWork{});
         const std::vector<rx::OhVoxelGas> gasWork(world.voxels.size(), rx::OhVoxelGas{});
         const std::vector<ShellFaceWork> faceWork(result.faceCount, ShellFaceWork{});
-        const std::array<std::span<const std::byte>, UAV_COUNT> initial = {
-            BytesOf(world.voxels),      BytesOf(world.cells),       BytesOf(world.carries),
-            BytesOf(momentum),          BytesOf(world.waits),       BytesOf(world.blockStates),
-            BytesOf(world.cellChangedPasses), BytesOf(stats),       BytesOf(voxelWork),
-            BytesOf(gasWork),           BytesOf(faceWork)};
+        const std::array<std::span<const std::byte>, UAV_COUNT> initial = {BytesOf(world.voxels),
+                                                                           BytesOf(world.cells),
+                                                                           BytesOf(world.carries),
+                                                                           BytesOf(momentum),
+                                                                           BytesOf(world.waits),
+                                                                           BytesOf(world.blockStates),
+                                                                           BytesOf(world.cellChangedPasses),
+                                                                           BytesOf(stats),
+                                                                           BytesOf(voxelWork),
+                                                                           BytesOf(gasWork),
+                                                                           BytesOf(faceWork)};
         for (size_t i = 0; i < initial.size(); ++i) {
             result.uavs[i] = gpu::CreateBuffer(device, initial[i].size(), gpu::BufferKind::UnorderedAccess);
             result.uploads[i] = gpu::CreateFilledUpload(device, initial[i]);
@@ -286,8 +297,9 @@ namespace {
 
         const std::vector<uint32_t> gasSpecies(tables.gases.species.begin(), tables.gases.species.end());
         const std::array<std::span<const std::byte>, SRV_COUNT> srvs = {
-            BytesOf(table.species), BytesOf(tables.species), BytesOf(table.molarMasses), BytesOf(gasSpecies),
-            BytesOf(world.objects), BytesOf(world.infos),    BytesOf(shells),            BytesOf(world.blocks)};
+            BytesOf(table.species), BytesOf(tables.species), BytesOf(table.molarMasses),
+            BytesOf(gasSpecies),    BytesOf(world.objects),  BytesOf(world.infos),
+            BytesOf(shells),        BytesOf(world.blocks)};
         for (size_t i = 0; i < srvs.size(); ++i) {
             result.srvs[i] = gpu::CreateResidentBuffer(device, srvs[i]);
             if (!result.srvs[i].Valid())
@@ -330,15 +342,20 @@ namespace {
 
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.DebugRingIndex(), debugRing.GpuAddress());
         for (uint32_t i = 0; i < SRV_COUNT; ++i)
-            list->SetComputeRootShaderResourceView(ROOT_LAYOUT.SrvIndex(i), gpuState.srvs[i].buffer->GetGPUVirtualAddress());
+            list->SetComputeRootShaderResourceView(ROOT_LAYOUT.SrvIndex(i),
+                                                   gpuState.srvs[i].buffer->GetGPUVirtualAddress());
 
         list->EndQuery(gpuState.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
         for (uint32_t i = 0; i < count; ++i) {
             const uint64_t tick = first + i;
-            const std::array<uint32_t, ROOT_CONSTANT_COUNT> constants = {
-                gpuState.objectCount,  static_cast<uint32_t>(tick), static_cast<uint32_t>(tick >> 32),
-                gpuState.passBase,     4u,                          24u,
-                1u,                    gpuState.sharedPotential};
+            const std::array<uint32_t, ROOT_CONSTANT_COUNT> constants = {gpuState.objectCount,
+                                                                         static_cast<uint32_t>(tick),
+                                                                         static_cast<uint32_t>(tick >> 32),
+                                                                         gpuState.passBase,
+                                                                         4u,
+                                                                         gpuState.pressureSweeps,
+                                                                         1u,
+                                                                         gpuState.sharedPotential};
             list->SetComputeRoot32BitConstants(ROOT_LAYOUT.RootConstantIndex(), ROOT_CONSTANT_COUNT, constants.data(),
                                                0);
             list->Dispatch(gpuState.objectCount, 1, 1);
@@ -426,6 +443,7 @@ namespace {
         const sim::BakedReactionTable& table;
         const test::OhTables& tables;
         const test::OhCpuTable& shared;
+        uint32_t measureSweeps;  // 測る時の圧力の赤黒の回数(切り分け。比べは 24 のまま)
     };
 
     // CPU と GPU を同じ場面から回して比べる
@@ -463,16 +481,17 @@ namespace {
                 return std::unexpected(different.error());
 
             if (*different != 0)
-                return std::unexpected(std::format("刻み {} で GPU と CPU が食い違った({} 件)", tick + COMPARE_EVERY - 1,
-                                                   *different));
+                return std::unexpected(
+                    std::format("刻み {} で GPU と CPU が食い違った({} 件)", tick + COMPARE_EVERY - 1, *different));
         }
 
         for (const test::OhShellFlow& flow : flows)
             limited += flow.limitedShares;
 
-        Log(Channel::Gpu, Level::Info, "{}・圧力の値は{}: {} ボクセル × 2 枚・{} 刻みでビット一致(一番速い面 {}・出る上限で縮めた {})",
-            shape.name, sharedPotential ? " groupshared" : "作業場", one->voxels.size(), COMPARE_TICKS,
-            flows[0].fastestQ16, limited);
+        Log(Channel::Gpu, Level::Info,
+            "{}・圧力の値は{}: {} ボクセル × 2 枚・{} 刻みでビット一致(一番速い面 {}・出る上限で縮めた {})", shape.name,
+            sharedPotential ? " groupshared" : "作業場", one->voxels.size(), COMPARE_TICKS, flows[0].fastestQ16,
+            limited);
 
         return {};
     }
@@ -490,19 +509,20 @@ namespace {
         if (!queue || !debugRing || !gpuState || !Upload(*queue, *gpuState))
             return std::unexpected(gpuState ? "GPU の準備に失敗" : gpuState.error());
 
+        gpuState->pressureSweeps = context.measureSweeps;
         const auto warm = RunTicks(*queue, *gpuState, *debugRing, 2, WARM_TICKS);
         const auto measured = warm ? RunTicks(*queue, *gpuState, *debugRing, 2 + WARM_TICKS, MEASURE_TICKS) : warm;
         if (!measured)
             return std::unexpected(measured.error());
 
         const auto stats = test::object_heat_gpu::ReadUav<uint32_t>(context.device, *queue,
-                                                                     gpuState->uavs[UavStats].Get(), 2);
+                                                                    gpuState->uavs[UavStats].Get(), 2);
         if (!stats || (*stats)[0] != 0 || (*stats)[1] != 0)
             return std::unexpected(std::format("{}: 量が負・枠があふれた・圧力の値が 32bit に入らない", shape.name));
 
-        Log(Channel::Gpu, Level::Info, "測る: {}({} ボクセル・面 {})× {}・圧力の値は{}: 1 刻み {:.3f} ms", shape.name,
-            one->voxels.size(), gpuState->faceCount / copies, copies, sharedPotential ? " groupshared" : "作業場",
-            *measured);
+        Log(Channel::Gpu, Level::Info, "測る: {}({} ボクセル・面 {})× {}・圧力の値は{}・赤黒 {} 回: 1 刻み {:.3f} ms",
+            shape.name, one->voxels.size(), gpuState->faceCount / copies, copies,
+            sharedPotential ? " groupshared" : "作業場", context.measureSweeps, *measured);
 
         return {};
     }
@@ -511,9 +531,13 @@ namespace {
         std::vector<char*> rest;
         bool measure = false;
         bool compare = true;
-        for (char* argument : arguments) {
+        uint32_t measureSweeps = 24;
+        for (size_t i = 0; i < arguments.size(); ++i) {
+            char* argument = arguments[i];
             const std::string_view text = argument;
-            if (text == "--measure") {
+            if (text == "--sweeps" && i + 1 < arguments.size()) {
+                measureSweeps = static_cast<uint32_t>(std::strtoul(arguments[++i], nullptr, 10));
+            } else if (text == "--measure") {
                 measure = true;
             } else if (text == "--measure-only") {
                 measure = true;
@@ -544,9 +568,11 @@ namespace {
                               .queueType = options->queueType,
                               .table = table,
                               .tables = *tables,
-                              .shared = shared};
+                              .shared = shared,
+                              .measureSweeps = measureSweeps};
         if (compare) {
-            const std::array<Shape, 2> shapes = {Shape{"紙 24 列・層 2 段", 24, 3, 2}, Shape{"紙 24 列・層 4 段", 24, 3, 4}};
+            const std::array<Shape, 2> shapes = {Shape{"紙 24 列・層 2 段", 24, 3, 2},
+                                                 Shape{"紙 24 列・層 4 段", 24, 3, 4}};
             for (const Shape& shape : shapes) {
                 for (const bool sharedPotential : {true, false}) {
                     if (auto compared = RunCompare(context, shape, sharedPotential); !compared) {
@@ -559,8 +585,9 @@ namespace {
         }
 
         if (measure) {
-            const std::array<Shape, 4> shapes = {Shape{"紙 24 列・層 4 段", 24, 3, 4}, Shape{"紙 24 列・層 6 段", 24, 3, 6},
-                                                 Shape{"A4・層 4 段", 27, 38, 4}, Shape{"A4・層 6 段", 27, 38, 6}};
+            const std::array<Shape, 4> shapes = {Shape{"紙 24 列・層 4 段", 24, 3, 4},
+                                                 Shape{"紙 24 列・層 6 段", 24, 3, 6}, Shape{"A4・層 4 段", 27, 38, 4},
+                                                 Shape{"A4・層 6 段", 27, 38, 6}};
             for (const Shape& shape : shapes) {
                 const uint32_t outer = (shape.columns + (2 * shape.layers)) * (1 + (2 * shape.layers)) *
                                        (shape.sizeZ + (2 * shape.layers));

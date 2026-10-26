@@ -17,6 +17,7 @@ struct OhShellVoxel {
     uint64_t outShare;  // 出る割合の和(Q16)
     uint32_t changed;   // この刻みに流れで変わった
     uint32_t padding;
+    FxRecip64 recip;  // 重みの和の逆数(圧力の反復の割り算を掛け算に。商は OhMulDivToward0 とビット単位で同じ。04 §6)
 };
 
 struct OhShellFace {
@@ -180,7 +181,10 @@ OhFlowCell CellFlow() {
 }
 
 OhFlowCell FlowCellAt(ShellBox box, uint32_t local) {
-    return local == OH_SHELL_OUTSIDE ? CellFlow() : g_voxelWork[box.begin + local].cell;
+    if (local == OH_SHELL_OUTSIDE)
+        return CellFlow();
+
+    return g_voxelWork[box.begin + local].cell;
 }
 
 bool IsSkeleton(ShellBox box, uint32_t local) {
@@ -364,6 +368,7 @@ void PrepareResidual(ShellBox box, uint32_t thread) {
 
         g_voxelWork[box.begin + v].residual = residual;
         g_voxelWork[box.begin + v].total = total;
+        g_voxelWork[box.begin + v].recip = FxMakeRecipU64(total > 0 ? total : (uint64_t)1);
         g_voxelWork[box.begin + v].potential = 0;
         if (g_sharedPotential != 0)
             gs_potential[v] = 0;
@@ -391,7 +396,9 @@ void PressureColour(ShellBox box, uint32_t thread, uint32_t colour) {
                        PotentialAt(box, VoxelLocal(box, c + unit));
         }
 
-        const int64_t potential = OhMulDivToward0(sum, 1, work.total > 0 ? work.total : (uint64_t)1);
+        // = OhMulDivToward0(sum, 1, 重みの和)(0 の向きに切る。逆数の掛け算は厳密)
+        const int64_t quotient = (int64_t)FxDivRecipU64(FxAbsU64(sum), work.recip);
+        const int64_t potential = sum < 0 ? -quotient : quotient;
         if (g_sharedPotential == 0) {
             g_voxelWork[box.begin + v].potential = potential;
             continue;
@@ -433,20 +440,20 @@ void SumOutShares(ShellBox box, uint32_t thread) {
     for (uint32_t v = thread; v < count; v += OH_SHELL_THREADS) {
         const uint3 c = VoxelCoord(box, v);
         const OhFlowCell cell = g_voxelWork[box.begin + v].cell;
-        uint64_t out = 0;
+        uint64_t outTotal = 0;
         FX_UNROLL
         for (uint32_t axis = 0; axis < 3; ++axis) {
             const int64_t minusSpeed = g_faceWork[FaceAt(box, axis, c)].speed;
             const int64_t plusSpeed = g_faceWork[FaceAt(box, axis, c + Unit(axis))].speed;
             if (minusSpeed < 0)
-                out += OhFlowShareQ16(minusSpeed, cell);
+                outTotal += OhFlowShareQ16(minusSpeed, cell);
 
             if (plusSpeed > 0)
-                out += OhFlowShareQ16(plusSpeed, cell);
+                outTotal += OhFlowShareQ16(plusSpeed, cell);
         }
 
-        g_voxelWork[box.begin + v].outShare = out;
-        if (out > OH_FLOW_SHARE_LIMIT_Q16)
+        g_voxelWork[box.begin + v].outShare = outTotal;
+        if (outTotal > OH_FLOW_SHARE_LIMIT_Q16)
             InterlockedAdd(gs_limited, 1u);
     }
 }
@@ -471,9 +478,16 @@ void MoveGas(GpuShellTable table, GpuShellGases gases, ShellBox box, uint32_t th
             const bool selfUpwind = plusFace ? q > 0 : q < 0;
             const uint32_t upwind = selfUpwind ? v : other;
             const OhFlow moved = MovedThrough(table, gases, box, q, upwind);
-            delta = selfUpwind ? SubtractFlow(delta, moved) : OhAddFlow(delta, moved);
-            if (other == OH_SHELL_OUTSIDE)
-                toCell = selfUpwind ? OhAddFlow(toCell, moved) : SubtractFlow(toCell, moved);
+            // 風上なら出る・風下なら入る。箱の外に面する面は、その逆をセルへ
+            if (selfUpwind) {
+                delta = SubtractFlow(delta, moved);
+                if (other == OH_SHELL_OUTSIDE)
+                    toCell = OhAddFlow(toCell, moved);
+            } else {
+                delta = OhAddFlow(delta, moved);
+                if (other == OH_SHELL_OUTSIDE)
+                    toCell = SubtractFlow(toCell, moved);
+            }
         }
 
         if (OhFlowIsZero(delta))
@@ -607,12 +621,18 @@ void WakeChanged(OhObject object, ShellBox box, uint32_t thread, uint64_t tick, 
         AllMemoryBarrierWithGroupSync();
         PrepareResidual(box, thread);
         AllMemoryBarrierWithGroupSync();
+        // 圧力の値が groupshared なら、反復の間は groupshared の同期だけ(作業場の読みは反復の前に書いた値だけ)
         for (uint32_t sweep = 0; sweep < g_pressureSweeps; ++sweep) {
-            PressureColour(box, thread, 0);
-            AllMemoryBarrierWithGroupSync();
-            PressureColour(box, thread, 1);
-            AllMemoryBarrierWithGroupSync();
+            for (uint32_t colour = 0; colour < 2; ++colour) {
+                PressureColour(box, thread, colour);
+                if (g_sharedPotential != 0)
+                    GroupMemoryBarrierWithGroupSync();
+                else
+                    AllMemoryBarrierWithGroupSync();
+            }
         }
+
+        AllMemoryBarrierWithGroupSync();
 
         ProjectFaces(box, thread);
         AllMemoryBarrierWithGroupSync();
