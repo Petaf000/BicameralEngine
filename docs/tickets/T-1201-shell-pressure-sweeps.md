@@ -79,3 +79,4 @@ T-1200 で 1 物の 1 刻みの 3/4 を占めた圧力の赤黒の反復(24 回 
 - 2026-10-26 wt5(1 回目): チケットを作り、打ち切り条件を置いた。
 - 2026-10-26 wt5(1 回目): CPU と GPU に圧力の規則(収まったら止める・温めた始まり)を足し、3 つの規則で GPU と CPU がビット一致。燃え方の場面ごとの回数・燃え広がりの速さ・GPU の ms を測った(上の表)。
   道 A は回数を減らさない。決まった 24 回は収まっておらず結果を変えていた → 既定を「0 から収まるまで」(仮)。多重格子の粗い試作は効かなかった(次の道 2)。object_shell --quick・gpu_object_shell_flow(--measure も)は通った。
+- 2026-10-26 wt5(2 回目・マージの確かめ): main(c97d803f。T-1164 のマージ)の上に rebase(衝突なし)。release のビルド警告 0・object_shell(--quick)・gpu_object_shell_flow(GPU とのビット一致)が通った。float_check・clang-format 23・archmap --check も通った。
