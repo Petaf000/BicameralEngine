@@ -1,6 +1,23 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-26(本体の作業役 7 回目・整形・wt5・wt2・wt3・wt4 の 4 本を main へ・T-1176 の設計の詰め)
+最終更新: 2026-10-26(本体の作業役 8 回目・T-1176 の CPU と傾きの式・wt3 T-1209・wt4 T-1089 を main へ)
+
+## この仕事でしたこと(2026-10-26・本体の作業役・8 回目: T-1176 の CPU と傾きの式・wt3 T-1209・wt4 T-1089 のマージ)
+- **T-1176(Doing。GPU と既定 on は T-1188 に分けた)**:
+  - 傾きの式 SfSurfaceSlopeQ16・SfClampColumnSlopeQ16 を 32bit で計算する形に(表面は −1〜2・差は ±3 なので収まる。64bit の差を作らない = T-1078・T-1159 の形にならない)。
+    gpu_placement_refine に傾きの式の 8192 件(入口 placement_refine_check.hlsl の g_mode = 1)→ HW の RTX と WARP で合格。
+  - 物質の相の印 RxSpecies::flags に RX_SPECIES_LIQUID・GRAIN・ANCHORED(ベイクが相と solid_motion から。語は増えない)。量が µmol の体積 SfAmountVolume・SfMaterialVolume・SfAddSettleOf・PlaceMaterial::molarVolumeMm3PerMol。
+  - CPU リファレンス engine/src/sim/multires_refine_cells.cpp: PlaceTreeCell(数の空間・器 = MR_CELL_VOLUME_MM3・量 = 親 × 8・傾きは同じ親のブロックの中の隣の列)・
+    エネルギーは熱容量の重み(D-674)・端数は SAME・寄せないセルは触らない。EnableRefineCellPlacement で表を持たせる(欄の refinePlacement も同じ置かれ方)。
+    **MultiresNest::refineCells は既定で空 = 今の世界はビット単位で同じ**(GPU の RefineLevel がまだ SAME のため)。試験 tree_refine_placement(保存・SAME・温度・層・斜面・決定性)。
+  - 判断待ち: 【エンジン】粒の詰まりを作り手が書くか → **QUESTIONS Q173**(仮 = 100 %)。
+- **マージ(--no-ff・衝突なし)**: wt3 6079606c(T-1209 Done: multires_sparse の 6 件は帳簿の理由が 11 → 12 で区画の要約が伸びただけ・基準を取り直した・ADR-0481 の 5 に (a) を仮で。T-1210 は ADR-0481 の 5 の (a) をユーザーが確かめるまで着手しない)・
+  wt4 9ee5ccfd(T-1089 Done: 刻みの e をセルごと・木の窓が本当に 2 m・unitEdgeCells 既定 1)。
+- 試験(release・警告 0): CPU multires・multires_state・field_storage・placement_refine・tree_refine_placement・multires_sparse 66 s・time_step_span_dump・time_step_event_merge・multires_edge・multires_gas・
+  GPU gpu_multires・gpu_placement_refine(・_warp)・gpu_time_step_span・gpu_time_step_event・gpu_time_step_event_cost 合格 → push。time_step_tree は wt4 で通っている(main では PC が空いた時に 1 回)。
+- 次の番号は **D-677・ADR-0479・T-1189・Q174**(本体。この仕事で T-1188・Q173 を使った)。
+
+(前の版の最終更新: 2026-10-26(本体の作業役 7 回目・整形・wt5・wt2・wt3・wt4 の 4 本を main へ・T-1176 の設計の詰め))
 
 ## この仕事でしたこと(2026-10-26・本体の作業役・7 回目: time_step_tree の確かめ・整形・4 本のマージ・T-1176 の設計の詰め)
 - **前の作業役の残り**: time_step_tree(main・release)合格 1053 s。clang-format(CI と同じ 23・--dry-run --Werror)を全体で: ずれ 5 ファイルを整形・
@@ -475,9 +492,9 @@ main に入っていないブランチは 21 本(ahead = main に無いコミッ
   (`-Filter "^(smoke|singleton|log|sim_scheduler|debug_camera|replay_file|multires|fixed|physics|float_check)"`)と `-Filter reaction`。
   裏で投げて runner/logs/<job>.result.json を待つ(cat しない。job.py の要約で見る)。テストの表示した行は out/build/<preset>/Testing/Temporary/LastTest.log(走っている間は .tmp)。
 - `python3 tools/archmap/archmap.py --check` は Linux 側で動く。
+- **確かめの組の決まり(2026-10-26)**: 帳簿・VisitNestState・MrBlock に触るマージは multires_sparse も流す(区画の要約の基準が変わる。T-1209)。
 
 ## 壊れている/未確認のもの(ファイル:行 と症状)
-- **multires_sparse_test が main でも 6 件落ちる(2026-10-26 wt3 の報告・main の 14:51 のビルド)**: 要約の束の値の比べ。wt3 の変更より前から。調べは wt3 の次の作業役。
 - **wt6 t-1164-outside-default はマージしていない**: window_replay_play・_rewind・_peek が S(33) で回ごとにハッシュが変わる・gpu_play_metric 41 → 203 秒。wt6 の次の作業役が main の実行ファイルで window_replay_record → play を流して main でも落ちるか確かめる(main で落ちたらここに書く)。
 - **サンプルの世界と ⑤ の場面では、写しと遊びの指標が過渡期のため使えない(D-521。多重解像度の世界へ移るまで)**: t-0724 で仮の世界を世界いっぱいにすると 1 刻みが約 85 ms でフレームの予算を超え、写しが 1 刻みも進まない(D-468)ので、写しで進む窓の試験 3 組(window_copy_*・window_regions_copy_*・window_metrics_*)を DISABLED にする(戻す条件は tests/CMakeLists.txt と ADR-0342。t-0724 のマージで入る)。t-0724 はホットリロードの窓の試験 4 本が CheckRegionTableSwap で落ちるので、T-0670 を上に入れてからマージする。
 - **気体・液体の区画の残り**: 刻みの終わりの熱が負のセルは 0(T-0676。probe_gas の EXPECT(0))。強い爆発の 1 小刻みの中だけ熱が一時的に負になる(T-0691。D-508 で案を決めた・土台の設計の後)。気体の市松は燃える木箱の下半分に残る(T-0658)。**投影 × 最速 × 小さい空きのセルは外側の反復が発散する(T-0689・止めた)ので使わない**(probe_gas の既定は陽解法)。区画で分かれた世界の最速の投影は 1 刻みで釣り合いきらない(T-0688)。多重解像度の木は空きを読まない(T-0668・止めた)。

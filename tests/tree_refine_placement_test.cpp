@@ -105,7 +105,7 @@ namespace {
         uint32_t child = MR_NO_BLOCK;
     };
 
-    World MakeWorld(const Materials& materials, bool placed) {
+    World MakeWorld(const Materials& materials, bool placed, bool refined = true) {
         World world{.nest = MakeMultiresNest(test::MakeMultiresCapacity(materials.table, 16, 0, 16))};
         std::vector<RxCell> cells;
         for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
@@ -114,6 +114,9 @@ namespace {
         world.root = PlaceRootBlock(world.nest, 0, 0, 0, cells);
         if (placed)
             EnableRefineCellPlacement(world.nest, materials.table);
+
+        if (!refined)
+            return world;
 
         const MrRequest refine = MrMakeRequest(MR_REQUEST_REFINE, 1, 1, 1, 1);
         SubmitRequests(world.nest, std::span(&refine, 1));
@@ -159,8 +162,8 @@ namespace {
         int placedCells = 0;
     };
 
-    void CheckParentCell(const Materials& materials, const World& placed, const World& same, uint32_t local,
-                         CellCheck& check) {
+    void CheckParentCell(const Materials& materials, const World& placed, const World& same, const World& probe,
+                         uint32_t local, CellCheck& check) {
         const uint32_t parentCell = MrOctantCell(0, local);
         const RxCell parent = SceneCell(materials, parentCell);
         std::array<RxCell, 8> children{};
@@ -184,7 +187,7 @@ namespace {
             check.conserved &= amount == parent.amounts[i] * 8;
         }
 
-        const bool settles = PlaceTreeCell(same.nest, same.root, parentCell).has_value();
+        const bool settles = PlaceTreeCell(probe.nest, probe.root, parentCell).has_value();  // 細かくする前の世界で
         check.placedCells += settles ? 1 : 0;
         if (!settles) {
             check.sameWhenNotPlaced &= sameAsSame;
@@ -206,9 +209,10 @@ namespace {
     }
 
     void TestConservation(const Materials& materials, const World& placed, const World& same) {
+        const World probe = MakeWorld(materials, true, false);
         CellCheck check;
         for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local)
-            CheckParentCell(materials, placed, same, local, check);
+            CheckParentCell(materials, placed, same, probe, local, check);
 
         Expect(check.conserved, "物質ごとの和とエネルギーの和は親 × 8");
         Expect(check.sameWhenNotPlaced, "寄せないセルは SAME の世界とビット単位で同じ");
@@ -240,10 +244,13 @@ namespace {
 
         Expect(layered, "半分の粒は下の子に詰まり、気体は上の子へ多く入る");
 
-        // 斜面(x = 1・y = 1・z = 2。左右の列は 40 % と 80 %)の上の段: x の高い側の子に粒が多い
+        // 斜面(x = 1・y = 1・z = 2。左右の列は 20 % と 60 %。ここは 40 %): x の高い側の子(j の bit 0 が 1)に粒が多い
         const uint32_t slope = 1 + (1 * 4) + (2 * 16);
-        const uint64_t lowSide = AmountOf(at(slope, 2), materials.grain) + AmountOf(at(slope, 6), materials.grain);
-        const uint64_t highSide = AmountOf(at(slope, 3), materials.grain) + AmountOf(at(slope, 7), materials.grain);
+        uint64_t lowSide = 0;
+        uint64_t highSide = 0;
+        for (uint32_t j = 0; j < 8; ++j)
+            ((j & 1u) == 0 ? lowSide : highSide) += AmountOf(at(slope, j), materials.grain);
+
         Expect(highSide > lowSide, "斜面のセルは高い側の子に粒が多い");
     }
 

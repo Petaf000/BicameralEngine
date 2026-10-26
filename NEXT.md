@@ -1,5 +1,9 @@
 # NEXT.md — 次にやること(上から順に)
 
+**2026-10-26 本体の作業役(8 回目): T-1176 の CPU リファレンス(既定は使わない)・傾きの式を 32bit に(GPU 合格)・相の印・wt3 T-1209・wt4 T-1089 を main へ(試験合格・push)。**
+次: T-1188(GPU の RefineLevel で置かれ方・隣のブロック・既定 on・変わる試験の取り直し)・Q173 の答え待ち(粒の詰まり)・T-1210 は ADR-0481 の 5 の (a) の確かめ待ち・time_step_tree を main で 1 回・wt6 t-1164 はまだ。
+次の番号は **D-677・ADR-0479・T-1189・Q174**(本体)。司令塔の次は T-1220・ADR-0489(COMMANDER)。
+
 **2026-10-26 本体の作業役(7 回目): time_step_tree 合格・clang-format の全体の検査(ずれ 6 を直した)・archmap OK・wt5 035fd1c6・wt2 96e4e152・wt3 656b99bf・wt4 b669fcdf を main へ(試験 25 本合格・push)。T-1176 は設計の詰めだけ(チケットの 1〜10)。**
 次: T-1176 のコード(チケットの「設計の詰め」の順。最初に SfSurfaceSlopeQ16・SfClampColumnSlopeQ16 の GPU の試験と、置かれ方を既定 on にした時に変わる多重解像度の試験を数える)・wt6 t-1164 はまだマージしない(決定性と費用)・multires_sparse_test の 6 件(wt3)・time_step_tree を main で 1 回。
 次の番号は **D-677・ADR-0479・T-1188・Q173**(本体)。司令塔が作業役に配る次は T-1218・ADR-0489(COMMANDER。wt2 T-1206〜T-1208・wt3 T-1209〜T-1211・wt4 T-1212〜T-1214・wt6 T-1215〜T-1217 は配り済み)。

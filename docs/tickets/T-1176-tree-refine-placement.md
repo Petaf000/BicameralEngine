@@ -1,6 +1,6 @@
 # T-1176 木の細かくする段のセルの中身を「置かれ方で配る」(CPU と GPU)
 
-- Status: Doing(2026-10-26 本体: 設計の詰めだけ。コードは次の作業役)
+- Status: Doing(2026-10-26 本体 8 回目: CPU リファレンスと傾きの式の GPU の試験まで。GPU の RefineLevel・既定 on・変わる試験の取り直しは T-1188)
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 2 回分
@@ -12,13 +12,28 @@
 SAME ではなく置かれ方で子 2³ へ配る。欄(SF_FLAG_PLACE_*)は同じ重みを読む(MultiresNest::refinePlacement を木が自分で作る)。
 
 ## 完了条件
-- [ ] 物質の表から置かれ方の値(相 → SF_SETTLE_*・密度・粒の詰まり)を作る(セルの量は µmol なので mg へ。モル質量は表)
-- [ ] 隣の親の列の詰まりを読む(6 方向。隣が別のブロック・別のレベル・無い時の読み方を決める。世界の端は下 = 詰まり切る・上 = 空)・SfSurfaceSlopeQ16
-- [ ] CPU と GPU(shaders/sim/placement_refine.hlsli の回しを RefineLevel から)でビット一致。SfSurfaceSlopeQ16・SfClampColumnSlopeQ16 の GPU の試験(64bit の差と比べを並べる形。T-1159 のメモ)
-- [ ] 気体だけ・詰まり切った・据わる固体のセルは今とビット単位で同じ(今の多重解像度の試験がそのまま通る)。物質ごとの和はビット単位
-- [ ] エネルギーは子の温度が揃う配り(熱容量の重み。T-1157 の一旦の決定)・端数の枠の扱い
-- [ ] 観察の影(RefineShadow)を揃えるか決める(17 §3.2。1 本目は SAME のまま)
-- [ ] 結果が変わる所(砂・水の混ざるセルを細かくする場面)の比べ: 0.25 m の 25° の斜面で空気の速さ(T-1106 の 2.8 m/s → 1 mm/s)
+- [x] 物質の表から置かれ方の値を作る: 相の印 RxSpecies::flags に RX_SPECIES_LIQUID・GRAIN・ANCHORED(ベイクが相と solid_motion から)・
+      体積は µmol × molarVolume ÷ 10^6(SfAmountVolume・SfMaterialVolume・SfAddSettleOf。PlaceMaterial::molarVolumeMm3PerMol)。粒の詰まりは 0 = 100 %(仮・Q173)
+- [~] 隣の親の列の詰まりを読む: **同じ親のブロックの中だけ**(CPU)。ブロックの外・子に覆われたセルは無いと読む(横 → 傾き 0・下 → 詰まり切る・上 → 空)。
+      隣のブロック(索引で同じレベル)を読むのは T-1188(GPU と一緒に。決定性: 1 刻みに 1 つの親は 1 つの要求だけなので、ブロックの外は同じ刻みに別の要求が覆いうる → 刻みの前の写しから読む形が要る)
+- [~] CPU と GPU でビット一致: **傾きの式**(SfColumnSurfaceQ16・SfSurfaceSlopeQ16・SfClampColumnSlopeQ16)は 32bit で計算する形にし、gpu_placement_refine に 8192 件(HW・WARP 合格)。
+      RefineLevel の GPU は T-1188
+- [x] 寄せないセル(気体だけ・詰まり切った・据わる固体・凝縮相が無い)は SAME の写しのまま触らない(道で保証)。物質ごとの和・エネルギーの和はビット単位(tree_refine_placement)
+- [x] エネルギーは熱を子の熱容量の重みで(D-674)・最後の重みのある子が残り。端数の枠は SAME のまま(子 8 つの和 = 親 × 8)
+- [x] 観察の影(RefineShadow)は SAME のまま(1 本目。17 §3.2)
+- [ ] 結果が変わる所の比べ(0.25 m の 25° の斜面で空気の速さ)→ T-1188(既定 on の後)
+
+## 作り(2026-10-26 本体 8 回目)
+- `engine/src/sim/multires_refine_cells.cpp`: `PlaceTreeCell`(数の空間: 子の器 = MR_CELL_VOLUME_MM3〔0.5 m 角 = 1.25 × 10^8 mm³。cell_view の CV_CELL_VOLUME_LEVEL_UNITS と static_assert〕・
+  量 = 親の数 × 8・並びは親の成分の順)→ `sim::PlaceRefineCell(..., 2, 2, V0)`。`nest_detail::PlaceRefineOctantCells` を RefineRequestLevel がセルを写した後・欄を配る前・親を覆う前に呼ぶ。
+  子のセルは量 0 の成分を消して詰める(同じ中身なら同じ並び)。
+- `EnableRefineCellPlacement(nest, table)`: `MultiresNest::refineCells.species` に表を持たせ、`refinePlacement`(欄の重み)も同じ置かれ方に(親を覆う前に呼ばれるので同じ答え)。
+  **既定は空(使わない)**: GPU の RefineLevel がまだ SAME なので、CPU と GPU を比べる世界の結果は今とビット単位で同じ。
+- 1 本目の仮: 溢れを使う世界(wideCells)・一様な親(子は一様のまま)は SAME。物を含むセル(blocked)は木には印が無いので読まない(物の箱は木の外。T-1188 で確かめる)。
+- 32bit の傾きの式: 表面は −1〜2・差は ±3(Q16 で 2^18 未満)・弱める上限は 4 以下なので 32bit に収まる(FX_ASSERT)。64bit の差を作らないので T-1078・T-1159 の形にならない。
+
+## 判断待ち(仮で進めたもの)
+- 【エンジン】粒の詰まり(%)を作り手がパッケージに書くか → **QUESTIONS Q173**。仮 = 書かない・0(= 100 %。粒の間に隙間なし)。取り消しは表の値を足すだけ(式は前から詰まりを読む)。
 
 ## メモ・参考
 - GPU の子の番号は MrChildCell の j。CPU リファレンスの PlacedChildren とは sim::PlaceIndexOfMrChild で写す。
@@ -50,3 +65,5 @@ SAME ではなく置かれ方で子 2³ へ配る。欄(SF_FLAG_PLACE_*)は同�
 
 ## 作業ログ
 - 2026-10-26 本体: 4 本のマージと試験の待ちの間に、木のセルの単位(濃度)・µmol と molarVolume・端数は SAME・D-674 の熱容量の重み・隣の 15 セル・GPU の形を詰めた(上の 1〜10)。コードはまだ。
+- 2026-10-26 本体 8 回目: 傾きの式を 32bit に(GPU の試験 8192 件・HW と WARP 合格)・相の印とモル体積の体積・CPU の木の細かくする段のセルの中身(既定は使わない)・tree_refine_placement。
+  GPU の RefineLevel・隣のブロック・既定 on・変わる試験の数えと取り直しは T-1188 に分けた。
