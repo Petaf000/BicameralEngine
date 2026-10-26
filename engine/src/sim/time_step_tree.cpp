@@ -163,8 +163,8 @@ namespace bicameral::sim {
                 const uint32_t gap = neighbor.kind == MR_NEIGHBOR_SAME ? 0 : neighbor.gap;
                 layout.faces.push_back({.a = id,
                                         .b = other,
-                                        .blockA = slot,
-                                        .blockB = neighbor.slot,
+                                        .unitA = layout.unitOf[id],
+                                        .unitB = layout.unitOf[other],
                                         .gap = gap,
                                         .coefficient = FaceCoefficient(setup, block.level)});
             }
@@ -182,66 +182,99 @@ namespace bicameral::sim {
             return std::max(setup.groupShift, static_cast<uint32_t>(byLength));
         }
 
-        // 同じレベルで 2^揃える段 ブロック角の枠どうしを、同じ e に揃える相手に(細かさを同じ物の長さで比べる。T-0985・D-640)
+        // 同じレベルで 2^揃える段 ブロック角の枠どうしを、同じ e に揃える相手に(細かさを同じ物の長さで比べる。T-0985・D-640)。
+        // 揃える段があるのは単位が枠の時だけ(UnitEdgeFor)なので、単位 = 枠の最初のセル
         void AddMates(const MultiresNest& nest, const TimeTreeSetup& setup, TimeTreeLayout& layout) {
-            const auto group = [&](uint32_t slot) {
-                const MrBlock& block = nest.blocks[slot];
+            if (layout.unitEdge != MR_BLOCK_EDGE)
+                return;
+
+            const auto group = [&](uint32_t unit) {
+                const MrBlock& block = nest.blocks[SlotOf(unit)];
                 const int64_t edge = int64_t{MR_BLOCK_EDGE} << GroupShiftAt(setup, block.level);
                 return std::array{int64_t{block.level}, FloorDiv(block.originX, edge), FloorDiv(block.originY, edge),
                                   FloorDiv(block.originZ, edge)};
             };
-            for (const uint32_t slot : layout.blocks) {
-                for (const uint32_t other : layout.blocks) {
-                    if (other != slot && group(other) == group(slot))
-                        layout.mates[slot].push_back(other);
+            for (const uint32_t unit : layout.units) {
+                for (const uint32_t other : layout.units) {
+                    if (other != unit && group(other) == group(unit))
+                        layout.mates[unit].push_back(other);
                 }
             }
         }
 
-        // 窓の内の枠(D-669): 箱をいちばん細かいレベル(0 より粗ければレベル 0)の単位に直し、軸ごとに最も近いセルの中心の
-        // 差(重なる軸は 0)の最大が半径の内なら窓の内。半分の長さを避けて 2 倍の単位で比べる
-        void AddWindow(const MultiresNest& nest, const TimeTreeSetup& setup, TimeTreeLayout& layout) {
-            const int32_t unitLevel = std::max(layout.finestLevel, 0);
-            const int64_t doubleRadius = int64_t{2} * (int64_t{setup.windowLevel0Cells} << unitLevel);
-            const auto axisGap = [](int64_t lowA, int64_t cellA, int64_t lowB, int64_t cellB) {
-                const int64_t highA = lowA + cellA * MR_BLOCK_EDGE;
-                const int64_t highB = lowB + cellB * MR_BLOCK_EDGE;
-                if (lowA < highB && lowB < highA)
-                    return int64_t{0};
+        // 刻みを選ぶ単位の一辺(T-1089): 窓の時だけ unitEdgeCells(1・2・4・8)。格子・揃える段・退く道は枠
+        uint32_t UnitEdgeFor(const TimeTreeSetup& setup) {
+            const bool grid = setup.unitByLength && setup.windowLevel0Cells == 0;
+            const bool block = setup.windowLevel0Cells == 0 || grid || setup.groupShift > 0 ||
+                               setup.select == TimeTreeSelect::Jump;
+            if (block)
+                return MR_BLOCK_EDGE;
 
-                const int64_t gap = lowB >= highA ? lowB - highA : lowA - highB;
+            const uint32_t edge = setup.unitEdgeCells;
+            FX_ASSERT(edge == 1 || edge == 2 || edge == 4 || edge == MR_BLOCK_EDGE);
 
-                return 2 * gap + cellA + cellB;
+            return edge;
+        }
+
+        // 単位の最初のセル(枠の中の座標を一辺の倍数に切り下げた所)
+        uint32_t UnitIndex(uint32_t index, uint32_t edge) {
+            const uint32_t mask = ~(edge - 1);
+
+            return MrCellIndex(MrCellX(index) & mask, MrCellY(index) & mask, MrCellZ(index) & mask);
+        }
+
+        // 窓の格子(D-669・T-1089): 刻むセルを最も細かいレベルの格子に置く(粗いセルは 8^差 の格子のセル)。半径は格子のセルの数
+        void AddWindowGrid(const MultiresNest& nest, const TimeTreeSetup& setup, TimeTreeLayout& layout) {
+            TimeTreeWindowGrid& grid = layout.window;
+            grid.level = layout.finestLevel;
+            const uint32_t radius = setup.windowLevel0Cells;
+            grid.radius = grid.level >= 0 ? radius << static_cast<uint32_t>(grid.level)
+                                          : radius >> static_cast<uint32_t>(-grid.level);
+            const auto lowOf = [&](uint32_t id) {
+                const MrBlock& block = nest.blocks[SlotOf(id)];
+                const auto shift = static_cast<uint32_t>(grid.level - block.level);
+                const uint32_t index = IndexOf(id);
+                return std::array{(block.originX + MrCellX(index)) << shift, (block.originY + MrCellY(index)) << shift,
+                                  (block.originZ + MrCellZ(index)) << shift, int64_t{1} << shift};
             };
-            for (const uint32_t slot : layout.blocks) {
-                const MrBlock& a = nest.blocks[slot];
-                const int32_t shiftA = unitLevel - a.level;
-                const int64_t cellA = int64_t{1} << shiftA;
-                for (const uint32_t other : layout.blocks) {
-                    if (other == slot)
-                        continue;
 
-                    const MrBlock& b = nest.blocks[other];
-                    const int32_t shiftB = unitLevel - b.level;
-                    const int64_t cellB = int64_t{1} << shiftB;
-                    const int64_t gap = std::max({axisGap(a.originX << shiftA, cellA, b.originX << shiftB, cellB),
-                                                  axisGap(a.originY << shiftA, cellA, b.originY << shiftB, cellB),
-                                                  axisGap(a.originZ << shiftA, cellA, b.originZ << shiftB, cellB)});
-                    if (gap <= doubleRadius)
-                        layout.window[slot].push_back(other);
+            std::array<int64_t, 3> low{INT64_MAX, INT64_MAX, INT64_MAX};
+            std::array<int64_t, 3> high{INT64_MIN, INT64_MIN, INT64_MIN};
+            for (const uint32_t unit : layout.units) {
+                for (const uint32_t id : layout.unitCells[unit]) {
+                    const auto cell = lowOf(id);
+                    for (size_t axis = 0; axis < 3; ++axis) {
+                        low[axis] = std::min(low[axis], cell[axis]);
+                        high[axis] = std::max(high[axis], cell[axis] + cell[3]);
+                    }
+                }
+            }
+
+            grid.origin = low;
+            for (size_t axis = 0; axis < 3; ++axis)
+                grid.size[axis] = static_cast<uint32_t>(high[axis] - low[axis]);
+
+            grid.unitOf.assign(size_t{grid.size[0]} * grid.size[1] * grid.size[2], NO_TIME_TREE_UNIT);
+            for (const uint32_t unit : layout.units) {
+                for (const uint32_t id : layout.unitCells[unit]) {
+                    const auto cell = lowOf(id);
+                    const auto x0 = static_cast<uint32_t>(cell[0] - low[0]);
+                    const auto y0 = static_cast<uint32_t>(cell[1] - low[1]);
+                    const auto z0 = static_cast<uint32_t>(cell[2] - low[2]);
+                    const auto edge = static_cast<uint32_t>(cell[3]);
+                    for (uint32_t z = z0; z < z0 + edge; ++z) {
+                        for (uint32_t y = y0; y < y0 + edge; ++y) {
+                            for (uint32_t x = x0; x < x0 + edge; ++x)
+                                grid.unitOf[(size_t{z} * grid.size[1] + y) * grid.size[0] + x] = unit;
+                        }
+                    }
                 }
             }
         }
 
-        TimeTreeLayout MakeLayout(const MultiresNest& nest, const TimeTreeSetup& setup) {
-            TimeTreeLayout layout;
+        // 単位を作る(セルの単位・単位のセル。単位は番号の順)
+        void AddUnits(const MultiresNest& nest, TimeTreeLayout& layout) {
             const uint32_t slots = nest.capacity.worldBlocks;
-            layout.stepped.assign(size_t{slots} * MR_BLOCK_CELLS, 0);
-            layout.blockFaces.resize(slots);
-            layout.neighbors.resize(slots);
-            layout.mates.resize(slots);
-            layout.window.resize(slots);
-            layout.finestLevel = nest.capacity.rootLevel;
             for (uint32_t slot = 0; slot < slots; ++slot) {
                 const MrBlock& block = nest.blocks[slot];
                 if (block.kind != MR_BLOCK_REAL)
@@ -253,20 +286,47 @@ namespace bicameral::sim {
                     if (MrIsCoveredCell(block, index))
                         continue;
 
-                    layout.stepped[CellId(slot, index)] = 1;
-                    AddCellFaces(nest, setup, layout, slot, index);
+                    const uint32_t id = CellId(slot, index);
+                    const uint32_t unit = CellId(slot, UnitIndex(index, layout.unitEdge));
+                    layout.stepped[id] = 1;
+                    layout.unitOf[id] = unit;
+                    if (layout.unitCells[unit].empty())
+                        layout.units.push_back(unit);
+
+                    layout.unitCells[unit].push_back(id);
+                }
+            }
+
+            std::ranges::sort(layout.units);
+        }
+
+        TimeTreeLayout MakeLayout(const MultiresNest& nest, const TimeTreeSetup& setup) {
+            TimeTreeLayout layout;
+            const size_t cells = size_t{nest.capacity.worldBlocks} * MR_BLOCK_CELLS;
+            layout.stepped.assign(cells, 0);
+            layout.unitEdge = UnitEdgeFor(setup);
+            layout.unitOf.assign(cells, NO_TIME_TREE_UNIT);
+            layout.unitCells.resize(cells);
+            layout.unitFaces.resize(cells);
+            layout.neighbors.resize(cells);
+            layout.mates.resize(cells);
+            layout.finestLevel = nest.capacity.rootLevel;
+            AddUnits(nest, layout);
+            for (const uint32_t slot : layout.blocks) {
+                for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                    if (layout.stepped[CellId(slot, index)] != 0)
+                        AddCellFaces(nest, setup, layout, slot, index);
                 }
             }
 
             for (uint32_t f = 0; f < layout.faces.size(); ++f) {
                 const TimeTreeFace& face = layout.faces[f];
-                layout.blockFaces[face.blockA].push_back(f);
-                if (face.blockB == face.blockA)
+                layout.unitFaces[face.unitA].push_back(f);
+                if (face.unitB == face.unitA)
                     continue;
 
-                layout.blockFaces[face.blockB].push_back(f);
-                for (const auto& [from, to] :
-                     {std::pair{face.blockA, face.blockB}, std::pair{face.blockB, face.blockA}}) {
+                layout.unitFaces[face.unitB].push_back(f);
+                for (const auto& [from, to] : {std::pair{face.unitA, face.unitB}, std::pair{face.unitB, face.unitA}}) {
                     std::vector<uint32_t>& list = layout.neighbors[from];
                     if (std::ranges::find(list, to) == list.end())
                         list.push_back(to);
@@ -278,7 +338,7 @@ namespace bicameral::sim {
 
             AddMates(nest, setup, layout);
             if (setup.windowLevel0Cells > 0)
-                AddWindow(nest, setup, layout);
+                AddWindowGrid(nest, setup, layout);
 
             return layout;
         }
@@ -363,18 +423,37 @@ namespace bicameral::sim {
             world.steps.sleepMean[slot] = SfSleepValue(SfMeanValue(sum));
         }
 
-        // 枠 slot の歩の変化を真実へ。変化(精度の単位 × 2^16 の最大)を返す
-        uint64_t SettleBlock(const TimeTreeSetup& setup, TimeTreeWorld& world, uint32_t slot) {
-            MultiresNest& nest = world.nest;
+        bool HasDelta(const TimeTreeSteps& steps, uint32_t id) {
+            return steps.deltaEnergy[id] != 0 || steps.deltaReactant[id] != 0;
+        }
+
+        // 歩を閉じた単位が変化なしだった枠を、出来事の区切りでまとめて眠らせてみる(枠の全部のセルに歩の変化が無い時だけ。
+        // 単位が枠より小さい時は、ほかの単位の歩の途中の変化が残る枠は眠らせない。T-1089)
+        void SleepQuietBlocks(TimeTreeWorld& world) {
             TimeTreeSteps& steps = world.steps;
-            bool any = false;
-            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-                const uint32_t id = CellId(slot, index);
-                any = any || steps.deltaEnergy[id] != 0 || steps.deltaReactant[id] != 0;
+            for (const uint32_t slot : steps.quietBlocks) {
+                bool any = false;
+                for (uint32_t index = 0; index < MR_BLOCK_CELLS && !any; ++index)
+                    any = HasDelta(steps, CellId(slot, index));
+
+                if (!any)
+                    SleepBlock(world, slot);
             }
 
+            steps.quietBlocks.clear();
+        }
+
+        // 単位 unit の歩の変化を真実へ。変化(精度の単位 × 2^16 の最大)を返す
+        uint64_t SettleUnit(const TimeTreeSetup& setup, TimeTreeWorld& world, uint32_t unit) {
+            MultiresNest& nest = world.nest;
+            TimeTreeSteps& steps = world.steps;
+            const uint32_t slot = SlotOf(unit);
+            const std::vector<uint32_t>& cells = world.layout.unitCells[unit];
+            const bool any = std::ranges::any_of(cells, [&](uint32_t id) { return HasDelta(steps, id); });
             if (!any) {
-                SleepBlock(world, slot);
+                if (std::ranges::find(steps.quietBlocks, slot) == steps.quietBlocks.end())
+                    steps.quietBlocks.push_back(slot);
+
                 return 0;
             }
 
@@ -386,11 +465,8 @@ namespace bicameral::sim {
             }
 
             uint64_t change = 0;
-            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-                const uint32_t id = CellId(slot, index);
-                if (world.layout.stepped[id] == 0)
-                    continue;
-
+            for (const uint32_t id : cells) {
+                const uint32_t index = IndexOf(id);
                 int64_t& deltaEnergy = steps.deltaEnergy[id];
                 int64_t& deltaReactant = steps.deltaReactant[id];
                 const uint64_t magnitude = FxAbsU64(deltaEnergy);
@@ -412,28 +488,29 @@ namespace bicameral::sim {
             return change;
         }
 
-        void CloseBlock(const TimeTreeSetup& setup, TimeTreeWorld& world, uint32_t slot, bool measured) {
+        void CloseUnit(const TimeTreeSetup& setup, TimeTreeWorld& world, uint32_t unit, bool measured) {
             TimeTreeSteps& steps = world.steps;
-            const uint64_t change = SettleBlock(setup, world, slot);
-            steps.open[slot] = 0;
+            const uint64_t change = SettleUnit(setup, world, unit);
+            steps.open[unit] = 0;
             if (!measured)
                 return;
 
             if (setup.rule == TimeStepRule::Fixed)
-                steps.desired[slot] = setup.fixedExponent;
+                steps.desired[unit] = setup.fixedExponent;
             else if (setup.select == TimeTreeSelect::Jump)
                 return;  // 退く道: 決めるのは上限の倍数の刻みの試しの解きだけ(1 刻みの変化は丸めの揺れで測れない)
             else
-                steps.desired[slot] = TsDesiredExponent(TS_RULE_CHANGE, steps.exponent[slot], change, setup.budgetQ16);
+                steps.desired[unit] = TsDesiredExponent(TS_RULE_CHANGE, steps.exponent[unit], change, setup.budgetQ16);
         }
 
         // 歩を刻み tick で打ち切る(記録を経った刻みの割合に縮めてから閉じる。保存はそのまま)
-        void TruncateBlock(const TimeTreeSetup& setup, TimeTreeWorld& world, uint32_t slot, uint64_t tick) {
+        void TruncateUnit(const TimeTreeSetup& setup, TimeTreeWorld& world, uint32_t unit, uint64_t tick) {
             TimeTreeSteps& steps = world.steps;
-            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-                const uint32_t id = CellId(slot, index);
+            const uint32_t slot = SlotOf(unit);
+            for (const uint32_t id : world.layout.unitCells[unit]) {
+                const uint32_t index = IndexOf(id);
                 TimeTreeCellRecord& record = steps.cellRecords[id];
-                if (world.layout.stepped[id] == 0 || !Crosses(record.start, record.ticks, tick))
+                if (!Crosses(record.start, record.ticks, tick))
                     continue;
 
                 const uint64_t kept = tick - record.start;
@@ -448,11 +525,11 @@ namespace bicameral::sim {
                 record = scaled;
             }
 
-            for (const uint32_t f : world.layout.blockFaces[slot])
+            for (const uint32_t f : world.layout.unitFaces[unit])
                 CutFaceRecord(world, f, tick);
 
-            CloseBlock(setup, world, slot, false);
-            steps.desired[slot] = steps.touched[slot] != 0 ? 0 : steps.exponent[slot];
+            CloseUnit(setup, world, unit, false);
+            steps.desired[unit] = steps.touched[unit] != 0 ? 0 : steps.exponent[unit];
             ++steps.truncations;
         }
 
@@ -460,7 +537,7 @@ namespace bicameral::sim {
 
     namespace {
 
-        // --- 列(同じ刻みに同じ e で始まる枠の集まり)の歩を始める: 反応・解き・記録 ---
+        // --- 列(同じ刻みに同じ e で始まる単位の集まり)の歩を始める: 反応・解き・記録 ---
 
         // V の回数(法則の定数の表。e ごと。ADR-0465 の決めたこと 1)
         uint32_t CyclesFor(const TimeTreeSetup& setup, int32_t exponent) {
@@ -470,7 +547,7 @@ namespace bicameral::sim {
         struct Span {
             int32_t exponent = 0;
             uint64_t start = 0;
-            std::vector<uint32_t> slots;
+            std::vector<uint32_t> units;
         };
 
         struct SpanSystem {
@@ -499,13 +576,11 @@ namespace bicameral::sim {
             const uint64_t ticks = Ticks(span.exponent);
             const FxU128 ground = TimesTicks(ImWide(setup.groundQ32), span.exponent);
             const FxU128 heatFactor = {0, 1ull << 48};
-            for (const uint32_t slot : span.slots) {
+            for (const uint32_t unit : span.units) {
+                const uint32_t slot = SlotOf(unit);
                 const MrBlock& block = world.nest.blocks[slot];
-                for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-                    const uint32_t id = CellId(slot, index);
-                    if (world.layout.stepped[id] == 0)
-                        continue;
-
+                for (const uint32_t id : world.layout.unitCells[unit]) {
+                    const uint32_t index = IndexOf(id);
                     const auto node = static_cast<uint32_t>(built.cells.size());
                     const RxCell cell = LoadNestCell(world.nest, slot, index);
                     const int64_t temperature = TimeTreeTemperatureQ16(setup, cell.energy);
@@ -534,8 +609,8 @@ namespace bicameral::sim {
         void AddFaces(const TimeTreeSetup& setup, const TimeTreeWorld& world, const Span& span,
                       std::span<const int32_t> next, const std::vector<uint32_t>& nodeOf, SpanSystem& built) {
             std::vector<uint8_t> seen(world.layout.faces.size(), 0);
-            for (const uint32_t slot : span.slots) {
-                for (const uint32_t f : world.layout.blockFaces[slot]) {
+            for (const uint32_t unit : span.units) {
+                for (const uint32_t f : world.layout.unitFaces[unit]) {
                     if (seen[f] != 0)
                         continue;
 
@@ -568,7 +643,7 @@ namespace bicameral::sim {
                     else
                         built.system.fixedFaces.push_back({.node = nodeB, .coefficient = coarse, .value = 0});
 
-                    const uint32_t outside = nodeA != NO_NODE ? face.blockB : face.blockA;
+                    const uint32_t outside = nodeA != NO_NODE ? face.unitB : face.unitA;
                     if (next[outside] < 0 || next[outside] > span.exponent)
                         built.ownedFaces.push_back(f);
                 }
@@ -584,27 +659,23 @@ namespace bicameral::sim {
             std::vector<uint32_t> nodeOf;
         };
 
-        // 段の重みを使い回せるかの測り(T-1090。結果に効かない): 枠の組が変わったか・温度の帯が変わったセルがあるか
+        // 段の重みを使い回せるかの測り(T-1090。結果に効かない): 単位の組が変わったか・温度の帯が変わったセルがあるか
         void MeasureReweights(const TimeTreeSetup& setup, TimeTreeWorld& world, const Span& span) {
             constexpr std::array<int64_t, 3> BAND_Q16 = {int64_t{1000} << 16, int64_t{10000} << 16,
                                                          int64_t{100000} << 16};
             TimeTreeSteps& steps = world.steps;
             ++steps.zeroSolves;
-            const bool reshaped = span.slots != steps.lastZeroSlots;
+            const bool reshaped = span.units != steps.lastZeroSlots;
             steps.zeroReshaped += reshaped ? 1u : 0u;
-            steps.lastZeroSlots = span.slots;
+            steps.lastZeroSlots = span.units;
             for (size_t b = 0; b < BAND_Q16.size(); ++b) {
                 std::vector<int64_t>& bands = steps.cellBand[b];
                 if (bands.size() != world.layout.stepped.size())
                     bands.assign(world.layout.stepped.size(), INT64_MIN);
 
                 bool changed = false;
-                for (const uint32_t slot : span.slots) {
-                    for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-                        const uint32_t id = CellId(slot, index);
-                        if (world.layout.stepped[id] == 0)
-                            continue;
-
+                for (const uint32_t unit : span.units) {
+                    for (const uint32_t id : world.layout.unitCells[unit]) {
                         const int64_t band = FloorDiv(CellTemperature(setup, world, id), BAND_Q16[b]);
                         changed = changed || bands[id] != band;
                         bands[id] = band;
@@ -650,12 +721,9 @@ namespace bicameral::sim {
             if (span.exponent == 0) {
                 MeasureReweights(setup, world, span);
                 steps.zeroCellSteps += solved.built.cells.size();
-                for (const uint32_t slot : span.slots) {
-                    if (steps.desired[slot] == 0)
-                        continue;
-
-                    for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
-                        steps.forcedCellSteps += world.layout.stepped[CellId(slot, index)];
+                for (const uint32_t unit : span.units) {
+                    if (steps.desired[unit] != 0)
+                        steps.forcedCellSteps += world.layout.unitCells[unit].size();
                 }
             }
 
@@ -699,12 +767,12 @@ namespace bicameral::sim {
                 ApplyFaceRecord(world, f, record, 1);
             }
 
-            // --- 枠の歩 ---
-            for (const uint32_t slot : span.slots) {
-                steps.exponent[slot] = span.exponent;
-                steps.start[slot] = span.start;
-                steps.end[slot] = span.start + ticks;
-                steps.open[slot] = 1;
+            // --- 単位の歩 ---
+            for (const uint32_t unit : span.units) {
+                steps.exponent[unit] = span.exponent;
+                steps.start[unit] = span.start;
+                steps.end[unit] = span.start + ticks;
+                steps.open[unit] = 1;
             }
         }
 
@@ -712,49 +780,56 @@ namespace bicameral::sim {
 
     namespace {
 
-        // --- 出来事(刻み tick): 終えた歩を閉じる → e を選ぶ(隣の差 1 段・長すぎる隣は打ち切る)→ 列ごとに歩を始める ---
+        // --- 出来事(刻み tick): 終えた歩を閉じる → e を選ぶ(窓・隣の差 1 段・長すぎる隣は打ち切る)→ 列ごとに歩を始める ---
+        // e は単位(layout.units。既定はセル。T-1089)ごと
 
         struct Choice {
-            std::vector<int32_t> next;  // -1 = 歩の途中(か刻まない枠)
+            std::vector<int32_t> next;  // 単位ごと。-1 = 歩の途中(か単位でない番号)
             uint64_t tick = 0;
             int32_t cap = 0;
         };
 
-        int32_t Current(const TimeTreeSteps& steps, const Choice& choice, uint32_t slot) {
-            return choice.next[slot] >= 0 ? choice.next[slot] : steps.exponent[slot];
+        int32_t Current(const TimeTreeSteps& steps, const Choice& choice, uint32_t unit) {
+            return choice.next[unit] >= 0 ? choice.next[unit] : steps.exponent[unit];
         }
 
-        // slot の e を other の e + allowed までに(長すぎれば、始める側なら縮め、歩の途中なら打ち切って始め直す)。変えたら true
-        // 歩を終えた枠の次の e(退く道は 0 か上限だけ。上限で始められない刻みなら毎刻み)
-        int32_t FirstNext(const TimeTreeSetup& setup, const TimeTreeSteps& steps, const Choice& choice, uint32_t slot) {
+        // 歩を終えた単位の次の e(退く道は 0 か上限だけ。上限で始められない刻みなら毎刻み)
+        int32_t FirstNext(const TimeTreeSetup& setup, const TimeTreeSteps& steps, const Choice& choice, uint32_t unit) {
             if (setup.select != TimeTreeSelect::Jump)
-                return std::clamp(steps.desired[slot], 0, choice.cap);
+                return std::clamp(steps.desired[unit], 0, choice.cap);
 
-            const bool jump = steps.desired[slot] >= setup.maxExponent && choice.cap >= setup.maxExponent;
+            const bool jump = steps.desired[unit] >= setup.maxExponent && choice.cap >= setup.maxExponent;
 
             return jump ? setup.maxExponent : 0;
         }
 
-        bool LimitTo(const TimeTreeSetup& setup, TimeTreeWorld& world, Choice& choice, uint32_t slot, uint32_t other,
-                     int32_t allowed) {
+        // unit の e を limit までに(長すぎれば、始める側なら縮め、歩の途中なら打ち切って始め直す)。変えたら true
+        bool LimitToExponent(const TimeTreeSetup& setup, TimeTreeWorld& world, Choice& choice, uint32_t unit,
+                             int32_t limit) {
             TimeTreeSteps& steps = world.steps;
-            if (Current(steps, choice, slot) <= Current(steps, choice, other) + allowed)
+            if (Current(steps, choice, unit) <= limit)
                 return false;
 
-            if (choice.next[slot] < 0) {
-                TruncateBlock(setup, world, slot, choice.tick);
-                choice.next[slot] = FirstNext(setup, steps, choice, slot);
+            if (choice.next[unit] < 0) {
+                TruncateUnit(setup, world, unit, choice.tick);
+                choice.next[unit] = FirstNext(setup, steps, choice, unit);
             }
 
-            choice.next[slot] = std::min(choice.next[slot], Current(steps, choice, other) + allowed);
+            choice.next[unit] = std::min(choice.next[unit], limit);
 
             return true;
         }
 
-        // 前線の緩衝を単位で(T-1074): 動いている単位から面の隣をたどって frontBufferUnits 単位までの枠に印
-        std::vector<uint8_t> BufferedBlocks(const TimeTreeSetup& setup, const TimeTreeWorld& world) {
+        // unit の e を other の e + allowed までに
+        bool LimitTo(const TimeTreeSetup& setup, TimeTreeWorld& world, Choice& choice, uint32_t unit, uint32_t other,
+                     int32_t allowed) {
+            return LimitToExponent(setup, world, choice, unit, Current(world.steps, choice, other) + allowed);
+        }
+
+        // 前線の緩衝を単位で(T-1074): 動いている組から面の隣をたどって frontBufferUnits 組までの単位に印
+        std::vector<uint8_t> BufferedUnits(const TimeTreeSetup& setup, const TimeTreeWorld& world) {
             const TimeTreeSteps& steps = world.steps;
-            std::vector<uint32_t> distance(world.nest.blocks.size(), UINT32_MAX);
+            std::vector<uint32_t> distance(world.layout.unitOf.size(), UINT32_MAX);
             std::vector<uint32_t> frontier;
             const auto reach = [&](uint32_t slot, uint32_t d, std::vector<uint32_t>& into) {
                 if (distance[slot] <= d)
@@ -769,9 +844,9 @@ namespace bicameral::sim {
                     }
                 }
             };
-            for (const uint32_t slot : world.layout.blocks) {
-                if (steps.desired[slot] == 0)
-                    reach(slot, 0, frontier);
+            for (const uint32_t unit : world.layout.units) {
+                if (steps.desired[unit] == 0)
+                    reach(unit, 0, frontier);
             }
 
             for (uint32_t d = 1; d <= setup.frontBufferUnits && !frontier.empty(); ++d) {
@@ -784,89 +859,116 @@ namespace bicameral::sim {
                 frontier = std::move(next);
             }
 
-            std::vector<uint8_t> buffered(world.nest.blocks.size(), 0);
-            for (const uint32_t slot : world.layout.blocks)
-                buffered[slot] = distance[slot] <= setup.frontBufferUnits ? 1 : 0;
+            std::vector<uint8_t> buffered(world.layout.unitOf.size(), 0);
+            for (const uint32_t unit : world.layout.units)
+                buffered[unit] = distance[unit] <= setup.frontBufferUnits ? 1 : 0;
 
             return buffered;
         }
 
-        // 窓の上限(D-669): 枠ごとに、窓の内の枠の望みの e の最小(局所の上限まで。世界の時計にそろえる上限は入れない。T-1174)
+        // 格子の 1 軸に沿って、半径 radius の中の最小に(端の外は数えない)
+        void MinAlongAxis(std::vector<int8_t>& values, const std::array<uint32_t, 3>& size, size_t axis,
+                          uint32_t radius) {
+            const std::array<size_t, 3> stride{1, size[0], size_t{size[0]} * size[1]};
+            const uint32_t length = size[axis];
+            const size_t lines = values.size() / length;
+            std::vector<int8_t> line(length);
+            for (size_t l = 0; l < lines; ++l) {
+                // l を、axis を除いた 2 軸の座標に直して線の初めを出す
+                size_t rest = l;
+                size_t first = 0;
+                for (size_t other = 0; other < 3; ++other) {
+                    if (other == axis)
+                        continue;
+
+                    first += (rest % size[other]) * stride[other];
+                    rest /= size[other];
+                }
+
+                for (uint32_t i = 0; i < length; ++i)
+                    line[i] = values[first + i * stride[axis]];
+
+                for (uint32_t i = 0; i < length; ++i) {
+                    const uint32_t low = i > radius ? i - radius : 0;
+                    const uint32_t high = std::min(i + radius, length - 1);
+                    int8_t least = line[low];
+                    for (uint32_t j = low + 1; j <= high; ++j)
+                        least = std::min(least, line[j]);
+
+                    values[first + i * stride[axis]] = least;
+                }
+            }
+        }
+
+        // 窓の上限(D-669・T-1089): 単位ごとに、窓の内の単位の望みの e の最小(局所の上限まで。世界の時計にそろえる上限は
+        // 入れない。T-1174)。窓の格子に望みを置き、軸ごとの 3 回の最小を取り、単位の格子のセルの最小を読む(自分も入る)
         std::vector<int32_t> WindowCaps(const TimeTreeSetup& setup, const TimeTreeWorld& world) {
             const TimeTreeSteps& steps = world.steps;
-            std::vector<int32_t> caps(world.nest.blocks.size(), setup.maxExponent);
-            for (const uint32_t slot : world.layout.blocks) {
-                for (const uint32_t other : world.layout.window[slot])
-                    caps[slot] = std::min(caps[slot], std::clamp(steps.desired[other], 0, setup.maxExponent));
+            const TimeTreeWindowGrid& grid = world.layout.window;
+            const auto top = static_cast<int8_t>(setup.maxExponent);
+            std::vector<int8_t> values(grid.unitOf.size(), top);
+            for (size_t v = 0; v < values.size(); ++v) {
+                const uint32_t unit = grid.unitOf[v];
+                if (unit != NO_TIME_TREE_UNIT)
+                    values[v] = static_cast<int8_t>(std::clamp(steps.desired[unit], 0, setup.maxExponent));
+            }
+
+            for (size_t axis = 0; axis < 3; ++axis)
+                MinAlongAxis(values, grid.size, axis, grid.radius);
+
+            std::vector<int32_t> caps(world.layout.unitOf.size(), setup.maxExponent);
+            for (size_t v = 0; v < values.size(); ++v) {
+                const uint32_t unit = grid.unitOf[v];
+                if (unit != NO_TIME_TREE_UNIT)
+                    caps[unit] = std::min<int32_t>(caps[unit], values[v]);
             }
 
             return caps;
         }
 
-        // slot の e を窓の上限までに(歩の途中で長ければ打ち切って始め直す)。変えたら true
-        bool LimitToWindow(const TimeTreeSetup& setup, TimeTreeWorld& world, Choice& choice, uint32_t slot,
-                           int32_t cap) {
-            if (Current(world.steps, choice, slot) <= cap)
-                return false;
-
-            if (choice.next[slot] < 0) {
-                TruncateBlock(setup, world, slot, choice.tick);
-                choice.next[slot] = FirstNext(setup, world.steps, choice, slot);
-            }
-
-            choice.next[slot] = std::min(choice.next[slot], cap);
-
-            return true;
-        }
-
-        // 隣どうしの差は 1 段まで・揃える相手(groupShift)とは同じ e
+        // 窓の上限・隣どうしの差は 1 段まで・揃える相手(groupShift)とは同じ e
         std::vector<int32_t> ChooseExponents(const TimeTreeSetup& setup, TimeTreeWorld& world, uint64_t tick) {
             TimeTreeSteps& steps = world.steps;
-            Choice choice{.next = std::vector<int32_t>(world.nest.blocks.size(), -1),
+            Choice choice{.next = std::vector<int32_t>(world.layout.unitOf.size(), -1),
                           .tick = tick,
                           .cap = std::min(TsAlignedCap(tick), setup.maxExponent)};
-            for (const uint32_t slot : world.layout.blocks) {
-                if (steps.open[slot] == 0)
-                    choice.next[slot] = FirstNext(setup, steps, choice, slot);
+            for (const uint32_t unit : world.layout.units) {
+                if (steps.open[unit] == 0)
+                    choice.next[unit] = FirstNext(setup, steps, choice, unit);
             }
 
             // 退く道: 毎刻みと決まった枠(望みの e が 0)の隣は毎刻み。ほかの隣とは差を問わない
             const bool jump = setup.select == TimeTreeSelect::Jump;
             const bool units = setup.frontBufferUnits > 0 && !jump;
-            const std::vector<uint8_t> buffered = units ? BufferedBlocks(setup, world) : std::vector<uint8_t>{};
+            const std::vector<uint8_t> buffered = units ? BufferedUnits(setup, world) : std::vector<uint8_t>{};
             const bool window = setup.windowLevel0Cells > 0 && !jump;
             const std::vector<int32_t> windowCaps = window ? WindowCaps(setup, world) : std::vector<int32_t>{};
             bool changed = true;
             while (changed) {
                 changed = false;
-                for (const uint32_t slot : world.layout.blocks) {
-                    if (units && buffered[slot] != 0 && Current(steps, choice, slot) > 0) {
-                        // 0 に縮める(歩の途中なら打ち切る)= 長さ 0 の相手に揃えるのと同じ
-                        if (choice.next[slot] < 0) {
-                            TruncateBlock(setup, world, slot, choice.tick);
-                            choice.next[slot] = FirstNext(setup, steps, choice, slot);
-                        }
-
-                        choice.next[slot] = 0;
-                        changed = true;
-                    }
+                for (const uint32_t unit : world.layout.units) {
+                    // 緩衝は 0 に縮める(歩の途中なら打ち切る)= 長さ 0 の相手に揃えるのと同じ
+                    if (units && buffered[unit] != 0)
+                        changed = LimitToExponent(setup, world, choice, unit, 0) || changed;
 
                     if (window)
-                        changed = LimitToWindow(setup, world, choice, slot, windowCaps[slot]) || changed;
+                        changed = LimitToExponent(setup, world, choice, unit, windowCaps[unit]) || changed;
 
-                    for (const uint32_t neighbor : world.layout.neighbors[slot]) {
+                    for (const uint32_t neighbor : world.layout.neighbors[unit]) {
                         const bool active = steps.desired[neighbor] == 0;
                         if (jump && !active)
                             continue;
 
                         const int32_t allowed = jump || (setup.frontBuffer && !units && active) ? 0 : 1;
-                        changed = LimitTo(setup, world, choice, slot, neighbor, allowed) || changed;
+                        changed = LimitTo(setup, world, choice, unit, neighbor, allowed) || changed;
                     }
 
-                    for (const uint32_t mate : world.layout.mates[slot])
-                        changed = LimitTo(setup, world, choice, slot, mate, 0) || changed;
+                    for (const uint32_t mate : world.layout.mates[unit])
+                        changed = LimitTo(setup, world, choice, unit, mate, 0) || changed;
                 }
             }
+
+            SleepQuietBlocks(world);  // 打ち切った単位の枠
 
             return choice.next;
         }
@@ -880,21 +982,18 @@ namespace bicameral::sim {
                 if (span.span.exponent == 0)
                     continue;
 
-                for (const uint32_t slot : span.span.slots) {
+                for (const uint32_t unit : span.span.units) {
                     uint64_t change = 0;
-                    for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-                        const uint32_t node = span.nodeOf[CellId(slot, index)];
-                        if (node != NO_NODE)
-                            change = std::max(change, FxAbsU64(span.state.values[node]));
-                    }
+                    for (const uint32_t id : world.layout.unitCells[unit])
+                        change = std::max(change, FxAbsU64(span.state.values[span.nodeOf[id]]));
 
                     if (change <= setup.budgetQ16)
                         continue;
 
                     if (setup.select == TimeTreeSelect::Jump)
-                        steps.desired[slot] = 0;
+                        steps.desired[unit] = 0;
                     else
-                        steps.desired[slot] = TsDesiredExponent(TS_RULE_CHANGE, span.span.exponent, change,
+                        steps.desired[unit] = TsDesiredExponent(TS_RULE_CHANGE, span.span.exponent, change,
                                                                 setup.budgetQ16);
                     ++steps.retakes;
                     any = true;
@@ -904,18 +1003,18 @@ namespace bicameral::sim {
             return any;
         }
 
-        // 列: 始める枠を e ごとに(長い e から。面の持ち主は短い側)解く
+        // 列: 始める単位を e ごとに(長い e から。面の持ち主は短い側)解く
         std::vector<SolvedSpan> SolveSpans(const TimeTreeSetup& setup, TimeTreeWorld& world,
                                            std::span<const int32_t> next) {
             std::vector<SolvedSpan> solved;
             for (int32_t exponent = setup.maxExponent; exponent >= 0; --exponent) {
                 Span span{.exponent = exponent, .start = world.steps.tick};
-                for (const uint32_t slot : world.layout.blocks) {
-                    if (next[slot] == exponent)
-                        span.slots.push_back(slot);
+                for (const uint32_t unit : world.layout.units) {
+                    if (next[unit] == exponent)
+                        span.units.push_back(unit);
                 }
 
-                if (!span.slots.empty())
+                if (!span.units.empty())
                     solved.push_back(SolveSpan(setup, world, span, next));
             }
 
@@ -925,23 +1024,24 @@ namespace bicameral::sim {
         void ProcessEvent(const TimeTreeSetup& setup, TimeTreeWorld& world) {
             TimeTreeSteps& steps = world.steps;
             const uint64_t tick = steps.tick;
-            for (const uint32_t slot : world.layout.blocks) {
-                if (steps.open[slot] != 0 && steps.end[slot] == tick)
-                    CloseBlock(setup, world, slot, true);
+            for (const uint32_t unit : world.layout.units) {
+                if (steps.open[unit] != 0 && steps.end[unit] == tick)
+                    CloseUnit(setup, world, unit, true);
             }
 
-            for (const uint32_t slot : world.layout.blocks) {
-                if (steps.touched[slot] != 0)
-                    steps.desired[slot] = 0;
+            SleepQuietBlocks(world);
+            for (const uint32_t unit : world.layout.units) {
+                if (steps.touched[unit] != 0)
+                    steps.desired[unit] = 0;
             }
 
             // --- e を選んで解く。2 通り目は予算を超えた枠を縮めて選び直す(望みの e は減るだけなので終わる)---
             // 退く道: 上限の倍数の刻みで、触られていない枠は全部「一気に進めてみる」から(試しの解きで毎刻みへ落とす)
             const bool jump = setup.select == TimeTreeSelect::Jump && setup.rule != TimeStepRule::Fixed;
             if (jump && TsAlignedCap(tick) >= setup.maxExponent) {
-                for (const uint32_t slot : world.layout.blocks) {
-                    if (steps.open[slot] == 0 && steps.touched[slot] == 0)
-                        steps.desired[slot] = setup.maxExponent;
+                for (const uint32_t unit : world.layout.units) {
+                    if (steps.open[unit] == 0 && steps.touched[unit] == 0)
+                        steps.desired[unit] = setup.maxExponent;
                 }
             }
 
@@ -954,16 +1054,16 @@ namespace bicameral::sim {
 
             // --- 書く(長い e から。値は真実だけを読んだので順は結果に効かない)---
             for (const SolvedSpan& span : solved) {
-                for (const uint32_t slot : span.span.slots)
-                    steps.touched[slot] = 0;
+                for (const uint32_t unit : span.span.units)
+                    steps.touched[unit] = 0;
 
                 CommitSpan(setup, world, span);
             }
 
-            for (const uint32_t slot : world.layout.blocks) {
-                for (const uint32_t neighbor : world.layout.neighbors[slot])
+            for (const uint32_t unit : world.layout.units) {
+                for (const uint32_t neighbor : world.layout.neighbors[unit])
                     steps.widestNeighborGap = std::max(steps.widestNeighborGap,
-                                                       std::abs(steps.exponent[slot] - steps.exponent[neighbor]));
+                                                       std::abs(steps.exponent[unit] - steps.exponent[neighbor]));
             }
 
             ++steps.events;
@@ -990,13 +1090,14 @@ namespace bicameral::sim {
         const size_t cells = world.layout.stepped.size();
         const int32_t first = setup.rule == TimeStepRule::Fixed ? setup.fixedExponent : 0;
 
+        // --- 単位ごとの配列はセルの数の大きさ(単位の番号 = 最初のセルの番号)---
         TimeTreeSteps& steps = world.steps;
-        steps.exponent.assign(slots, first);
-        steps.desired.assign(slots, first);
-        steps.open.assign(slots, 0);
-        steps.touched.assign(slots, 0);
-        steps.start.assign(slots, 0);
-        steps.end.assign(slots, 0);
+        steps.exponent.assign(cells, first);
+        steps.desired.assign(cells, first);
+        steps.open.assign(cells, 0);
+        steps.touched.assign(cells, 0);
+        steps.start.assign(cells, 0);
+        steps.end.assign(cells, 0);
         steps.deltaEnergy.assign(cells, 0);
         steps.deltaReactant.assign(cells, 0);
         steps.cellRecords.assign(cells, {});
@@ -1029,8 +1130,8 @@ namespace bicameral::sim {
             }
 
             uint64_t next = ~0ull;
-            for (const uint32_t slot : world.layout.blocks)
-                next = std::min(next, steps.end[slot]);
+            for (const uint32_t unit : world.layout.units)
+                next = std::min(next, steps.end[unit]);
 
             if (next > target) {
                 steps.tick = target;
@@ -1047,11 +1148,14 @@ namespace bicameral::sim {
     void InjectTimeTreeHeat(const TimeTreeSetup& setup, TimeTreeWorld& world, uint32_t slot, uint32_t index,
                             int64_t heat) {
         TimeTreeSteps& steps = world.steps;
-        steps.touched[slot] = 1;
-        if (steps.open[slot] != 0 && steps.end[slot] == steps.tick)
-            CloseBlock(setup, world, slot, true);
-        else if (steps.open[slot] != 0)
-            TruncateBlock(setup, world, slot, steps.tick);
+        const uint32_t unit = world.layout.unitOf[CellId(slot, index)];
+        steps.touched[unit] = 1;
+        if (steps.open[unit] != 0 && steps.end[unit] == steps.tick)
+            CloseUnit(setup, world, unit, true);
+        else if (steps.open[unit] != 0)
+            TruncateUnit(setup, world, unit, steps.tick);
+
+        SleepQuietBlocks(world);
 
         if (MrIsUniform(world.nest.blocks[slot])) {
             [[maybe_unused]] const bool expanded = ExpandNestPage(world.nest, slot);
@@ -1072,13 +1176,13 @@ namespace bicameral::sim {
         const auto mix = [&hash](int64_t value) {
             hash = FxHashCombine(hash, static_cast<uint64_t>(value));
         };
-        for (const uint32_t slot : world.layout.blocks) {
-            mix(steps.exponent[slot]);
-            mix(steps.desired[slot]);
-            mix(steps.open[slot]);
-            mix(steps.touched[slot]);
-            mix(static_cast<int64_t>(steps.start[slot]));
-            mix(static_cast<int64_t>(steps.end[slot]));
+        for (const uint32_t unit : world.layout.units) {
+            mix(steps.exponent[unit]);
+            mix(steps.desired[unit]);
+            mix(steps.open[unit]);
+            mix(steps.touched[unit]);
+            mix(static_cast<int64_t>(steps.start[unit]));
+            mix(static_cast<int64_t>(steps.end[unit]));
         }
 
         for (size_t id = 0; id < steps.deltaEnergy.size(); ++id) {
@@ -1130,21 +1234,25 @@ namespace bicameral::sim {
                world.steps.deltaReactant[CellId(slot, index)];
     }
 
+    uint32_t TimeTreeUnitOf(const TimeTreeWorld& world, uint32_t slot, uint32_t index) {
+        return world.layout.unitOf[CellId(slot, index)];
+    }
+
+    int32_t TimeTreeExponentAt(const TimeTreeWorld& world, uint32_t slot, uint32_t index) {
+        return world.steps.exponent[TimeTreeUnitOf(world, slot, index)];
+    }
+
     TimeTreeRecordBytes MeasureTimeTreeRecords(const TimeTreeWorld& world) {
-        constexpr uint64_t BLOCK_BYTES = 1 + 1 + 1 +
-                                         8;         // e・望みの e・歩の途中/触った・始めた刻み(終わり = 始め + 2^e)
-        constexpr uint64_t CELL_RECORD_BYTES = 16;  // 反応・地面(区間は枠の歩と同じ。打ち切ると枠も閉じる)
-        constexpr uint64_t FACE_RECORD_BYTES = 24;  // 区間(始め・長さ)・受け渡した値
-        constexpr uint64_t CELL_DELTA_BYTES = 16;   // 歩の変化(記録の和なので作り直せる)
+        constexpr uint64_t UNIT_BYTES = 1 + 1 + 1 + 8;  // e・望みの e・歩の途中/触った・始めた刻み(終わり = 始め + 2^e)
+        constexpr uint64_t CELL_RECORD_BYTES = 16;      // 反応・地面(区間は枠の歩と同じ。打ち切ると枠も閉じる)
+        constexpr uint64_t FACE_RECORD_BYTES = 24;      // 区間(始め・長さ)・受け渡した値
+        constexpr uint64_t CELL_DELTA_BYTES = 16;       // 歩の変化(記録の和なので作り直せる)
         const TimeTreeSteps& steps = world.steps;
         TimeTreeRecordBytes bytes;
-        for (const uint32_t slot : world.layout.blocks) {
-            bytes.minimal += BLOCK_BYTES;
-            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-                const uint32_t id = CellId(slot, index);
-                if (world.layout.stepped[id] == 0)
-                    continue;
-
+        for (const uint32_t unit : world.layout.units) {
+            bytes.minimal += UNIT_BYTES;
+            ++bytes.units;
+            for (const uint32_t id : world.layout.unitCells[unit]) {
                 ++bytes.cells;
                 const TimeTreeCellRecord& record = steps.cellRecords[id];
                 if (Crosses(record.start, record.ticks, steps.tick) && (record.reacted != 0 || record.ground != 0))
@@ -1290,13 +1398,9 @@ namespace bicameral::sim {
         // --- e ごとの刻むセルの数 ---
         const auto exponents = static_cast<size_t>(std::max(setup.maxExponent, 0)) + 1;
         std::vector<uint64_t> cellsAt(exponents, 0);
-        for (const uint32_t slot : world.layout.blocks) {
-            uint64_t cells = 0;
-            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
-                cells += world.layout.stepped[CellId(slot, index)];
-
-            const int32_t exponent = std::clamp(world.steps.exponent[slot], 0, setup.maxExponent);
-            cellsAt[static_cast<size_t>(exponent)] += cells;
+        for (const uint32_t unit : world.layout.units) {
+            const int32_t exponent = std::clamp(world.steps.exponent[unit], 0, setup.maxExponent);
+            cellsAt[static_cast<size_t>(exponent)] += world.layout.unitCells[unit].size();
         }
 
         // --- 出来事の組 j = 2^j の倍数の刻み(2^(j+1) の倍数を除く。最後の組は残り全部): 解くのは e ≤ j の列 ---

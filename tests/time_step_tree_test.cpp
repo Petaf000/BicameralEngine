@@ -146,6 +146,8 @@ namespace {
     uint32_t bufferUnits = 0;  // 前線の緩衝を単位(groupShift の組)の数で(T-1074。0 = buffer= の形)
     // 滑る窓の半径(m。window=。D-669・T-1175。既定 2 m = D-669。0 = 外す = 4 m の格子)。窓の時は 4 m の格子の組(unitByLength)を使わない
     double windowMeters = 2.0;
+    // 刻みを選ぶ単位の一辺のセルの数(stepcells=。T-1089。既定 1 = セルごと・8 = 枠〔T-1175 まで〕。窓の時だけ効く)
+    uint32_t unitEdgeCells = 1;
     // 燃える物を置く所(T-1153。空 = どこにも置く。x〔m〕→ 置くか)
     std::function<bool(double)> fuelAt;
 
@@ -178,6 +180,7 @@ namespace {
         setup.residualStop = residualStop;
         setup.unitByLength = unitByLength && windowMeters <= 0.0;
         setup.windowLevel0Cells = static_cast<uint32_t>(std::llround(windowMeters / 0.5));  // レベル 0 のセルは 0.5 m
+        setup.unitEdgeCells = unitEdgeCells;
 
         return setup;
     }
@@ -588,7 +591,7 @@ namespace {
         return std::format("{} 通り目{}・予算 {}・木 {}・揃える段 {}・V {}(1 刻み {})・単位 {}",
                            selectRule == TimeTreeSelect::Retake ? 2 : 1, buffer, BudgetText(), shapeName, groupShift,
                            trialCycles != 0 ? trialCycles : longCycles, zeroCycles,
-                           windowMeters > 0.0 ? std::format("窓 {:g} m", windowMeters)
+                           windowMeters > 0.0 ? std::format("窓 {:g} m・{} セル角", windowMeters, unitEdgeCells)
                                               : std::string(unitByLength ? "4 m" : "ブロック"));
     }
 
@@ -862,12 +865,21 @@ namespace {
         };
         const std::vector<uint32_t> fineSlots = byX(fine);
         const std::vector<uint32_t> coarseSlots = byX(coarse);
+        // 細かいセルの e(根 i・セル)と、それを含む粗いセルの e(T-1089: e は単位ごとなので、セルどうしで比べる)
+        const auto fineAt = [&](uint32_t i, uint32_t index) {
+            return TimeTreeExponentAt(fine, fineSlots[i], index);
+        };
+        const auto coarseOf = [&](uint32_t i, uint32_t index) {
+            const uint32_t x = (MrCellX(index) + (i & 1u) * MR_BLOCK_EDGE) / 2;
+            return TimeTreeExponentAt(coarse, coarseSlots[i / 2],
+                                      MrCellIndex(x, MrCellY(index) / 2, MrCellZ(index) / 2));
+        };
         int32_t widest = 0;
         double meanGap = 0.0;
         uint32_t withinOne = 0;
         uint32_t samples = 0;
-        // ブロックは 8³ セルなので、0.5 m のブロック(4 m)は 1 m のブロック(8 m)の半分の長さ。1 m のブロックは中の 0.5 m の
-        // ブロック 2 つの変化の大きい方で縮むので、「同じ場所」は 1 m の e と 0.5 m の 2 つの e の小さい方とも比べる(記録)
+        // 1 m のセルは中の 0.5 m のセル 8 つの変化の大きい方で縮むので、「同じ場所」は 1 m の e と中の 0.5 m の 8 つの e の
+        // 小さい方とも比べる(記録。枠の単位では 0.5 m の枠 2 つの小さい方だった)
         double meanFine = 0.0;
         double meanCoarse = 0.0;
         int32_t widestPair = 0;
@@ -888,24 +900,34 @@ namespace {
             }
 
             for (uint32_t i = 0; i < fineShape.roots; ++i) {
-                const int32_t gap = std::abs(fine.steps.exponent[fineSlots[i]] -
-                                             coarse.steps.exponent[coarseSlots[i / 2]]);
-                widest = std::max(widest, gap);
-                meanGap += gap;
-                withinOne += gap <= 1 ? 1u : 0u;
-                ++samples;
-                meanFine += fine.steps.exponent[fineSlots[i]];
-                meanCoarse += coarse.steps.exponent[coarseSlots[i / 2]];
-                if ((i & 1u) == 0)
-                    continue;
+                for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                    const int32_t fineExponent = fineAt(i, index);
+                    const int32_t coarseExponent = coarseOf(i, index);
+                    const int32_t gap = std::abs(fineExponent - coarseExponent);
+                    widest = std::max(widest, gap);
+                    meanGap += gap;
+                    withinOne += gap <= 1 ? 1u : 0u;
+                    ++samples;
+                    meanFine += fineExponent;
+                    meanCoarse += coarseExponent;
+                    if ((MrCellX(index) & 1u) != 0 || (MrCellY(index) & 1u) != 0 || (MrCellZ(index) & 1u) != 0)
+                        continue;
 
-                const int32_t pairMin = std::min(fine.steps.exponent[fineSlots[i - 1]],
-                                                 fine.steps.exponent[fineSlots[i]]);
-                const int32_t pairGap = std::abs(pairMin - coarse.steps.exponent[coarseSlots[i / 2]]);
-                widestPair = std::max(widestPair, pairGap);
-                meanPair += pairGap;
-                withinOnePair += pairGap <= 1 ? 1u : 0u;
-                ++pairs;
+                    // 粗いセル 1 つ = 細かいセル 2³(この角から)
+                    int32_t least = fineExponent;
+                    for (uint32_t corner = 1; corner < 8; ++corner) {
+                        const uint32_t other = MrCellIndex(MrCellX(index) + (corner & 1u),
+                                                           MrCellY(index) + ((corner >> 1) & 1u),
+                                                           MrCellZ(index) + (corner >> 2));
+                        least = std::min(least, fineAt(i, other));
+                    }
+
+                    const int32_t pairGap = std::abs(least - coarseExponent);
+                    widestPair = std::max(widestPair, pairGap);
+                    meanPair += pairGap;
+                    withinOnePair += pairGap <= 1 ? 1u : 0u;
+                    ++pairs;
+                }
             }
         }
 
@@ -919,7 +941,7 @@ namespace {
             share * 100.0, widest, meanFine / samples, meanCoarse / samples, fine.steps.cellSteps,
             coarse.steps.cellSteps, fine.steps.retakes, coarse.steps.retakes);
         Log(Channel::Sim, Level::Info,
-            "細かさ {}(1 m の e と 0.5 m の 2 つの小さい方): 差 平均 {:.2f}・1 段の内 {:.1f} %・最大 {}", scene,
+            "細かさ {}(1 m の e と中の 0.5 m の 8 つの小さい方): 差 平均 {:.2f}・1 段の内 {:.1f} %・最大 {}", scene,
             meanPair / pairs, 100.0 * withinOnePair / pairs, widestPair);
         // D-669: 窓の時、D-640 は「結果がどちらの細かさでも予算の内」に読み替えた(選ぶ e の揃い方は記録だけ。結果は night・fire の
         // shape=fine / coarse の毎刻みとの差で見る)。格子(window=0)は元の線
@@ -1291,7 +1313,7 @@ namespace {
                     result.peakQ16 = temperature;
                     result.peakTick = tick;
                     result.peakDistance = probe.distance;
-                    result.peakExponent = world.steps.exponent[probe.slot];
+                    result.peakExponent = TimeTreeExponentAt(world, probe.slot, probe.index);
                 }
 
                 if (result.crossTick == 0 && temperature >= setup.ignitionTemperatureQ16)
@@ -1447,8 +1469,8 @@ namespace {
         Ignite(setup, material, world, ignition);
         StepTimeTree(setup, world, saveTick - ignition.tick);
         uint32_t midStep = 0;
-        for (const uint32_t slot : world.layout.blocks)
-            midStep += world.steps.open[slot] != 0 && world.steps.start[slot] < saveTick ? 1u : 0u;
+        for (const uint32_t unit : world.layout.units)
+            midStep += world.steps.open[unit] != 0 && world.steps.start[unit] < saveTick ? 1u : 0u;
 
         const MultiresSaveState save = SaveNestState(world.nest);
         const TimeTreeSteps savedSteps = world.steps;
@@ -1501,6 +1523,8 @@ namespace {
                 unitByLength = value != "block";
             else if (key == "window")
                 windowMeters = std::atof(value.c_str());
+            else if (key == "stepcells")
+                unitEdgeCells = static_cast<uint32_t>(std::atoi(value.c_str()));
             else if (key == "bufferunits")
                 bufferUnits = static_cast<uint32_t>(std::atoi(value.c_str()));
             else if (key == "shape") {
