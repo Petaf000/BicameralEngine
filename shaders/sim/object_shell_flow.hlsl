@@ -5,6 +5,8 @@
 // グループの中の同期だけで回す(Dispatch とバリアは 1 刻みに 1 回)。散らす書き方(CPU の面 → 両側)は集める書き方(ボクセル・面ごとに自分の分だけ)にした。
 // 整数の足し算なので順によらず同じ値になる。圧力の値は、箱が OH_SHELL_SHARED_VOXELS 以下なら groupshared に 32bit で(溢れたら g_stats[1] に数える)、
 // それより大きい箱は作業場(既定のヒープ)に 64bit で置く(g_sharedPotential)。
+// 圧力の反復(T-1201。g_pressureMode): 前の小刻みの圧力の値から解き始め(作業場の potential が層の状態として刻みをまたいで残る)、
+// 1 回の赤黒で値が 1 つも変わらなければ止める(上限 g_pressureSweeps)。止まるかはグループの groupshared の印で決めるので、全スレッドが同じ回数で抜ける。
 // 1 つのセルを囲む物が 2 つ以上ある時はセルへの書き込みが競るので、この形は物ごとに別のセル(試験の場面)だけ。エンジンへ入れる形は T-1200 のチケット。
 #include "common/object_heat.hlsli"
 
@@ -66,11 +68,16 @@ cbuffer RootConstants : register(b0) {
     uint32_t g_pressureSweeps;
     uint32_t g_skeletonWalls;
     uint32_t g_sharedPotential;  // 1 = 圧力の値を groupshared に(32bit)
+    uint32_t g_pressureMode;  // OH_PRESSURE_UNTIL_QUIET・OH_PRESSURE_WARM_START(T-1201。0 = T-1200 までの決まった回数)
 };
 
 FX_CONST uint32_t OH_SHELL_THREADS = 1024;
 FX_CONST uint32_t OH_SHELL_SHARED_VOXELS = 7168;  // 28 KB(groupshared の上限 32 KB のうち)
 FX_CONST uint32_t OH_SHELL_OUTSIDE = 0xFFFFFFFFu;
+FX_CONST uint32_t OH_PRESSURE_UNTIL_QUIET = 1;  // 1 回の赤黒で値が 1 つも変わらなければ止める
+FX_CONST uint32_t OH_PRESSURE_WARM_START = 2;   // 前の小刻みの圧力の値から解き始める
+FX_CONST uint32_t
+    OH_SHELL_SWEEP_STATS = 4;  // g_stats の後ろ(2 + 2 × 物の数から): 解いた回数・赤黒の和・一番多い・上限で止まった
 
 struct GpuShellTable {
     uint32_t unused;
@@ -99,6 +106,8 @@ groupshared uint32_t gs_limited;
 groupshared uint32_t gs_fastest;
 groupshared uint32_t gs_failed;
 groupshared uint32_t gs_overflow;
+groupshared uint32_t
+    gs_pressureMoved[3];  // 赤黒の回ごと(回 % 3)に、値が変わったボクセルがあったか(読む回・書く回・0 に戻す回を分ける)
 
 // --- 箱の並び(軸の選びは決まった select で。動的な添字の局所の配列を作らない)---
 
@@ -196,6 +205,15 @@ int64_t PotentialAt(ShellBox box, uint32_t local) {
         return 0;
 
     return g_sharedPotential != 0 ? (int64_t)gs_potential[local] : g_voxelWork[box.begin + local].potential;
+}
+
+// 64bit の値が同じか(32bit の 2 つで比べる。64bit の引き算と比べを並べない: T-1078)
+bool SameInt64(int64_t a, int64_t b) {
+    const uint64_t ua = (uint64_t)a;
+    const uint64_t ub = (uint64_t)b;
+
+    return (uint32_t)(ua & 0xFFFFFFFFull) == (uint32_t)(ub & 0xFFFFFFFFull) &&
+           (uint32_t)(ua >> 32) == (uint32_t)(ub >> 32);
 }
 
 // 32bit に入るか(上の 32bit が下の 32bit の符号の広がりと同じ。64bit の引き算と比べを並べない: T-1078)
@@ -369,14 +387,17 @@ void PrepareResidual(ShellBox box, uint32_t thread) {
         g_voxelWork[box.begin + v].residual = residual;
         g_voxelWork[box.begin + v].total = total;
         g_voxelWork[box.begin + v].recip = FxMakeRecipU64(total > 0 ? total : (uint64_t)1);
+        if ((g_pressureMode & OH_PRESSURE_WARM_START) != 0)
+            continue;
+
         g_voxelWork[box.begin + v].potential = 0;
         if (g_sharedPotential != 0)
             gs_potential[v] = 0;
     }
 }
 
-// ⑤ 圧力の赤黒の半分(colour の色のボクセル)
-void PressureColour(ShellBox box, uint32_t thread, uint32_t colour) {
+// ⑤ 圧力の赤黒の半分(colour の色のボクセル)。値が変わったら gs_pressureMoved[slot] に印
+void PressureColour(ShellBox box, uint32_t thread, uint32_t colour, uint32_t slot) {
     const uint32_t count = box.size.x * box.size.y * box.size.z;
     for (uint32_t v = thread; v < count; v += OH_SHELL_THREADS) {
         const uint3 c = VoxelCoord(box, v);
@@ -400,6 +421,9 @@ void PressureColour(ShellBox box, uint32_t thread, uint32_t colour) {
         const int64_t quotient = (int64_t)FxDivRecipU64(FxAbsU64(sum), work.recip);
         const int64_t potential = sum < 0 ? -quotient : quotient;
         if (g_sharedPotential == 0) {
+            if (!SameInt64(potential, work.potential))
+                gs_pressureMoved[slot] = 1;
+
             g_voxelWork[box.begin + v].potential = potential;
             continue;
         }
@@ -407,7 +431,11 @@ void PressureColour(ShellBox box, uint32_t thread, uint32_t colour) {
         if (!FitsInt32(potential))
             gs_overflow = 1;
 
-        gs_potential[v] = (int32_t)potential;
+        const int32_t value = (int32_t)potential;
+        if (value != gs_potential[v])
+            gs_pressureMoved[slot] = 1;
+
+        gs_potential[v] = value;
     }
 }
 
@@ -605,12 +633,23 @@ void WakeChanged(OhObject object, ShellBox box, uint32_t thread, uint64_t tick, 
         gs_overflow = 0;
     }
 
-    for (uint32_t v = thread; v < object.voxelCount; v += OH_SHELL_THREADS)
+    // 温めた始まり: 圧力の値を作業場(層の状態)から groupshared へ
+    const bool warmStart = (g_pressureMode & OH_PRESSURE_WARM_START) != 0;
+    for (uint32_t v = thread; v < object.voxelCount; v += OH_SHELL_THREADS) {
         g_voxelWork[box.begin + v].changed = 0;
+        if (warmStart && g_sharedPotential != 0)
+            gs_potential[v] = (int32_t)g_voxelWork[box.begin + v].potential;
+    }
 
+    const bool untilQuiet = (g_pressureMode & OH_PRESSURE_UNTIL_QUIET) != 0;
+    uint32_t sweepsUsed = 0;
+    uint32_t mostSweeps = 0;
+    uint32_t capped = 0;
     for (uint32_t substep = 0; substep < g_substeps; ++substep) {
-        if (thread == 0)
+        if (thread == 0) {
             PrepareCell(table, gases, object.cell);
+            gs_pressureMoved[0] = 0;
+        }
 
         AllMemoryBarrierWithGroupSync();
         PrepareVoxels(table, gases, box, thread);
@@ -622,15 +661,32 @@ void WakeChanged(OhObject object, ShellBox box, uint32_t thread, uint64_t tick, 
         PrepareResidual(box, thread);
         AllMemoryBarrierWithGroupSync();
         // 圧力の値が groupshared なら、反復の間は groupshared の同期だけ(作業場の読みは反復の前に書いた値だけ)
+        // 回 sweep は印 sweep % 3 に書き、終わりの同期の後に全スレッドが読む。次の回の印は今 0 に戻す(最後に読まれたのは 2 回前)
+        uint32_t used = 0;
+        bool quiet = false;
         for (uint32_t sweep = 0; sweep < g_pressureSweeps; ++sweep) {
+            const uint32_t slot = sweep % 3;
+            if (thread == 0)
+                gs_pressureMoved[(sweep + 1) % 3] = 0;
+
             for (uint32_t colour = 0; colour < 2; ++colour) {
-                PressureColour(box, thread, colour);
+                PressureColour(box, thread, colour, slot);
                 if (g_sharedPotential != 0)
                     GroupMemoryBarrierWithGroupSync();
                 else
                     AllMemoryBarrierWithGroupSync();
             }
+
+            ++used;
+            if (untilQuiet && gs_pressureMoved[slot] == 0) {
+                quiet = true;
+                break;
+            }
         }
+
+        sweepsUsed += used;
+        mostSweeps = max(mostSweeps, used);
+        capped += untilQuiet && !quiet ? 1u : 0u;
 
         AllMemoryBarrierWithGroupSync();
 
@@ -646,9 +702,21 @@ void WakeChanged(OhObject object, ShellBox box, uint32_t thread, uint64_t tick, 
         AllMemoryBarrierWithGroupSync();
     }
 
+    // 温めた始まり: 圧力の値を作業場(層の状態)へ戻す
+    if (warmStart && g_sharedPotential != 0) {
+        for (uint32_t v = thread; v < object.voxelCount; v += OH_SHELL_THREADS)
+            g_voxelWork[box.begin + v].potential = gs_potential[v];
+    }
+
     WakeChanged(object, box, thread, tick, pass);
     if (thread != 0)
         return;
+
+    const uint32_t sweepStats = 2 + (2 * g_objectCount);
+    InterlockedAdd(g_stats[sweepStats + 0], g_substeps);
+    InterlockedAdd(g_stats[sweepStats + 1], sweepsUsed);
+    InterlockedMax(g_stats[sweepStats + 2], mostSweeps);
+    InterlockedAdd(g_stats[sweepStats + 3], capped);
 
     InterlockedAdd(g_stats[2 + (2 * objectIndex)], gs_limited);
     InterlockedMax(g_stats[3 + (2 * objectIndex)], gs_fastest);

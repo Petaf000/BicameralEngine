@@ -1,6 +1,6 @@
 // object_flow_cpu.h — 物の箱の中の気体の流れ(D-667 の 2 段目・T-1143)の CPU リファレンス。式は shaders/common/object_heat.hlsli の「層の流れ」
 // (OhFlowCellOf・OhFlowExcessQ16・OhFlowBuoyancy・OhFlowFaceWeight・OhFlowShareQ16・OhFlowMoved)。GPU の形は後(T-1143 の作業ログ)。
-// データの流れ(流れの小刻みごと。どれも小刻みの初めの値から計算する = Jacobi。圧力だけ赤黒の決まった回数の反復):
+// データの流れ(流れの小刻みごと。どれも小刻みの初めの値から計算する = Jacobi。圧力だけ赤黒の反復):
 //   見立て(ボクセルごと: 気体の質量・pV・気体の割合・膨らみたい体積)→ 面の速さ q = M ÷ m_f
 //   → ① 運動量を移した質量に比例して同じ軸の隣の面へ(D-663。箱の外の面の向こう = 囲むセル = 止まった空気)
 //   → ② 縦の面に浮力 → ③ 圧力の射影(箱の外 = 囲むセルの圧力。膨らみたい体積をこの小刻みで出す)
@@ -8,6 +8,9 @@
 // 骨格のボクセル: 既定は壁(骨格に面する面は運動量を持たず、骨格の気体の膨らみ・縮みだけが圧力の射影で出入りする = 吹き出す多孔の壁)。
 // skeletonWalls = false なら骨格の中も気体として流れる(気体の割合 = 凝縮相の体積を除いた分。比べ)。
 // 真実: 面の運動量(OhShellFlow::momentum。層を作った時に 0 = 止まった空気、返す時に捨てる)。運動のエネルギーは数えない(音より遅い極限)。
+// 圧力の反復(T-1201): 既定は前の小刻みの圧力の値から解き始め(温めた始まり。層の状態)、1 回の赤黒で値が 1 つも変わらなければ止める
+//   (= 整数の反復の動かない点。上限 pressureSweeps)。止まった時の値はその整数の式の答えそのもの(決まった回数で打ち切らない。D-428)。
+//   回数は状態だけで決まるので決定的(GPU も同じ規則。T-1201)。pressureUntilQuiet = false・pressureWarmStart = false で T-1200 までの形(0 から決まった回数)。
 // 保存: 移すのは対の流れだけ(片側から引いた量を反対側に足す)なので、セル + ボクセル + 対の端数はビット単位で変わらない。
 #pragma once
 
@@ -22,11 +25,24 @@
 namespace bicameral::test {
 
     struct OhShellFlow {
-        uint32_t substeps = 4;         // 1 刻みの流れの小刻み(1/240 s。速さ 1 m/s で 1 小刻みに 0.53 ボクセル)
-        uint32_t pressureSweeps = 24;  // 圧力の赤黒の反復の回数(決まった数)
+        uint32_t substeps = 4;  // 1 刻みの流れの小刻み(1/240 s。速さ 1 m/s で 1 小刻みに 0.53 ボクセル)
+        uint32_t pressureSweeps =
+            1024;  // 圧力の赤黒の反復の上限(pressureUntilQuiet = false なら決まった回数。T-1200 までは 24)
+        bool pressureUntilQuiet = true;  // 1 回の赤黒で圧力の値が 1 つも変わらなければ止める(T-1201)
+        bool pressureWarmStart = true;   // 前の小刻みの圧力の値から解き始める(T-1201。false = 毎小刻み 0 から)
+        std::vector<int64_t> potential;  // 圧力の解き始めの値(層の状態。層を作った時に 0、返す時に捨てる)
         std::array<std::vector<int64_t>, 3> momentum;  // 軸ごとの面(+ 向きが正。質量 × q)
         uint64_t limitedShares = 0;                    // 数えるだけ: 出る上限で縮めた(ボクセル × 小刻み)
         int64_t fastestQ16 = 0;                        // 数えるだけ: 一番速い面(Q16 ボクセル / 小刻み)
+        // 数えるだけ(T-1201): 圧力を解いた回数・赤黒の回数の和・一番多い回数・上限で止まった回数
+        uint64_t pressureSolves = 0;
+        uint64_t pressureSweepsUsed = 0;
+        uint32_t pressureMostSweeps = 0;
+        uint64_t pressureCapped = 0;
+        // 調べるだけ(T-1201。0 = しない): 0 から解く時、この回数の時の値と止まった時の値の、面の速さの差の最大と速さの最大(Q16)
+        uint32_t gapSweeps = 0;
+        int64_t gapSpeedQ16 = 0;
+        int64_t gapReferenceQ16 = 0;
         // 骨格に面する面: true = 壁(運動量を持たず、骨格の膨らみ・縮みの分だけ圧力の射影で出入りする = 吹き出す多孔の壁)/
         // false = 骨格の中も気体として流れる(紙のボクセルの気体と固体は 1 つの温度なので、流れ込んだ炎の気体と紙がすぐ同じ温度になる)
         bool skeletonWalls = true;
@@ -65,6 +81,33 @@ namespace bicameral::test {
         const OhFlowBox box = FlowBoxOf(world.objects[o]);
         for (uint32_t a = 0; a < 3; ++a)
             flow.momentum[a].assign(box.FaceCount(a), 0);
+
+        flow.potential.assign(world.objects[o].voxelCount, 0);
+    }
+
+    // 調べるだけ(T-1201): 決まった回数 gapSweeps の時の圧力と止まった時の圧力の、面の速さ(Ψ_i − Ψ_j。基準の質量の面)の差の最大と速さの最大
+    inline void MeasurePressureGap(const OhFlowBox& box, const std::vector<int64_t>& early,
+                                   const std::vector<int64_t>& settled, OhShellFlow& flow) {
+        for (uint32_t z = 0; z < box.size[2]; ++z) {
+            for (uint32_t y = 0; y < box.size[1]; ++y) {
+                for (uint32_t x = 0; x < box.size[0]; ++x) {
+                    const uint32_t c[3] = {x, y, z};
+                    const size_t v = box.Voxel(c);
+                    for (uint32_t a = 0; a < 3; ++a) {
+                        // + 側の面(箱の外は Ψ = 0)
+                        uint32_t plus[3] = {x, y, z};
+                        ++plus[a];
+                        const bool inside = plus[a] < box.size[a];
+                        const int64_t earlyPlus = inside ? early[box.Voxel(plus)] : 0;
+                        const int64_t settledPlus = inside ? settled[box.Voxel(plus)] : 0;
+                        const int64_t earlySpeed = early[v] - earlyPlus;
+                        const int64_t settledSpeed = settled[v] - settledPlus;
+                        flow.gapSpeedQ16 = std::max(flow.gapSpeedQ16, std::abs(earlySpeed - settledSpeed));
+                        flow.gapReferenceQ16 = std::max(flow.gapReferenceQ16, std::abs(settledSpeed));
+                    }
+                }
+            }
+        }
     }
 
     // 1 つの流れの小刻み。戻り値 = 量が負・枠があふれなかった
@@ -220,8 +263,16 @@ namespace bicameral::test {
             });
         }
 
+        // 解き始め: 温めた始まりなら前の小刻みの値(層の状態)、でなければ 0
         std::vector<int64_t> potential(count, 0);
+        if (flow.pressureWarmStart && flow.potential.size() == count)
+            potential = flow.potential;
+
+        std::vector<int64_t> atGap;
+        uint32_t used = 0;
+        bool quiet = false;
         for (uint32_t sweep = 0; sweep < flow.pressureSweeps; ++sweep) {
+            bool moved = false;
             for (uint32_t colour = 0; colour < 2; ++colour) {
                 for (uint32_t z = 0; z < box.size[2]; ++z) {
                     for (uint32_t y = 0; y < box.size[1]; ++y) {
@@ -249,12 +300,33 @@ namespace bicameral::test {
                                     sum += static_cast<int64_t>(weight[a][plusFace]) * potential[box.Voxel(plus)];
                             }
 
-                            potential[v] = rx::OhMulDivToward0(sum, 1, std::max<uint64_t>(total, 1));
+                            const int64_t value = rx::OhMulDivToward0(sum, 1, std::max<uint64_t>(total, 1));
+                            moved = moved || value != potential[v];
+                            potential[v] = value;
                         }
                     }
                 }
             }
+
+            ++used;
+            if (flow.gapSweeps != 0 && used == flow.gapSweeps)
+                atGap = potential;
+
+            if (flow.pressureUntilQuiet && !moved) {
+                quiet = true;
+                break;
+            }
         }
+
+        if (flow.pressureWarmStart)
+            flow.potential = potential;
+
+        ++flow.pressureSolves;
+        flow.pressureSweepsUsed += used;
+        flow.pressureMostSweeps = std::max(flow.pressureMostSweeps, used);
+        flow.pressureCapped += flow.pressureUntilQuiet && !quiet ? 1u : 0u;
+        if (!atGap.empty())
+            MeasurePressureGap(box, atGap, potential, flow);
 
         // 運動量に圧力の力積(ΔM = (Ψ_i − Ψ_j)× 基準の質量)→ 速さ
         for (uint32_t a = 0; a < 3; ++a) {

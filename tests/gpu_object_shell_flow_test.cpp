@@ -7,7 +7,9 @@
 //         セルの変わった段・数え上げ(出る上限で縮めた数・一番速い面)を比べる。圧力の値を groupshared に置く形と作業場に置く形の両方。
 //   --measure(--measure-only は比べを飛ばす): 紙 24 列・A4(27 × 38)の層 4・6 段を、物 1 つと 46 個(RTX 3070 Ti の SM の数)で、
 //         暖機 30 刻みの後 20 刻みの 1 刻みの平均の GPU の時間を出す。
-// 引数は gpu_test_options.h と --measure / --measure-only。
+//   圧力の反復の規則(T-1201): 比べは「0 から決まった 24 回」(T-1200 まで)と「温めた始まり + 収まるまで」(既定)の両方。
+//         測るのは 0 から決まった回数(--sweeps)・0 から収まるまで・温めた始まり + 収まるまで の 3 つ(--rule 0 / 1 / 3 で 1 つだけ)。
+// 引数は gpu_test_options.h と --measure / --measure-only / --sweeps N / --rule N。
 #include <cstdlib>
 #include <cstring>
 
@@ -48,8 +50,9 @@ namespace {
 
     // --- GPU の並び(object_shell_flow.hlsl と同じ)---
     constexpr uint32_t SHARED_VOXELS = 7168;
-    constexpr uint32_t ROOT_CONSTANT_COUNT = 8;
-    // u0〜u10 / b0 / デバッグのリング / t0〜t7(11 × 2 + 8 + 2 + 8 × 2 = 48 語。物の熱の 63 語とは別の署名)
+    constexpr uint32_t ROOT_CONSTANT_COUNT = 9;
+    constexpr uint32_t SWEEP_STATS = 4;  // g_stats の後ろ: 解いた回数・赤黒の和・一番多い・上限で止まった(T-1201)
+    // u0〜u10 / b0 / デバッグのリング / t0〜t7(11 × 2 + 9 + 2 + 8 × 2 = 49 語。物の熱の 63 語とは別の署名)
     constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
         .uavCount = 11, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = 8};
 
@@ -247,8 +250,26 @@ namespace {
         uint32_t faceCount = 0;
         uint32_t passBase = 0;
         uint32_t sharedPotential = 0;
-        uint32_t pressureSweeps = 24;  // 圧力の赤黒の回数(CPU の OhShellFlow と同じ既定。--sweeps は測るだけ)
+        uint32_t pressureSweeps = 1024;  // 圧力の赤黒の上限(CPU の OhShellFlow と同じ既定)
+        uint32_t pressureMode = 3;       // 1 = 収まったら止める・2 = 温めた始まり(shaders の OH_PRESSURE_*。T-1201)
     };
+
+    // 圧力の反復の規則(T-1201。CPU の OhShellFlow と GPU の g_pressureMode に同じものを渡す)
+    struct PressureRule {
+        const char* name;
+        uint32_t sweeps;
+        uint32_t mode;
+    };
+
+    void ApplyRule(const PressureRule& rule, test::OhShellFlow& flow) {
+        flow.pressureSweeps = rule.sweeps;
+        flow.pressureUntilQuiet = (rule.mode & 1u) != 0;
+        flow.pressureWarmStart = (rule.mode & 2u) != 0;
+    }
+
+    size_t StatsCount(size_t objects) {
+        return 2 + (2 * objects) + SWEEP_STATS;
+    }
 
     template <typename T>
     std::span<const std::byte> BytesOf(const std::vector<T>& values) {
@@ -273,7 +294,7 @@ namespace {
 
         const std::vector<ShellObject> shells = ShellObjectsOf(world, result.faceCount);
         const std::vector<int64_t> momentum(result.faceCount, 0);
-        const std::vector<uint32_t> stats(2 + (2 * world.objects.size()), 0);
+        const std::vector<uint32_t> stats(StatsCount(world.objects.size()), 0);
         const std::vector<ShellVoxelWork> voxelWork(world.voxels.size(), ShellVoxelWork{});
         const std::vector<rx::OhVoxelGas> gasWork(world.voxels.size(), rx::OhVoxelGas{});
         const std::vector<ShellFaceWork> faceWork(result.faceCount, ShellFaceWork{});
@@ -355,7 +376,8 @@ namespace {
                                                                          4u,
                                                                          gpuState.pressureSweeps,
                                                                          1u,
-                                                                         gpuState.sharedPotential};
+                                                                         gpuState.sharedPotential,
+                                                                         gpuState.pressureMode};
             list->SetComputeRoot32BitConstants(ROOT_LAYOUT.RootConstantIndex(), ROOT_CONSTANT_COUNT, constants.data(),
                                                0);
             list->Dispatch(gpuState.objectCount, 1, 1);
@@ -404,8 +426,10 @@ namespace {
                                                       cpu.blockStates.size());
         const auto changed = ReadUav<uint32_t>(device, queue, gpuState.uavs[UavCellChanged].Get(),
                                                cpu.cellChangedPasses.size());
-        const auto stats = ReadUav<uint32_t>(device, queue, gpuState.uavs[UavStats].Get(), 2 + (2 * flows.size()));
-        if (!voxels || !cells || !carries || !faces || !waits || !states || !changed || !stats)
+        const auto stats = ReadUav<uint32_t>(device, queue, gpuState.uavs[UavStats].Get(), StatsCount(flows.size()));
+        const auto voxelWork = ReadUav<ShellVoxelWork>(device, queue, gpuState.uavs[UavVoxelWork].Get(),
+                                                       cpu.voxels.size());
+        if (!voxels || !cells || !carries || !faces || !waits || !states || !changed || !stats || !voxelWork)
             return std::unexpected("読み戻せない");
 
         size_t different = CountDifferent<rx::RxCell>(cpu.voxels, *voxels, "ボクセル") +
@@ -420,6 +444,35 @@ namespace {
         if ((*stats)[0] != 0 || (*stats)[1] != 0) {
             Log(Channel::Gpu, Level::Error, "GPU: 量が負・枠があふれた {}・圧力の値が 32bit に入らない {}", (*stats)[0],
                 (*stats)[1]);
+            ++different;
+        }
+
+        // 圧力の反復の回数(T-1201)と、温めた始まりなら解き始めの値(層の状態)
+        uint64_t solves = 0;
+        uint64_t sweeps = 0;
+        uint32_t most = 0;
+        uint64_t capped = 0;
+        for (size_t o = 0; o < flows.size(); ++o) {
+            solves += flows[o].pressureSolves;
+            sweeps += flows[o].pressureSweepsUsed;
+            most = std::max(most, flows[o].pressureMostSweeps);
+            capped += flows[o].pressureCapped;
+            if (!flows[o].pressureWarmStart)
+                continue;
+
+            const rx::OhObject& object = cpu.objects[o];
+            for (uint32_t v = 0; v < object.voxelCount; ++v)
+                different += flows[o].potential[v] != (*voxelWork)[object.voxelBegin + v].potential ? 1u : 0u;
+        }
+
+        const size_t base = 2 + (2 * flows.size());
+        if ((*stats)[base] != solves || (*stats)[base + 1] != sweeps || (*stats)[base + 2] != most ||
+            (*stats)[base + 3] != capped) {
+            Log(Channel::Gpu, Level::Error,
+                "圧力の反復: 解いた cpu {} / gpu {}・赤黒の和 cpu {} / gpu {}・一番多い cpu {} / gpu {}・上限 cpu {} / "
+                "gpu {}",
+                solves, (*stats)[base], sweeps, (*stats)[base + 1], most, (*stats)[base + 2], capped,
+                (*stats)[base + 3]);
             ++different;
         }
 
@@ -443,19 +496,22 @@ namespace {
         const sim::BakedReactionTable& table;
         const test::OhTables& tables;
         const test::OhCpuTable& shared;
-        uint32_t measureSweeps;  // 測る時の圧力の赤黒の回数(切り分け。比べは 24 のまま)
+        uint32_t measureSweeps;  // 測る時の「0 から決まった回数」の回数(切り分け。比べは 24 のまま)
     };
 
     // CPU と GPU を同じ場面から回して比べる
-    std::expected<void, std::string> RunCompare(const Context& context, const Shape& shape, bool sharedPotential) {
+    std::expected<void, std::string> RunCompare(const Context& context, const Shape& shape, bool sharedPotential,
+                                                const PressureRule& rule) {
         const auto one = MakePaper(context.table, context.shared, context.tables.gases, shape);
         if (!one)
             return std::unexpected("層を作れない");
 
         test::OhWorld world = Replicate(*one, 2);
         std::vector<test::OhShellFlow> flows(world.objects.size());
-        for (uint32_t o = 0; o < flows.size(); ++o)
+        for (uint32_t o = 0; o < flows.size(); ++o) {
             test::ResetShellFlow(world, o, flows[o]);
+            ApplyRule(rule, flows[o]);
+        }
 
         auto queue = gpu::ImmediateQueue::Create(context.device, context.queueType);
         auto debugRing = gpu::DebugRing::Create(context.device);
@@ -463,6 +519,8 @@ namespace {
         if (!queue || !debugRing || !gpuState || !Upload(*queue, *gpuState))
             return std::unexpected(gpuState ? "GPU の準備に失敗" : gpuState.error());
 
+        gpuState->pressureSweeps = rule.sweeps;
+        gpuState->pressureMode = rule.mode;
         uint64_t limited = 0;
         for (uint32_t tick = 2; tick < 2 + COMPARE_TICKS; tick += COMPARE_EVERY) {
             const auto ran = RunTicks(*queue, *gpuState, *debugRing, tick, COMPARE_EVERY);
@@ -489,15 +547,19 @@ namespace {
             limited += flow.limitedShares;
 
         Log(Channel::Gpu, Level::Info,
-            "{}・圧力の値は{}: {} ボクセル × 2 枚・{} 刻みでビット一致(一番速い面 {}・出る上限で縮めた {})", shape.name,
-            sharedPotential ? " groupshared" : "作業場", one->voxels.size(), COMPARE_TICKS, flows[0].fastestQ16,
-            limited);
+            "{}・圧力の値は{}・{}: {} ボクセル × 2 枚・{} 刻みでビット一致(一番速い面 {}・出る上限で縮めた {}・"
+            "赤黒 平均 {:.1f} 一番多い {} 上限 {})",
+            shape.name, sharedPotential ? " groupshared" : "作業場", rule.name, one->voxels.size(), COMPARE_TICKS,
+            flows[0].fastestQ16, limited,
+            static_cast<double>(flows[0].pressureSweepsUsed) /
+                static_cast<double>(std::max<uint64_t>(flows[0].pressureSolves, 1)),
+            flows[0].pressureMostSweeps, flows[0].pressureCapped);
 
         return {};
     }
 
     std::expected<void, std::string> Measure(const Context& context, const Shape& shape, uint32_t copies,
-                                             bool sharedPotential) {
+                                             bool sharedPotential, const PressureRule& rule) {
         const auto one = MakePaper(context.table, context.shared, context.tables.gases, shape);
         if (!one)
             return std::unexpected("層を作れない");
@@ -509,20 +571,35 @@ namespace {
         if (!queue || !debugRing || !gpuState || !Upload(*queue, *gpuState))
             return std::unexpected(gpuState ? "GPU の準備に失敗" : gpuState.error());
 
-        gpuState->pressureSweeps = context.measureSweeps;
+        gpuState->pressureSweeps = rule.sweeps;
+        gpuState->pressureMode = rule.mode;
+        const size_t statsCount = StatsCount(world.objects.size());
+        const size_t base = 2 + (2 * world.objects.size());
         const auto warm = RunTicks(*queue, *gpuState, *debugRing, 2, WARM_TICKS);
-        const auto measured = warm ? RunTicks(*queue, *gpuState, *debugRing, 2 + WARM_TICKS, MEASURE_TICKS) : warm;
+        std::expected<std::vector<uint32_t>, std::string> before = std::unexpected(std::string("暖機に失敗"));
+        if (warm)
+            before = test::object_heat_gpu::ReadUav<uint32_t>(context.device, *queue, gpuState->uavs[UavStats].Get(),
+                                                              statsCount);
+
+        const auto measured = before ? RunTicks(*queue, *gpuState, *debugRing, 2 + WARM_TICKS, MEASURE_TICKS) : warm;
         if (!measured)
             return std::unexpected(measured.error());
 
         const auto stats = test::object_heat_gpu::ReadUav<uint32_t>(context.device, *queue,
-                                                                    gpuState->uavs[UavStats].Get(), 2);
-        if (!stats || (*stats)[0] != 0 || (*stats)[1] != 0)
+                                                                    gpuState->uavs[UavStats].Get(), statsCount);
+        if (!before || !stats || (*stats)[0] != 0 || (*stats)[1] != 0)
             return std::unexpected(std::format("{}: 量が負・枠があふれた・圧力の値が 32bit に入らない", shape.name));
 
-        Log(Channel::Gpu, Level::Info, "測る: {}({} ボクセル・面 {})× {}・圧力の値は{}・赤黒 {} 回: 1 刻み {:.3f} ms",
+        // 赤黒の回数(測った 20 刻みと、暖機の 30 刻みの一番多い回数)
+        const uint32_t solves = (*stats)[base] - (*before)[base];
+        const uint32_t sweeps = (*stats)[base + 1] - (*before)[base + 1];
+        Log(Channel::Gpu, Level::Info,
+            "測る: {}({} ボクセル・面 {})× {}・圧力の値は{}・{}: 1 刻み {:.3f} ms・赤黒 平均 {:.1f} 回"
+            "(暖機からの一番多い {}・上限で止まった {})",
             shape.name, one->voxels.size(), gpuState->faceCount / copies, copies,
-            sharedPotential ? " groupshared" : "作業場", context.measureSweeps, *measured);
+            sharedPotential ? " groupshared" : "作業場", rule.name, *measured,
+            static_cast<double>(sweeps) / static_cast<double>(std::max<uint32_t>(solves, 1)), (*stats)[base + 2],
+            (*stats)[base + 3]);
 
         return {};
     }
@@ -532,11 +609,14 @@ namespace {
         bool measure = false;
         bool compare = true;
         uint32_t measureSweeps = 24;
+        int32_t onlyRule = -1;
         for (size_t i = 0; i < arguments.size(); ++i) {
             char* argument = arguments[i];
             const std::string_view text = argument;
             if (text == "--sweeps" && i + 1 < arguments.size()) {
                 measureSweeps = static_cast<uint32_t>(std::strtoul(arguments[++i], nullptr, 10));
+            } else if (text == "--rule" && i + 1 < arguments.size()) {
+                onlyRule = static_cast<int32_t>(std::strtol(arguments[++i], nullptr, 10));
             } else if (text == "--measure") {
                 measure = true;
             } else if (text == "--measure-only") {
@@ -573,12 +653,16 @@ namespace {
         if (compare) {
             const std::array<Shape, 2> shapes = {Shape{"紙 24 列・層 2 段", 24, 3, 2},
                                                  Shape{"紙 24 列・層 4 段", 24, 3, 4}};
-            for (const Shape& shape : shapes) {
-                for (const bool sharedPotential : {true, false}) {
-                    if (auto compared = RunCompare(context, shape, sharedPotential); !compared) {
-                        Log(Channel::Gpu, Level::Error, "gpu_object_shell_flow_test: FAILED({}: {})", shape.name,
-                            compared.error());
-                        return 1;
+            const std::array<PressureRule, 2> rules = {PressureRule{"0 から決まった 24 回", 24, 0},
+                                                       PressureRule{"温めた始まり + 収まるまで", 1024, 3}};
+            for (const PressureRule& rule : rules) {
+                for (const Shape& shape : shapes) {
+                    for (const bool sharedPotential : {true, false}) {
+                        if (auto compared = RunCompare(context, shape, sharedPotential, rule); !compared) {
+                            Log(Channel::Gpu, Level::Error, "gpu_object_shell_flow_test: FAILED({}・{}: {})",
+                                shape.name, rule.name, compared.error());
+                            return 1;
+                        }
                     }
                 }
             }
@@ -591,14 +675,23 @@ namespace {
             for (const Shape& shape : shapes) {
                 const uint32_t outer = (shape.columns + (2 * shape.layers)) * (1 + (2 * shape.layers)) *
                                        (shape.sizeZ + (2 * shape.layers));
-                for (const uint32_t copies : {1u, SM_COUNT}) {
-                    for (const bool sharedPotential : {true, false}) {
-                        if (sharedPotential && outer > SHARED_VOXELS)
-                            continue;
+                const std::array<PressureRule, 3> rules = {PressureRule{"0 から決まった回数", measureSweeps, 0},
+                                                           PressureRule{"0 から収まるまで", 1024, 1},
+                                                           PressureRule{"温めた始まり + 収まるまで", 1024, 3}};
+                for (const PressureRule& rule : rules) {
+                    if (onlyRule >= 0 && static_cast<uint32_t>(onlyRule) != rule.mode)
+                        continue;
 
-                        if (auto measured = Measure(context, shape, copies, sharedPotential); !measured) {
-                            Log(Channel::Gpu, Level::Error, "gpu_object_shell_flow_test: FAILED({})", measured.error());
-                            return 1;
+                    for (const uint32_t copies : {1u, SM_COUNT}) {
+                        for (const bool sharedPotential : {true, false}) {
+                            if (sharedPotential && outer > SHARED_VOXELS)
+                                continue;
+
+                            if (auto measured = Measure(context, shape, copies, sharedPotential, rule); !measured) {
+                                Log(Channel::Gpu, Level::Error, "gpu_object_shell_flow_test: FAILED({})",
+                                    measured.error());
+                                return 1;
+                            }
                         }
                     }
                 }
