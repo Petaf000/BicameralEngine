@@ -396,6 +396,12 @@ set_tests_properties(support_fracture_refine_scenes PROPERTIES TIMEOUT 3000)
 # T-1041 の見立て: 壁につながる棚の釣り合いに着く速さ(V の回数・掃き出し・粗い段の箱のそろい方・根が固定した面)
 add_test(NAME support_fracture_settle COMMAND support_fracture_test --settle)
 set_tests_properties(support_fracture_settle PROPERTIES TIMEOUT 3000)
+# 支えの費用(研究 R-B3・T-1171): 大きな岩の塊を掘った 1 回の解き直しを閉じない解と閉じた領域で比べる。
+# 計測は job.py run -Preset release -Exe support_cost_test -- --measure
+add_executable(support_cost_test support_cost_test.cpp)
+target_link_libraries(support_cost_test PRIVATE bicameral_multires bicameral_core)
+add_test(NAME support_cost COMMAND support_cost_test)
+set_tests_properties(support_cost PROPERTIES TIMEOUT 1800)
 # 案 B の研究 R1(T-0868): 硬い液体を気体と同じ陰の圧力で。1 本目(本物の水)と液体の段 (2) 柔らかく・(1) 回数を増やす を同じ試験で測る
 add_executable(case_b_r1_test case_b_r1_test.cpp)
 target_link_libraries(case_b_r1_test PRIVATE bicameral_case_b bicameral_core)
