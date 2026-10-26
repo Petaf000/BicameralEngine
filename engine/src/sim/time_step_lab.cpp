@@ -131,6 +131,10 @@ namespace bicameral::sim {
             return FxDivU128By64(scaled, divisor).quotient;
         }
 
+        constexpr uint32_t ARRIVAL_EXTRAPOLATE = 8;  // arrivalLook の印(短い隣の境を先へ伸ばす)
+        constexpr uint32_t ARRIVAL_CLAMP = 16;
+        constexpr uint32_t ARRIVAL_UPWIND = 32;
+
         uint64_t NonNegative(int64_t value) {
             return value > 0 ? static_cast<uint64_t>(value) : 0;
         }
@@ -300,13 +304,24 @@ namespace bicameral::sim {
 
         void CloseBlock(const TimeStepLabSetup& setup, TimeStepLabState& state, uint32_t block, bool measured) {
             uint64_t change = 0;
+            int64_t edge[2][CARRIED] = {};
             const uint32_t first = block * setup.blockCells;
+            const uint32_t last = first + setup.blockCells - 1;
             for (uint32_t q = 0; q < TIME_STEP_QUANTITIES; ++q) {
                 for (uint32_t cell = first; cell < first + setup.blockCells; ++cell) {
                     int64_t& delta = state.stepDelta[At(setup, q, cell)];
                     // 反応の進みは閉じた形で長さによらないので、変化の量で測るのは運ぶ・広がるの量(熱・D)だけ
-                    if (q < CARRIED)
-                        change = std::max(change, PrecisionUnits(setup, q, cell, delta));
+                    if (q < CARRIED) {
+                        const uint64_t units = PrecisionUnits(setup, q, cell, delta);
+                        change = std::max(change, units);
+                        const int64_t signedUnits = delta < 0 ? -static_cast<int64_t>(units)
+                                                              : static_cast<int64_t>(units);
+                        if (cell == first)
+                            edge[0][q] = signedUnits;
+
+                        if (cell == last)
+                            edge[1][q] = signedUnits;
+                    }
 
                     int64_t& value = state.values[At(setup, q, cell)];
                     value += delta;
@@ -333,6 +348,13 @@ namespace bicameral::sim {
 
             if (setup.rateLook && setup.rule == TimeStepRule::Change)
                 state.desired[block] = std::min(state.desired[block], RateCap(setup, state, block, budget));
+
+            state.lastRate[block] = change >> static_cast<uint32_t>(e);
+            for (uint32_t side = 0; side < 2; ++side) {
+                for (uint32_t q = 0; q < CARRIED; ++q)
+                    state.lastEdgeRate[(block * 2 + side) * CARRIED + q] = edge[side][q] /
+                                                                           static_cast<int64_t>(Ticks(e));
+            }
         }
 
         // --- 歩を刻み tick で打ち切る(記録を経った刻みの割合に縮めてから閉じる。保存はそのまま)---
@@ -442,8 +464,27 @@ namespace bicameral::sim {
             const TimeStepCarried& law = setup.carried[quantity];
             const uint64_t ticks = Ticks(span.exponent);
             const uint32_t count = span.cellCount;
-            const int64_t left = span.leftExists ? EdgeView(setup, state, quantity, span.firstCell - 1) : 0;
-            const int64_t right = span.rightExists ? EdgeView(setup, state, quantity, span.firstCell + count) : 0;
+            int64_t left = span.leftExists ? EdgeView(setup, state, quantity, span.firstCell - 1) : 0;
+            int64_t right = span.rightExists ? EdgeView(setup, state, quantity, span.firstCell + count) : 0;
+            if ((setup.arrivalLook & ARRIVAL_EXTRAPOLATE) != 0) {
+                // 短い隣(この出来事で先に解かない側)は自分の歩の間に変わり続ける。その変化を歩の半ばまで見込む(T-1170)
+                // 印 16 = 見込みを予算までに抑える・印 32 = 風上の隣だけ(流れが入ってくる面)
+                const auto budgetView = static_cast<int64_t>(setup.budget << VIEW_BITS);
+                const auto ahead = [&](uint32_t neighborBlock, uint32_t edge) {
+                    const int64_t rate = state.lastEdgeRate[(neighborBlock * 2 + edge) * CARRIED + quantity];
+                    const int64_t change = rate * static_cast<int64_t>(ticks / 2);
+                    if ((setup.arrivalLook & ARRIVAL_CLAMP) == 0)
+                        return change;
+
+                    return std::clamp(change, -budgetView, budgetView);
+                };
+                const bool upwindOnly = (setup.arrivalLook & ARRIVAL_UPWIND) != 0;
+                if (span.leftExists && !span.leftOwned && (!upwindOnly || law.flowQ16[span.firstCell - 1] > 0))
+                    left += ahead(span.firstBlock - 1, 1);
+
+                if (span.rightExists && !span.rightOwned && !upwindOnly)
+                    right += ahead(span.firstBlock + span.blockCount, 0);
+            }
 
             SpanSolution solution;
             std::vector<int64_t> start(count);
@@ -590,6 +631,140 @@ namespace bicameral::sim {
 
     namespace {
 
+        // --- これから来る変化(T-1170・T-1173。arrivalLook)---
+        constexpr uint64_t NEVER = ~0ull;
+        constexpr uint32_t ARRIVAL_FAR = 1;
+        constexpr uint32_t ARRIVAL_SPREAD = 2;
+        constexpr uint32_t ARRIVAL_PILE = 4;
+
+        // 枠を渡る刻み(下流へ・上流へ)。速さ(セル / 刻み)= 流れ ÷ 容量(+ 2 × 広がり ÷ 容量 ÷ セルの数)。
+        // 渡る刻み = セルの数 ÷ 速さ = n² × 容量 ÷ (n × 流れ + 2 × 広がり)。量(熱・D)のうち速い方
+        struct Crossing {
+            uint64_t down = NEVER;
+            uint64_t up = NEVER;
+        };
+
+        Crossing BlockCrossing(const TimeStepLabSetup& setup, uint32_t block) {
+            const uint64_t n = setup.blockCells;
+            const uint32_t cell = block * setup.blockCells;
+            const uint32_t face = std::min(cell, setup.cellCount - 2);
+            const bool spread = (setup.arrivalLook & ARRIVAL_SPREAD) != 0;
+            Crossing crossing;
+            for (uint32_t q = 0; q < CARRIED; ++q) {
+                const TimeStepCarried& law = setup.carried[q];
+                const uint64_t numerator = n * n * law.capacityQ16[cell];
+                const uint64_t flow = n * law.flowQ16[face];
+                const uint64_t widen = spread ? 2 * law.conductQ16[face] : 0;
+                if (flow + widen > 0)
+                    crossing.down = std::min(crossing.down, numerator / (flow + widen));
+
+                if (widen > flow)
+                    crossing.up = std::min(crossing.up, numerator / (widen - flow));
+            }
+
+            return crossing;
+        }
+
+        uint64_t SaturatingAdd(uint64_t a, uint64_t b) {
+            return a > NEVER - b ? NEVER : a + b;
+        }
+
+        // 歩を始める枠(next ≥ 0)の e を、ほかの枠の変化が届いて予算を積むまでの刻みに収める。
+        // 源の枠 u の届く刻みの元 = 予算 ÷ u の 1 刻みの変化(u の中の前線は u の端にあると見て、u 自身を渡る刻みは足さない)
+        // 面で積もる(ARRIVAL_PILE): 短い隣が持ち主の面の流れは、長い側の歩の変化の境のセルに積もる(長い側の解きは歩の初めの
+        // 隣の値を境にするので、歩の間に隣が変わった分は中へ運ばれない)。積もる量 ≈ 面の係数 ÷ 容量 × 隣の 1 刻みの変化 × N² / 2
+        // (N = 自分の歩の刻み。流れの速さが 1 歩にセルを C 個渡るなら、届いた変化の C / 2 倍が 1 セルに集まる。T-1170)。
+        // これが予算の内の e まで。面をはさむ 2 つのセルが同じ速さで変わる所(一定に流れる・一様に冷める)には掛からない。
+        // 隣が今は自分より短くない面も見る(歩の間に隣が短くなって積もり始める。隣の e で外すと遅い川で 567 mK に戻った)
+        int32_t PileCap(const TimeStepLabSetup& setup, const TimeStepLabState& state, uint32_t block, uint64_t budget) {
+            const uint32_t blocks = BlockCount(setup);
+            const uint32_t first = block * setup.blockCells;
+            const uint32_t last = first + setup.blockCells - 1;
+            uint64_t bound = NEVER;  // N² の上限
+            for (const int32_t side : {-1, 1}) {
+                const int64_t other = static_cast<int64_t>(block) + side;
+                if (other < 0 || other >= static_cast<int64_t>(blocks))
+                    continue;
+
+                const uint32_t neighbor = static_cast<uint32_t>(other);
+                const uint32_t cell = side < 0 ? first : last;
+                const uint32_t face = side < 0 ? first - 1 : last;
+                const uint32_t ownEdge = side < 0 ? 0 : 1;
+                for (uint32_t q = 0; q < CARRIED; ++q) {
+                    // 面をはさむ 2 つのセルの変化の速さの差(一様に冷める・一定に流れる所は 0)
+                    const int64_t mine = state.lastEdgeRate[(block * 2 + ownEdge) * CARRIED + q];
+                    const int64_t theirs = state.lastEdgeRate[(neighbor * 2 + (1 - ownEdge)) * CARRIED + q];
+                    const uint64_t rate = FxAbsU64(theirs - mine);
+                    if (rate == 0)
+                        continue;
+
+                    const TimeStepCarried& law = setup.carried[q];
+                    const uint64_t coefficient = law.conductQ16[face] + (side < 0 ? law.flowQ16[face] : 0);
+                    if (coefficient == 0)
+                        continue;
+
+                    const FxU128 numerator = FxMulU64Full(2 * budget, law.capacityQ16[cell]);
+                    if (numerator.hi >= coefficient)
+                        continue;
+
+                    bound = std::min(bound, FxDivU128By64(numerator, coefficient).quotient / rate);
+                }
+            }
+
+            int32_t longest = 0;
+            while (longest < TS_MAX_EXPONENT && (uint64_t{1} << (2 * static_cast<uint32_t>(longest + 1))) <= bound)
+                ++longest;
+
+            return longest;
+        }
+
+        void CapByArrival(const TimeStepLabSetup& setup, const TimeStepLabState& state, std::vector<int32_t>& next) {
+            const uint32_t blocks = BlockCount(setup);
+            if ((setup.arrivalLook & ARRIVAL_PILE) != 0) {
+                const uint64_t pileBudget = setup.budget << VIEW_BITS;
+                for (uint32_t b = 0; b < blocks; ++b) {
+                    if (next[b] > 0)
+                        next[b] = std::min(next[b], PileCap(setup, state, b, pileBudget));
+                }
+            }
+
+            if ((setup.arrivalLook & (ARRIVAL_FAR | ARRIVAL_SPREAD)) == 0)
+                return;
+
+            const uint64_t budget = setup.budget << VIEW_BITS;
+            std::vector<uint64_t> arrival(blocks, NEVER);
+            std::vector<Crossing> crossing(blocks);
+            std::vector<uint64_t> source(blocks, NEVER);
+            for (uint32_t b = 0; b < blocks; ++b) {
+                crossing[b] = BlockCrossing(setup, b);
+                source[b] = state.lastRate[b] == 0 ? NEVER : budget / state.lastRate[b];
+            }
+
+            // --- 下流へ(左 → 右)と上流へ(右 → 左)の 2 回の掃き。届く刻みの最小 ---
+            uint64_t carried = NEVER;
+            for (uint32_t b = 0; b < blocks; ++b) {
+                arrival[b] = std::min(arrival[b], carried);
+                carried = std::min(SaturatingAdd(carried, crossing[b].down), source[b]);
+            }
+
+            carried = NEVER;
+            for (uint32_t b = blocks; b-- > 0;) {
+                arrival[b] = std::min(arrival[b], carried);
+                carried = std::min(SaturatingAdd(carried, crossing[b].up), source[b]);
+            }
+
+            for (uint32_t b = 0; b < blocks; ++b) {
+                if (next[b] <= 0 || arrival[b] == NEVER)
+                    continue;
+
+                int32_t longest = 0;
+                while (longest < TS_MAX_EXPONENT && Ticks(longest + 1) <= arrival[b])
+                    ++longest;
+
+                next[b] = std::min(next[b], longest);
+            }
+        }
+
         // --- 出来事(刻み tick): 終えた歩を閉じる → e を選ぶ(隣の差 1 段・長すぎる隣は打ち切る)→ 列ごとに歩を始める ---
 
         std::vector<int32_t> ChooseExponents(const TimeStepLabSetup& setup, TimeStepLabState& state, uint64_t tick) {
@@ -600,6 +775,9 @@ namespace bicameral::sim {
                 if (state.open[b] == 0)
                     next[b] = std::clamp(state.desired[b], 0, cap);
             }
+
+            if (setup.arrivalLook != 0 && setup.rule == TimeStepRule::Change)
+                CapByArrival(setup, state, next);
 
             const auto current = [&](uint32_t b) {
                 return next[b] >= 0 ? next[b] : state.exponent[b];
@@ -712,6 +890,8 @@ namespace bicameral::sim {
         state.end.assign(blocks, 0);
         state.desired.assign(blocks, first);
         state.lastMeasure.assign(blocks, 0);
+        state.lastRate.assign(blocks, 0);
+        state.lastEdgeRate.assign(static_cast<size_t>(blocks) * 2 * CARRIED, 0);
 
         return state;
     }
@@ -771,6 +951,9 @@ namespace bicameral::sim {
             mix(static_cast<int64_t>(state.end[b]));
             mix(state.desired[b]);
             mix(static_cast<int64_t>(state.lastMeasure[b]));
+            mix(static_cast<int64_t>(state.lastRate[b]));
+            for (uint32_t i = 0; i < 2 * CARRIED; ++i)
+                mix(state.lastEdgeRate[b * 2 * CARRIED + i]);
         }
 
         for (const TimeStepLabFaceRecord& record : state.faceRecords) {

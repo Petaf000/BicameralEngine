@@ -13,6 +13,8 @@
 // 試し 2 は精度で落ちた(記録だけ。judged = false)。
 // T-1169: flow [scene=0〜5] [flowbudget=n](流れ続ける所〔川・速い川・風〕で選ばれる刻みの長さ・早送りの GPU の待ちの見積もり・毎刻みとの差。
 //         引数なしは今までの全部)
+// T-1170: flow [flowarrival=印](これから来る変化の形を比べる。既定 4 = 境のセルに積もる分を見る)・[flowtrace=刻み](枠ごとの差)
+// T-1173: place / placetime(しきい値の場面を置く場所・始める刻みでずらす。placeblock= で単位のセルの数)
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -65,8 +67,11 @@ namespace {
         {"試し 2(誤差の見積もり)", TimeStepRule::Estimate, false},
     };
 
+    uint32_t trialArrival = 4;  // arrival=: 試し 1 の arrivalLook(T-1170・T-1173。既定 4 = 面で積もる分を見る)
+
     TimeStepLabSetup WithTrial(TimeStepLabSetup setup, const Trial& trial) {
         setup.rule = trial.rule;
+        setup.arrivalLook = trial.rule == TimeStepRule::Change ? trialArrival : 0;
         setup.fixedExponent = 0;
         setup.maxExponent = MAX_EXPONENT;
         setup.budget = BUDGET;
@@ -471,7 +476,8 @@ namespace {
     };
 
     uint64_t flowBudget = 100;
-    bool flowLook = false;  // flowlook=1: 今の変化の速さで e に上限(rateLook)
+    bool flowLook = false;     // flowlook=1: 今の変化の速さで e に上限(rateLook)
+    uint32_t flowArrival = 4;  // flowarrival=: これから来る変化で e に上限(arrivalLook の印。T-1170。既定 4)
     int flowSceneIndex = -1;
 
     TimeStepLabSetup MakeFlowSetup(const FlowScene& scene) {
@@ -582,6 +588,7 @@ namespace {
         TimeStepLabSetup trial = WithTrial(base, TRIALS[0]);
         trial.budget = flowBudget;
         trial.rateLook = flowLook;
+        trial.arrivalLook = flowArrival;
         const FlowRun fixed = RunFlow(reference, FilledFlow(scene, reference));
         const FlowRun chosen = RunFlow(trial, FilledFlow(scene, trial));
         Difference worst;
@@ -620,11 +627,11 @@ namespace {
             "{} 予算 {}: 一晩の早送りの GPU の待ち(見積もり・4 m × 4 m の流れ){:.3f} 秒・毎刻みなら {:.3f} 秒",
             scene.name, flowBudget, FlowGpuSeconds(chosen.run.state), FlowGpuSeconds(fixed.run.state));
         Log(Channel::Sim, Level::Info,
-            "FLOW scene=\"{}\" block={} look={} budget={} solves={:.6f} events={} fixedEvents={} gpu={:.4f} "
+            "FLOW scene=\"{}\" block={} look={} arrival={} budget={} solves={:.6f} events={} fixedEvents={} gpu={:.4f} "
             "fixedGpu={:.4f} "
             "tempMk={:.3f} "
             "ppm={:.3f} carriedMk={:.3f} meanE={}",
-            scene.name, flowBlockMeters, flowLook ? 1 : 0, flowBudget,
+            scene.name, flowBlockMeters, flowLook ? 1 : 0, flowArrival, flowBudget,
             static_cast<double>(chosen.run.state.cellSteps) / (static_cast<double>(trial.cellCount) * NIGHT_TICKS),
             chosen.run.state.events, fixed.run.state.events, FlowGpuSeconds(chosen.run.state),
             FlowGpuSeconds(fixed.run.state), worst.temperatureMk, worst.dissolvedPpm, worst.carriedMk, exponents);
@@ -632,11 +639,160 @@ namespace {
         Expect(chosen.run.state.widestNeighborGap <= 1, "流れ: 隣どうしの e の差は 1 段まで");
     }
 
+    // 枠ごとの e と毎刻みとの温度の差(歩の変化も足した値・枠の中の最大)を flowtrace= 刻みごとに出す(T-1170 の見立て)
+    uint64_t flowTrace = 0;
+
+    void TraceFlowScene(const FlowScene& scene) {
+        const TimeStepLabSetup base = MakeFlowSetup(scene);
+        TimeStepLabSetup reference = WithTrial(base, REFERENCE);
+        TimeStepLabSetup trial = WithTrial(base, TRIALS[0]);
+        trial.budget = flowBudget;
+        trial.arrivalLook = flowArrival;
+        TimeStepLabState fixed = FilledFlow(scene, reference);
+        TimeStepLabState chosen = FilledFlow(scene, trial);
+        const double capacity = static_cast<double>(trial.carried[TIME_STEP_HEAT].capacityQ16[0]) / Q16;
+        for (uint64_t done = flowTrace; done <= 2 * COMPARE_EVERY; done += flowTrace) {
+            StepTimeStepLab(reference, fixed, flowTrace);
+            StepTimeStepLab(trial, chosen, flowTrace);
+            std::string exponents;
+            std::string gaps;
+            std::string temperatures;
+            for (uint32_t b = 0; b < trial.cellCount / trial.blockCells; ++b) {
+                double largest = 0.0;
+                for (uint32_t c = b * trial.blockCells; c < (b + 1) * trial.blockCells; ++c) {
+                    const double gap = static_cast<double>(TimeStepLabSettled(trial, chosen, TIME_STEP_HEAT, c) -
+                                                           TimeStepLabSettled(reference, fixed, TIME_STEP_HEAT, c)) /
+                                       capacity;
+                    if (std::abs(gap) > std::abs(largest))
+                        largest = gap;
+                }
+
+                const uint32_t middle = b * trial.blockCells + trial.blockCells / 2;
+                const double kelvin = static_cast<double>(
+                                          TimeStepLabSettled(reference, fixed, TIME_STEP_HEAT, middle)) /
+                                      capacity * 1e-3;
+                exponents += std::format("{:>4}", chosen.exponent[b]);
+                gaps += std::format(" {:>6.1f}", largest);
+                temperatures += std::format(" {:>6.3f}", kelvin - scene.inflowKelvin);
+            }
+
+            Log(Channel::Sim, Level::Info, "TRACE {:>6} e  {}", done, exponents);
+            Log(Channel::Sim, Level::Info, "TRACE {:>6} mK {}", done, gaps);
+            Log(Channel::Sim, Level::Info, "TRACE {:>6} K  {}", done, temperatures);
+        }
+    }
+
     void CheckFlow() {
         for (size_t i = 0; i < std::size(FLOW_SCENES); ++i) {
             if (flowSceneIndex < 0 || static_cast<size_t>(flowSceneIndex) == i)
                 CheckFlowScene(FLOW_SCENES[i]);
         }
+    }
+
+    // --- T-1173: 置く場所・始める刻みによる違い(しきい値の近く。T-1153 の場面を 1 本の列で)---
+    // 燃えない熱い物(幅 2 m・placeheaterk=)を x = 12 + o m に置き、0.5 m あけた床の初めのセル(x = 14.5 + o m)の真実
+    // (歩の境目ごとの値 = 反応が読む値)の山を、毎刻みと長い刻み(予算 0.1 K・単位 placeblock= セル)で比べる。物の値は火
+    // (FireParameters)・列 32 m。燃える物は置かない(着火の前は反応が 0 なので、真実の山が 600 K に届くかで着火が決まる。T-1153)。
+    // 引数: place [placeblock=セル] [placearrival=0〜2] [placeheaterk=K] [placestart=刻み] [placeticks=n]
+    //       placetime(ずらし 0 m で、始める刻みを 0・1・2・3・5・8・13・1000 にずらす)
+    double placeHeaterKelvin = 1570.48;
+    uint32_t placeBlockCells = 8;
+    uint32_t placeArrival = 4;
+    uint64_t placeStartTick = 0;
+    uint64_t placeTicks = 8192;
+    constexpr double PLACE_LENGTH_METERS = 32.0;
+    constexpr double PLACE_IGNITION_MK = 600000.0;
+
+    struct PlaceResult {
+        double peakMk = 0.0;
+        int64_t peakValue = 0;   // 真実の山(mJ。ビット一致を見る)
+        uint64_t reachTick = 0;  // 600 K に届いた刻み(始めてから。0 = 届かない)
+        uint64_t events = 0;
+        double solves = 0.0;  // 回 / セル / 刻み
+    };
+
+    TimeStepLabSetup MakePlaceSetup(bool fixed) {
+        FireParameters fire;
+        fire.lengthMeters = PLACE_LENGTH_METERS;
+        TimeStepLabSetup setup = MakeFireSetup(fire);
+        setup.fuel.assign(setup.cellCount, TIME_STEP_FUEL_NONE);
+        setup.blockCells = placeBlockCells;
+        setup = WithTrial(setup, fixed ? REFERENCE : TRIALS[0]);
+        setup.budget = 100;
+        setup.arrivalLook = fixed ? 0 : placeArrival;
+
+        return setup;
+    }
+
+    PlaceResult RunPlace(const TimeStepLabSetup& setup, uint32_t offsetCells, uint64_t startTick) {
+        FireParameters fire;
+        fire.lengthMeters = PLACE_LENGTH_METERS;
+        TimeStepLabState state = MakeTimeStepLabState(setup);
+        FillFire(fire, setup, state);
+        const double capacity = fire.heatPerCubic * fire.cellMeters;  // mJ / mK
+        const uint32_t heaterFirst = CellCount(12.0, fire.cellMeters) + offsetCells;
+        const uint32_t heaterCells = CellCount(2.0, fire.cellMeters);
+        for (uint32_t cell = heaterFirst; cell < heaterFirst + heaterCells; ++cell)
+            state.values[cell] = std::llround(capacity * placeHeaterKelvin * 1000.0);
+
+        state.tick = startTick;
+        for (uint64_t& end : state.end)
+            end = startTick;
+
+        const uint32_t floor = CellCount(14.5, fire.cellMeters) + offsetCells;
+        PlaceResult result;
+        for (uint64_t done = 1; done <= placeTicks; ++done) {
+            StepTimeStepLab(setup, state, 1);
+            const double mk = static_cast<double>(state.values[floor]) / capacity;
+            result.peakMk = std::max(result.peakMk, mk);
+            result.peakValue = std::max(result.peakValue, state.values[floor]);
+            if (result.reachTick == 0 && mk >= PLACE_IGNITION_MK)
+                result.reachTick = done;
+        }
+
+        result.events = state.events;
+        result.solves = static_cast<double>(state.cellSteps) /
+                        (static_cast<double>(setup.cellCount) * static_cast<double>(placeTicks));
+
+        return result;
+    }
+
+    void LogPlace(std::string_view label, const PlaceResult& fixed, const PlaceResult& chosen) {
+        Log(Channel::Sim, Level::Info,
+            "PLACE {} block={} arrival={} heaterK={:.3f} fixedPeakMk={:.4f} diffMk={:.4f} fixedReach={} reach={} "
+            "events={} fixedEvents={} solves={:.4f} fixedPeakValue={} peakValue={}",
+            label, placeBlockCells, placeArrival, placeHeaterKelvin, fixed.peakMk, chosen.peakMk - fixed.peakMk,
+            fixed.reachTick, chosen.reachTick, chosen.events, fixed.events, chosen.solves, fixed.peakValue,
+            chosen.peakValue);
+    }
+
+    void CheckPlace(bool shiftTime) {
+        const TimeStepLabSetup fixedSetup = MakePlaceSetup(true);
+        const TimeStepLabSetup chosenSetup = MakePlaceSetup(false);
+        double lowest = 1e30;
+        double highest = -1e30;
+        double fixedLowest = 1e30;
+        double fixedHighest = -1e30;
+        constexpr uint64_t START_TICKS[] = {0, 1, 2, 3, 5, 8, 13, 1000};
+        const size_t runs = shiftTime ? std::size(START_TICKS) : 7;
+        for (size_t i = 0; i < runs; ++i) {
+            const uint32_t offset = shiftTime ? 0 : static_cast<uint32_t>(i);
+            const uint64_t start = shiftTime ? START_TICKS[i] : placeStartTick;
+            const PlaceResult fixed = RunPlace(fixedSetup, offset, start);
+            const PlaceResult chosen = RunPlace(chosenSetup, offset, start);
+            LogPlace(std::format("offset={:.1f}m start={}", offset * 0.5, start), fixed, chosen);
+            const double gap = chosen.peakMk - fixed.peakMk;
+            lowest = std::min(lowest, gap);
+            highest = std::max(highest, gap);
+            fixedLowest = std::min(fixedLowest, fixed.peakMk);
+            fixedHighest = std::max(fixedHighest, fixed.peakMk);
+        }
+
+        Log(Channel::Sim, Level::Info,
+            "PLACEBAND {} block={} arrival={} band(長い刻み − 毎刻み の幅)={:.4f} mK({:.4f}〜{:.4f})・毎刻みの山の幅 "
+            "{:.6f} mK",
+            shiftTime ? "time" : "space", placeBlockCells, placeArrival, highest - lowest, lowest, highest,
+            fixedHighest - fixedLowest);
     }
 
     // --- 3. 早送り = 待った(ビット一致)---
@@ -677,10 +833,38 @@ namespace {
                 flowBlockMeters = std::atof(value.c_str());
             else if (key == "flowbudget")
                 flowBudget = static_cast<uint64_t>(std::atoll(value.c_str()));
+            else if (key == "arrival")
+                trialArrival = static_cast<uint32_t>(std::atoi(value.c_str()));
+            else if (key == "flowtrace")
+                flowTrace = static_cast<uint64_t>(std::atoll(value.c_str()));
+            else if (key == "flowarrival")
+                flowArrival = static_cast<uint32_t>(std::atoi(value.c_str()));
+            else if (key == "placeblock")
+                placeBlockCells = static_cast<uint32_t>(std::atoi(value.c_str()));
+            else if (key == "placearrival")
+                placeArrival = static_cast<uint32_t>(std::atoi(value.c_str()));
+            else if (key == "placeheaterk")
+                placeHeaterKelvin = std::atof(value.c_str());
+            else if (key == "placestart")
+                placeStartTick = static_cast<uint64_t>(std::atoll(value.c_str()));
+            else if (key == "placeticks")
+                placeTicks = static_cast<uint64_t>(std::atoll(value.c_str()));
+        }
+
+        if (part == "flow" && flowTrace != 0) {
+            TraceFlowScene(FLOW_SCENES[std::max(flowSceneIndex, 0)]);
+
+            return 0;
         }
 
         if (part == "flow") {
             CheckFlow();
+
+            return failureCount == 0 ? 0 : 1;
+        }
+
+        if (part == "place" || part == "placetime") {
+            CheckPlace(part == "placetime");
 
             return failureCount == 0 ? 0 : 1;
         }
