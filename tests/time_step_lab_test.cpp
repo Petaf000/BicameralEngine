@@ -906,6 +906,14 @@ namespace {
         return grain;
     }
 
+    // 予算の内(D-642: 温度 mK と溶けた物 ppm を同じ数で比べる。grainbudget=。WithinPrecision の 1 mK より粗い)
+    bool WithinBudget(const Difference& difference, uint64_t budget) {
+        const double limit = static_cast<double>(budget);
+
+        return difference.temperatureMk <= limit && difference.dissolvedPpm <= limit && difference.carriedMk <= limit &&
+               difference.carriedPpm <= limit;
+    }
+
     TimeStepLabSetup GrainTrial(TimeStepLabSetup setup, double cellMeters) {
         setup.blockCells = grainUnitMeters <= 0.0 ? 1 : CellCount(grainUnitMeters, cellMeters);
         setup = WithTrial(setup, TRIALS[0]);
@@ -955,7 +963,7 @@ namespace {
             Expect(grain.run.conserved, "細かさ(T-1174): 保存");
             // D-669: D-640 は「結果がどちらの細かさ(0.5 m・1 m)でも予算の内」(選ぶ刻みの揃い方は記録だけ。GRAINPAIR)
             if (windowMeters > 0.0 && dx <= 1.0)
-                Expect(WithinPrecision(grain.worst), "細かさ(D-669): 0.5 m と 1 m のセルで毎刻みと予算の内");
+                Expect(WithinBudget(grain.worst, grainBudget), "細かさ(D-669): 0.5 m と 1 m のセルで毎刻みと予算の内");
             Expect(grain.run.state.widestNeighborGap <= 1, "細かさ(T-1174): 隣どうしの e の差は 1 段まで");
         }
 
