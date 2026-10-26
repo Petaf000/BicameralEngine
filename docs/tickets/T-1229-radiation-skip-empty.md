@@ -68,3 +68,9 @@
 - Grid の +23 µs(288.15 K)を減らすなら、負の側の放つセルの一覧を T-1228(変わったブロックの印)で直す形に乗せる。
 
 ## 作業ログ
+- 2026-10-27(wt6): RadiationGrid の放つセルの印・RcPlanTick・予告のバッファと SetPredication で、負の側が空の刻みに負の側の 11 起動と
+  RadiationHash を GPU が飛ばす形にした(CPU は読み戻さない)。gpu_radiation_cost に飛ばす / 飛ばさないの 3 場面(ずっと空 48/48・
+  芯の冷たい木の球を置いて戻す 32/48〔流す → 飛ばすの出入りを両方通る〕・外 301 K 0/48)を足し、刻みごとのハッシュが全部同じ。
+  2 側 948 → 772 µs/刻み(288.15 K)・883 → 714(300 K の火)。通った試験(release): gpu_radiation_cost・gpu_play_metric(CPU とビット一致)・
+  gpu_probe_sim・gpu_probe_sim_warp・gpu_probe_physics_radiation・gpu_probe_rewind・gpu_world_copy・gpu_cascade_light。
+  archmap --check は Linux 側で 150 秒で終わらず未確認(関数の移動・改名はしていない。足しただけ)。
