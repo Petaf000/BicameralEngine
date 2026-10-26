@@ -357,6 +357,8 @@ namespace bicameral::sim {
             }
         }
 
+        void KeepAssumed(const TimeStepLabSetup& setup, TimeStepLabState& state, uint32_t face, uint32_t block);
+
         // --- 歩を刻み tick で打ち切る(記録を経った刻みの割合に縮めてから閉じる。保存はそのまま)---
         void TruncateBlock(const TimeStepLabSetup& setup, TimeStepLabState& state, uint32_t block, uint64_t tick) {
             const uint32_t first = block * setup.blockCells;
@@ -390,8 +392,12 @@ namespace bicameral::sim {
             // 閉じる変化に入り、ここから先はこのブロックの次の歩(隣が歩の途中なので、こちらが短い側として持つ)が記録し直す ---
             const uint32_t firstFace = first > 0 ? first - 1 : 0;
             const uint32_t lastFace = std::min(last, setup.cellCount - 2);
-            for (uint32_t face = firstFace; face <= lastFace; ++face)
+            for (uint32_t face = firstFace; face <= lastFace; ++face) {
+                if (setup.spreadPile)
+                    KeepAssumed(setup, state, face, block);
+
                 CutFaceRecord(setup, state, face, tick);
+            }
 
             CloseBlock(setup, state, block, false);
             state.desired[block] = state.touched[block] != 0 ? 0 : state.exponent[block];
@@ -442,6 +448,145 @@ namespace bicameral::sim {
                 if (cell == setup.outflowCell)
                     flows.outflow[k] = TsProductTerm(static_cast<int64_t>(NonNegative(y[k])), ticks, law.outflowQ16,
                                                      32);
+            }
+        }
+
+    }  // namespace
+
+    namespace {
+
+        // --- 積もる分を広げる(T-1175。spreadPile)---
+        // 長い側の解きは歩の初めの隣の値を境にするので、歩の間に短い隣が変わった分(短い側が記録する面の流れと、長い側の解きが
+        // 見込んだ流れの差)は、そのままだと長い側の境のセル 1 つに積もる(T-1170)。届いた差を、長い側の同じ歩の続きのセルへ
+        // 同じ式(伝導・流れ)の後ろ向きの Euler で広げる。刻みは届いた時(記録の半ば)から長い側の歩の終わりまで。
+        // 続きの端は閉じ(面の流れを入れない)、地面・外への出入りは入れないので、広げた値の和は差と同じ(丸めの残りは境のセルへ)。
+        // 行列は列の和が容量で対角が勝つ(M 行列)ので、前からの消去の比は 1 以下・最後の行の分母も正
+
+        size_t AssumedAt(uint32_t face, uint32_t side) {
+            return static_cast<size_t>(face) * 2 + side;
+        }
+
+        bool InStep(const TimeStepLabSetup& setup, const TimeStepLabState& state, int64_t cell, uint32_t block) {
+            if (cell < 0 || cell >= static_cast<int64_t>(setup.cellCount))
+                return false;
+
+            const uint32_t other = BlockOf(setup, static_cast<uint32_t>(cell));
+
+            return state.open[other] != 0 && state.start[other] == state.start[block] &&
+                   state.end[other] == state.end[block];
+        }
+
+        void SpreadPile(const TimeStepLabSetup& setup, TimeStepLabState& state, uint32_t quantity, uint32_t edgeCell,
+                        int32_t inward, int64_t mismatch, uint64_t ticks) {
+            if (mismatch == 0 || ticks == 0)
+                return;
+
+            // --- 同じ歩の続きのセル(境のセルから面と反対の向き)---
+            const uint32_t edgeBlock = BlockOf(setup, edgeCell);
+            uint32_t low = edgeCell;
+            uint32_t high = edgeCell;
+            for (uint32_t n = 1; n < setup.spreadCells; ++n) {
+                const int64_t next = static_cast<int64_t>(inward > 0 ? high : low) + inward;
+                if (!InStep(setup, state, next, edgeBlock))
+                    break;
+
+                if (inward > 0)
+                    high = static_cast<uint32_t>(next);
+                else
+                    low = static_cast<uint32_t>(next);
+            }
+
+            // --- 前から消去(境のセルにだけ源)---
+            const TimeStepCarried& law = setup.carried[quantity];
+            const uint32_t count = high - low + 1;
+            const uint64_t magnitude = FxAbsU64(mismatch);
+            std::vector<uint64_t> ratio(count);
+            std::vector<uint64_t> partial(count);
+            for (uint32_t k = 0; k < count; ++k) {
+                const uint32_t cell = low + k;
+                const uint64_t conductLeft = k > 0 ? Scaled(law.conductQ16[cell - 1], ticks) : 0;
+                const uint64_t conductRight = k + 1 < count ? Scaled(law.conductQ16[cell], ticks) : 0;
+                const uint64_t flowLeft = k > 0 ? Scaled(law.flowQ16[cell - 1], ticks) : 0;
+                const uint64_t flowRight = k + 1 < count ? Scaled(law.flowQ16[cell], ticks) : 0;
+                const uint64_t diagonal = law.capacityQ16[cell] + conductLeft + conductRight + flowRight;
+                const uint64_t left = conductLeft + flowLeft;
+                const FxU128 rhs = cell == edgeCell ? FxU128{magnitude >> 32, magnitude << 32} : FxU128{0, 0};
+                const uint64_t previousRatio = k > 0 ? ratio[k - 1] : 0;
+                const uint64_t previousPartial = k > 0 ? partial[k - 1] : 0;
+                const uint64_t denominator = diagonal - MulRatio(left, previousRatio);
+                ratio[k] = RatioQ62(conductRight, denominator);
+                partial[k] = FxDivU128By64(AddWide(rhs, FxMulU64Full(left, previousPartial)), denominator).quotient;
+            }
+
+            // --- 後ろから代入して値の単位に。丸めの残りは境のセルへ(和 = 差)---
+            std::vector<int64_t> share(count);
+            int64_t placed = 0;
+            uint64_t next = 0;
+            for (uint32_t k = count; k-- > 0;) {
+                next = partial[k] + MulRatio(next, ratio[k]);
+                share[k] = static_cast<int64_t>(FxShiftRightU128(FxMulU64Full(law.capacityQ16[low + k], next), 32));
+                placed += share[k];
+            }
+
+            share[edgeCell - low] += static_cast<int64_t>(magnitude) - placed;
+            const int64_t sign = mismatch < 0 ? -1 : 1;
+            state.stepDelta[At(setup, quantity, edgeCell)] -= mismatch;
+            for (uint32_t k = 0; k < count; ++k)
+                state.stepDelta[At(setup, quantity, low + k)] += sign * share[k];
+
+            state.cellSteps += count;
+            ++state.spreads;
+        }
+
+        // 面 face を持つ短い側が刻み start から ticks 刻みの流れを記録した。向こう側(longCell)が長い歩の途中なら、
+        // その解きが見込んだ流れ(歩の長さの割合)との差を広げる
+        void SpreadAtFace(const TimeStepLabSetup& setup, TimeStepLabState& state, uint32_t face, uint32_t longCell,
+                          uint64_t start, uint64_t ticks) {
+            const uint32_t longBlock = BlockOf(setup, longCell);
+            const uint32_t side = longCell > face ? 1 : 0;
+            const TimeStepLabFaceRecord& assumed = state.assumedFaces[AssumedAt(face, side)];
+            if (state.open[longBlock] == 0 || assumed.owner != longBlock || assumed.ticks == 0 ||
+                assumed.start != state.start[longBlock] || assumed.start + assumed.ticks != state.end[longBlock])
+                return;
+
+            if (start < assumed.start || start + ticks > state.end[longBlock] ||
+                state.end[longBlock] - state.start[longBlock] <= ticks)
+                return;
+
+            const int32_t inward = side == 1 ? 1 : -1;
+            const uint64_t spreadTicks = state.end[longBlock] - start - ticks / 2;
+            const TimeStepLabFaceRecord& actual = state.faceRecords[face];
+            for (uint32_t q = 0; q < CARRIED; ++q) {
+                const int64_t expected = Shrink(assumed.flow[q], ticks, assumed.ticks);
+                const int64_t intoLong = inward * (actual.flow[q] - expected);
+                // 境のセル 1 つに置いても予算の 2^-spreadShift に満たない差は広げない(費用。0 = いつも広げる)
+                const uint64_t least = setup.spreadShift == 0 ? 0 : (setup.budget << VIEW_BITS) >> setup.spreadShift;
+                if (PrecisionUnits(setup, q, longCell, intoLong) < least)
+                    continue;
+
+                SpreadPile(setup, state, q, longCell, inward, intoLong, spreadTicks);
+            }
+        }
+
+        // 打ち切る枠 block の面の記録を切る前に、向こう側の続く長い歩が見込んでいた流れ(切る前の記録)を残す
+        void KeepAssumed(const TimeStepLabSetup& setup, TimeStepLabState& state, uint32_t face, uint32_t block) {
+            const TimeStepLabFaceRecord& record = state.faceRecords[face];
+            for (uint32_t side = 0; side < 2; ++side) {
+                const uint32_t cell = face + side;
+                const uint32_t other = BlockOf(setup, cell);
+                TimeStepLabFaceRecord& assumed = state.assumedFaces[AssumedAt(face, side)];
+                if (other == block) {
+                    if (assumed.owner == block)
+                        assumed.ticks = 0;
+
+                    continue;
+                }
+
+                if (state.open[other] != 0 && record.ticks != 0 && record.start == state.start[other] &&
+                    record.start + record.ticks == state.end[other]) {
+                    assumed = record;
+                    assumed.owner = other;
+                }
             }
         }
 
@@ -592,6 +737,31 @@ namespace bicameral::sim {
 
                 state.faceRecords[face] = record;
                 ApplyFaceRecord(setup, state, face, record, 1);
+            }
+
+            // --- 積もる分を広げる(T-1175): 端の面で自分の解きが見込んだ流れを残し、持ち主の端の面の向こうが長い歩なら差を広げる ---
+            if (setup.spreadPile) {
+                for (const bool atLeft : {true, false}) {
+                    if (!(atLeft ? span.leftExists : span.rightExists))
+                        continue;
+
+                    const uint32_t k = atLeft ? 0 : count;
+                    const uint32_t face = span.firstCell + k - 1;
+                    TimeStepLabFaceRecord& assumed = state.assumedFaces[AssumedAt(face, atLeft ? 1 : 0)];
+                    assumed.start = span.start;
+                    assumed.ticks = ticks;
+                    assumed.owner = atLeft ? span.firstBlock : span.firstBlock + span.blockCount - 1;
+                    for (uint32_t q = 0; q < CARRIED; ++q)
+                        assumed.flow[q] = solutions[q].flows.faces[k];
+                }
+
+                for (const bool atLeft : {true, false}) {
+                    if (!(atLeft ? span.leftOwned : span.rightOwned))
+                        continue;
+
+                    const uint32_t face = atLeft ? span.firstCell - 1 : span.firstCell + count - 1;
+                    SpreadAtFace(setup, state, face, atLeft ? face : face + 1, span.start, ticks);
+                }
             }
 
             // --- ブロックの歩 ---
@@ -807,7 +977,12 @@ namespace bicameral::sim {
             while (changed) {
                 changed = false;
                 for (uint32_t b = 0; b < blocks; ++b) {
-                    if (next[b] >= 0 || state.exponent[b] <= WindowBound(setup, local, b))
+                    const int32_t bound = WindowBound(setup, local, b);
+                    if (next[b] >= 0 || state.exponent[b] <= bound)
+                        continue;
+
+                    // 歩の残りが上限の長さの 2^truncateSlack 倍の内なら打ち切らずに終える(T-1175)
+                    if (setup.truncateSlack != 0 && state.end[b] - tick <= Ticks(bound + setup.truncateSlack))
                         continue;
 
                     TruncateBlock(setup, state, b, tick);
@@ -826,6 +1001,28 @@ namespace bicameral::sim {
             }
 
             return local;
+        }
+
+        // まわり ±meanCells 枠の前の歩の 1 刻みの変化の平均 × 自分の歩の長さで、規則 A の望み(T-1175)。前線の手前のセルの変化は
+        // セルの長さの 2 乗に逆比例する(鋭い前線)が、決まった長さの中の変化の和は前線の進みで決まり細かさによらない見込み
+        int32_t MeanDesired(const TimeStepLabSetup& setup, const TimeStepLabState& state, uint32_t block) {
+            const uint32_t blocks = BlockCount(setup);
+            const uint32_t from = block > setup.meanCells ? block - setup.meanCells : 0;
+            const uint32_t to = std::min(blocks - 1, block + setup.meanCells);
+            uint64_t sum = 0;
+            for (uint32_t b = from; b <= to; ++b)
+                sum += state.lastRate[b];
+
+            const uint64_t mean = sum / (to - from + 1);
+            const int32_t e = state.exponent[block];
+            const uint64_t change = mean > (~0ull >> static_cast<uint32_t>(e)) ? ~0ull
+                                                                               : mean << static_cast<uint32_t>(e);
+            const uint64_t budget = setup.budget << VIEW_BITS;
+            int32_t desired = TsDesiredExponent(TS_RULE_CHANGE, e, change, budget);
+            if (setup.rateLook)
+                desired = std::min(desired, RateCap(setup, state, block, budget));
+
+            return desired;
         }
 
         // --- 出来事(刻み tick): 終えた歩を閉じる → e を選ぶ(隣の差 1 段・長すぎる隣は打ち切る)→ 列ごとに歩を始める ---
@@ -895,9 +1092,18 @@ namespace bicameral::sim {
         void ProcessEvent(const TimeStepLabSetup& setup, TimeStepLabState& state) {
             const uint64_t tick = state.tick;
             const uint32_t blocks = BlockCount(setup);
+            std::vector<uint32_t> measured;
             for (uint32_t b = 0; b < blocks; ++b) {
-                if (state.open[b] != 0 && state.end[b] == tick)
+                if (state.open[b] != 0 && state.end[b] == tick) {
                     CloseBlock(setup, state, b, true);
+                    measured.push_back(b);
+                }
+            }
+
+            // 望みを決まった長さの平均の変化で選び直す(T-1175。閉じた枠を全部閉じてから読むので順番に依らない)
+            if (setup.meanCells != 0 && setup.rule == TimeStepRule::Change) {
+                for (const uint32_t b : measured)
+                    state.desired[b] = MeanDesired(setup, state, b);
             }
 
             for (uint32_t b = 0; b < blocks; ++b) {
@@ -977,6 +1183,9 @@ namespace bicameral::sim {
         if (UsesWindow(setup))
             state.wish.assign(blocks, first);
 
+        if (setup.spreadPile)
+            state.assumedFaces.assign(2 * static_cast<size_t>(setup.cellCount - 1), {});
+
         return state;
     }
 
@@ -1046,6 +1255,14 @@ namespace bicameral::sim {
         for (const TimeStepLabFaceRecord& record : state.faceRecords) {
             mix(static_cast<int64_t>(record.start));
             mix(static_cast<int64_t>(record.ticks));
+            mix(record.flow[0]);
+            mix(record.flow[1]);
+        }
+
+        for (const TimeStepLabFaceRecord& record : state.assumedFaces) {
+            mix(static_cast<int64_t>(record.start));
+            mix(static_cast<int64_t>(record.ticks));
+            mix(record.owner);
             mix(record.flow[0]);
             mix(record.flow[1]);
         }

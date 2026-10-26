@@ -95,6 +95,12 @@ namespace bicameral::sim {
         // 前線の緩衝を揃える単位(groupShift の枠の組)の数で(T-1074。0 = 上の frontBuffer の形): 動いている単位(どれかの枠の
         // 望みの e が 0)から面の隣をたどってこの数の単位までを e = 0 に。単位の物の長さ × これ が緩衝の幅
         uint32_t frontBufferUnits = 0;
+        // 滑る窓(D-669・T-1175。既定 4 = レベル 0 のセル〔0.5 m〕で半径 2 m。0 = 外す = 上の単位の格子): 歩を始める枠の e を、窓の半径の内にある枠の望みの e の最小までにする(歩の途中の枠が
+        // それより長ければ打ち切る)。望みは局所の上限までで、世界の時計にそろえる上限は入れない(T-1174)。窓の外は今の隣の差 1 段。
+        // 半径はレベル 0 のセルの長さの数(0.5 m のセルで 4 = 2 m)。距離は枠どうしの最も近いセルの中心の、軸ごとの差の最大(立方体の窓)。
+        // 枠(8³ セル)の e のままなので、窓より細かい所は枠の大きさで決まる(セルごとの e は T-1089 の作り。置く場所の帯はそれまで残る)
+        // 窓の時は単位の格子(unitByLength)を使わない(格子の境を持たない。groupShift は比べのために残す)
+        uint32_t windowLevel0Cells = 4;
 
         // --- 見る口(結果に効かない)---
         const TimeTreeSpanObserver* spanObserver = nullptr;  // 列の解き(T-1111)
@@ -118,6 +124,7 @@ namespace bicameral::sim {
         std::vector<std::vector<uint32_t>> blockFaces;  // 枠ごと: 触れる面
         std::vector<std::vector<uint32_t>> neighbors;   // 枠ごと: 面でつながる枠(枠の順)
         std::vector<std::vector<uint32_t>> mates;       // 枠ごと: 同じ e に揃える枠(groupShift。自分は入れない)
+        std::vector<std::vector<uint32_t>> window;      // 枠ごと: 窓の内の枠(windowLevel0Cells。自分は入れない)
         int32_t finestLevel = 0;
     };
 

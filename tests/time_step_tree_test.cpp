@@ -144,6 +144,8 @@ namespace {
     // select= を書いた時は forward をその選び方だけで(T-1063。予算ごとに 1 通り目 + 前線の緩衝だけ確かめる)
     bool selectGiven = false;
     uint32_t bufferUnits = 0;  // 前線の緩衝を単位(groupShift の組)の数で(T-1074。0 = buffer= の形)
+    // 滑る窓の半径(m。window=。D-669・T-1175。既定 2 m = D-669。0 = 外す = 4 m の格子)。窓の時は 4 m の格子の組(unitByLength)を使わない
+    double windowMeters = 2.0;
     // 燃える物を置く所(T-1153。空 = どこにも置く。x〔m〕→ 置くか)
     std::function<bool(double)> fuelAt;
 
@@ -174,7 +176,8 @@ namespace {
         setup.cyclesAtZero = zeroCycles;
         setup.shortExponent = shortExponent;
         setup.residualStop = residualStop;
-        setup.unitByLength = unitByLength;
+        setup.unitByLength = unitByLength && windowMeters <= 0.0;
+        setup.windowLevel0Cells = static_cast<uint32_t>(std::llround(windowMeters / 0.5));  // レベル 0 のセルは 0.5 m
 
         return setup;
     }
@@ -584,7 +587,9 @@ namespace {
 
         return std::format("{} 通り目{}・予算 {}・木 {}・揃える段 {}・V {}(1 刻み {})・単位 {}",
                            selectRule == TimeTreeSelect::Retake ? 2 : 1, buffer, BudgetText(), shapeName, groupShift,
-                           trialCycles != 0 ? trialCycles : longCycles, zeroCycles, unitByLength ? "4 m" : "ブロック");
+                           trialCycles != 0 ? trialCycles : longCycles, zeroCycles,
+                           windowMeters > 0.0 ? std::format("窓 {:g} m", windowMeters)
+                                              : std::string(unitByLength ? "4 m" : "ブロック"));
     }
 
     void LogRun(std::string_view scene, std::string_view name, const TimeTreeWorld& world, const RunResult& run,
@@ -916,7 +921,10 @@ namespace {
         Log(Channel::Sim, Level::Info,
             "細かさ {}(1 m の e と 0.5 m の 2 つの小さい方): 差 平均 {:.2f}・1 段の内 {:.1f} %・最大 {}", scene,
             meanPair / pairs, 100.0 * withinOnePair / pairs, widestPair);
-        Expect(meanGap / samples <= 0.5 && share >= 0.9, "細かさ: 平均 0.5 段以下・9 割が 1 段の内");
+        // D-669: 窓の時、D-640 は「結果がどちらの細かさでも予算の内」に読み替えた(選ぶ e の揃い方は記録だけ。結果は night・fire の
+        // shape=fine / coarse の毎刻みとの差で見る)。格子(window=0)は元の線
+        if (windowMeters <= 0.0)
+            Expect(meanGap / samples <= 0.5 && share >= 0.9, "細かさ: 平均 0.5 段以下・9 割が 1 段の内");
     }
 
     // --- T-1089: 広い世界の火事の解きの数(毎刻みとは比べない。試しだけ)---
@@ -1491,6 +1499,8 @@ namespace {
                 shortExponent = std::atoi(value.c_str());
             else if (key == "unit")
                 unitByLength = value != "block";
+            else if (key == "window")
+                windowMeters = std::atof(value.c_str());
             else if (key == "bufferunits")
                 bufferUnits = static_cast<uint32_t>(std::atoi(value.c_str()));
             else if (key == "shape") {

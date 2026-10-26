@@ -99,6 +99,19 @@ namespace bicameral::sim {
         // 面で積もる分(arrivalLook 4)を何セルに広げて予算と比べるか(T-1174。既定 1 = 境のセル 1 つ = T-1170)。
         // 積もる量 ÷ (容量 × pileCells)。決まった長さ ÷ セルの長さにすると、積もる分を細かさによらない長さの平均で見る
         uint32_t pileCells = 1;
+
+        // --- T-1175: 滑る窓の上で、0.5 m と 1 m のセルで選ぶ刻みを揃える(既定はどれも外す = T-1174 の形)---
+        // spreadPile: 短い隣が長い側の境のセルへ記録した面の流れと、長い側の解きが見込んだ流れ(歩の初めの隣の値で解いた流れ)の
+        //   差を、長い側の同じ歩の続きのセル(spreadCells まで)へ同じ式(伝導・流れ。地面と外への出入りは入れず、続きの端は閉じる)の
+        //   後ろ向きの Euler で、届いてから歩の終わりまでの刻みで広げる。境のセル 1 つに積もらせない(T-1170 の積もる分の根を仕組みで
+        //   消す)。広げた値の丸めの残りは境のセルに置くので保存は厳密
+        bool spreadPile = false;
+        uint32_t spreadCells = 64;
+        uint32_t spreadShift = 0;  // 境のセル 1 つで予算の 2^-spreadShift に満たない差は広げない(0 = いつも)
+        // meanCells: 歩を終えた枠の望みを、まわり ±meanCells 枠の前の歩の 1 刻みの変化の平均(決まった長さの平均)で選ぶ(0 = 外す)
+        uint32_t meanCells = 0;
+        // truncateSlack: 窓の上限より長い歩の途中の枠を、歩の残りが上限の長さの 2^truncateSlack 倍を超える時だけ打ち切る(0 = 今)
+        uint32_t truncateSlack = 0;
     };
 
     // 世界の帳簿(外との出入り・反応。符号は世界の中へ入るのが正)
@@ -150,6 +163,8 @@ namespace bicameral::sim {
         std::vector<int64_t>
             lastEdgeRate;           // [(枠 × 2 + 端) × 量]: 両端のセルの前の歩の 1 刻みの変化(符号付き。ARRIVAL_PILE)
         std::vector<int32_t> wish;  // 今の歩を始めた時の窓の前の望み(滑る窓の時だけ。T-1174)
+        std::vector<TimeStepLabFaceRecord>
+            assumedFaces;  // 面ごと: 長い側の解きが見込んだ境の面の流れ(owner = 長い側の境のブロック。spreadPile)
 
         TimeStepLabLedger ledger;
 
@@ -158,6 +173,7 @@ namespace bicameral::sim {
         uint64_t blockSteps = 0;
         uint64_t events = 0;
         uint64_t truncations = 0;       // 打ち切った歩の数
+        uint64_t spreads = 0;           // 積もる分を広げた回数(spreadPile。広げた解きのセルは cellSteps に入れる)
         int32_t widestNeighborGap = 0;  // 歩を始めた後の隣どうしの e の差の最大
         uint32_t negativeValues = 0;    // 真実が負になった回数
     };

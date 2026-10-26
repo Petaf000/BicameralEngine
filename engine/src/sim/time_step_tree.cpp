@@ -176,7 +176,8 @@ namespace bicameral::sim {
 
         // 揃える段(レベルごと): groupShift と、単位の物の長さ(D-640)に届くまでの段の大きい方
         uint32_t GroupShiftAt(const TimeTreeSetup& setup, int32_t level) {
-            const int32_t byLength = setup.unitByLength ? std::max(level - setup.unitLevel, 0) : 0;
+            const bool grid = setup.unitByLength && setup.windowLevel0Cells == 0;  // 窓は格子の境を持たない(D-669)
+            const int32_t byLength = grid ? std::max(level - setup.unitLevel, 0) : 0;
 
             return std::max(setup.groupShift, static_cast<uint32_t>(byLength));
         }
@@ -197,6 +198,41 @@ namespace bicameral::sim {
             }
         }
 
+        // 窓の内の枠(D-669): 箱をいちばん細かいレベル(0 より粗ければレベル 0)の単位に直し、軸ごとに最も近いセルの中心の
+        // 差(重なる軸は 0)の最大が半径の内なら窓の内。半分の長さを避けて 2 倍の単位で比べる
+        void AddWindow(const MultiresNest& nest, const TimeTreeSetup& setup, TimeTreeLayout& layout) {
+            const int32_t unitLevel = std::max(layout.finestLevel, 0);
+            const int64_t doubleRadius = int64_t{2} * (int64_t{setup.windowLevel0Cells} << unitLevel);
+            const auto axisGap = [](int64_t lowA, int64_t cellA, int64_t lowB, int64_t cellB) {
+                const int64_t highA = lowA + cellA * MR_BLOCK_EDGE;
+                const int64_t highB = lowB + cellB * MR_BLOCK_EDGE;
+                if (lowA < highB && lowB < highA)
+                    return int64_t{0};
+
+                const int64_t gap = lowB >= highA ? lowB - highA : lowA - highB;
+
+                return 2 * gap + cellA + cellB;
+            };
+            for (const uint32_t slot : layout.blocks) {
+                const MrBlock& a = nest.blocks[slot];
+                const int32_t shiftA = unitLevel - a.level;
+                const int64_t cellA = int64_t{1} << shiftA;
+                for (const uint32_t other : layout.blocks) {
+                    if (other == slot)
+                        continue;
+
+                    const MrBlock& b = nest.blocks[other];
+                    const int32_t shiftB = unitLevel - b.level;
+                    const int64_t cellB = int64_t{1} << shiftB;
+                    const int64_t gap = std::max({axisGap(a.originX << shiftA, cellA, b.originX << shiftB, cellB),
+                                                  axisGap(a.originY << shiftA, cellA, b.originY << shiftB, cellB),
+                                                  axisGap(a.originZ << shiftA, cellA, b.originZ << shiftB, cellB)});
+                    if (gap <= doubleRadius)
+                        layout.window[slot].push_back(other);
+                }
+            }
+        }
+
         TimeTreeLayout MakeLayout(const MultiresNest& nest, const TimeTreeSetup& setup) {
             TimeTreeLayout layout;
             const uint32_t slots = nest.capacity.worldBlocks;
@@ -204,6 +240,7 @@ namespace bicameral::sim {
             layout.blockFaces.resize(slots);
             layout.neighbors.resize(slots);
             layout.mates.resize(slots);
+            layout.window.resize(slots);
             layout.finestLevel = nest.capacity.rootLevel;
             for (uint32_t slot = 0; slot < slots; ++slot) {
                 const MrBlock& block = nest.blocks[slot];
@@ -240,6 +277,8 @@ namespace bicameral::sim {
                 std::ranges::sort(list);
 
             AddMates(nest, setup, layout);
+            if (setup.windowLevel0Cells > 0)
+                AddWindow(nest, setup, layout);
 
             return layout;
         }
@@ -752,6 +791,34 @@ namespace bicameral::sim {
             return buffered;
         }
 
+        // 窓の上限(D-669): 枠ごとに、窓の内の枠の望みの e の最小(局所の上限まで。世界の時計にそろえる上限は入れない。T-1174)
+        std::vector<int32_t> WindowCaps(const TimeTreeSetup& setup, const TimeTreeWorld& world) {
+            const TimeTreeSteps& steps = world.steps;
+            std::vector<int32_t> caps(world.nest.blocks.size(), setup.maxExponent);
+            for (const uint32_t slot : world.layout.blocks) {
+                for (const uint32_t other : world.layout.window[slot])
+                    caps[slot] = std::min(caps[slot], std::clamp(steps.desired[other], 0, setup.maxExponent));
+            }
+
+            return caps;
+        }
+
+        // slot の e を窓の上限までに(歩の途中で長ければ打ち切って始め直す)。変えたら true
+        bool LimitToWindow(const TimeTreeSetup& setup, TimeTreeWorld& world, Choice& choice, uint32_t slot,
+                           int32_t cap) {
+            if (Current(world.steps, choice, slot) <= cap)
+                return false;
+
+            if (choice.next[slot] < 0) {
+                TruncateBlock(setup, world, slot, choice.tick);
+                choice.next[slot] = FirstNext(setup, world.steps, choice, slot);
+            }
+
+            choice.next[slot] = std::min(choice.next[slot], cap);
+
+            return true;
+        }
+
         // 隣どうしの差は 1 段まで・揃える相手(groupShift)とは同じ e
         std::vector<int32_t> ChooseExponents(const TimeTreeSetup& setup, TimeTreeWorld& world, uint64_t tick) {
             TimeTreeSteps& steps = world.steps;
@@ -767,6 +834,8 @@ namespace bicameral::sim {
             const bool jump = setup.select == TimeTreeSelect::Jump;
             const bool units = setup.frontBufferUnits > 0 && !jump;
             const std::vector<uint8_t> buffered = units ? BufferedBlocks(setup, world) : std::vector<uint8_t>{};
+            const bool window = setup.windowLevel0Cells > 0 && !jump;
+            const std::vector<int32_t> windowCaps = window ? WindowCaps(setup, world) : std::vector<int32_t>{};
             bool changed = true;
             while (changed) {
                 changed = false;
@@ -781,6 +850,9 @@ namespace bicameral::sim {
                         choice.next[slot] = 0;
                         changed = true;
                     }
+
+                    if (window)
+                        changed = LimitToWindow(setup, world, choice, slot, windowCaps[slot]) || changed;
 
                     for (const uint32_t neighbor : world.layout.neighbors[slot]) {
                         const bool active = steps.desired[neighbor] == 0;
