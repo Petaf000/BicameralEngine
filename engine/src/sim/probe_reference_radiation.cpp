@@ -1,12 +1,13 @@
-// probe_reference_radiation.cpp — 仮の世界の CPU リファレンス(ProbeReference)の熱の放射の既定の段(T-1113・D-646・D-658)。
+// probe_reference_radiation.cpp — 仮の世界の CPU リファレンス(ProbeReference)の熱の放射の既定の段(T-1113・D-646・D-658・D-670)。
 //
 // データの流れ(1 刻み。ProbeReference::Advance の (1d)。気体 → 液体 → 放射 → 伝導と反応 の順。23 §3.5):
 //   刻みの初めのセル(成分)+ 熱のキャッシュ(温度)+ 物質の光の値(BakedReactionTable::speciesLight。D-610 の書かない値込み)
 //   → CascadeGrid(64³ の密な写し。セルの並びは ProbeCellIndex と同じ)
-//   → StepCascadeLight(sim/cascade_light。距離ごとの段。放つ面の組 15・熱も待つ = D-658)
+//   → StepCascadeLightRelative(sim/cascade_light。距離ごとの段の正の側と負の側。放つ面の組 15・熱も待つ = D-658)。
+//     世界の外は環境の温度の物(D-671・ADR-0478。参照の温度 = 表の基準の大気の高さ 0 の温度)。書かない表は StepCascadeLight(外は 0 K の空)
 //   → セルごとの 吸った − 放った(2^−16 mJ)を最も近い mJ に丸めてセルのエネルギーへ当てる。丸めの端数と世界の外へ出た分は報告の帳簿へ
 //   → 変わったセルの熱のキャッシュを作り直し、そのブロックを予定の種にする(気体・液体の段と同じ)。持ち越しは次の刻みへ(ハッシュに入る)。
-// 保存: Σ セルのエネルギー × 2^16 + Σ 持ち越し + Σ 外へ出た + Σ 丸め = 一定(ビット単位。probe_radiation_test が確かめる)。
+// 保存: Σ セルのエネルギー × 2^16 + Σ 正の持ち越し − Σ 負の持ち越し + Σ 外へ出た + Σ 丸め = 一定(ビット単位。probe_radiation_test が確かめる)。
 // GPU の仮の世界は sim/probe_sim_radiation.cpp + shaders/sim/probe_radiation.hlsl(T-1154。毎刻みビット一致)。共有の「当てる段」(20 §2.4)がまだ無いので、この段がセルへ直接足す(土台に足りないもの。T-1113)。
 // 浮動小数点は使わない(engine/src/sim は検査の対象)。
 #include <algorithm>
@@ -14,6 +15,7 @@
 
 #include "core/aliases.h"
 #include "sim/probe_sim.h"
+#include "sim/world_atmosphere.h"
 
 namespace bicameral::sim {
 
@@ -57,8 +59,23 @@ namespace bicameral::sim {
         return false;
     }
 
+    uint32_t ProbeCascadeReferenceMk(const ProbeCascadeOptions& options, const BakedReactionTable& table) {
+        if (!options.environmentReference)
+            return options.params.referenceMk;
+
+        if (table.atmosphere.Empty())
+            return 0;
+
+        return SampleAtmosphere(table.atmosphere, 0).temperatureMilliKelvin;
+    }
+
+    uint32_t ProbeReference::CascadeReferenceMk() const {
+        return m_cascade.environmentReference ? m_environmentMk : m_cascade.params.referenceMk;
+    }
+
+    // 物質の無い表(ブランクの世界の空の表)は何も放たないので流さない(流しても同じ結果。D-670 の「いつも」はこれを除く)
     void ProbeReference::StepCascadeRadiation(uint64_t tick, size_t currentBase, std::vector<uint8_t>& seeds) {
-        if (m_table->speciesLight.empty() || !ProbeTableWritesLight(*m_table))
+        if (m_table->speciesLight.empty())
             return;
 
         // --- 刻みの初めの写し(温度は熱のキャッシュ。順番によらない)---
@@ -79,16 +96,18 @@ namespace bicameral::sim {
             grid.temperatureMk[index] = m_caches[currentBase + index].temperature;  // 負は 0(熱のキャッシュの約束)
         }
 
-        // --- 段(1 刻み)。参照の温度の形(T-1164)は正の側と負の側の 2 つ ---
-        const bool relative = m_cascade.params.referenceMk != 0 || m_cascade.params.negativePart;
+        // --- 段(1 刻み)。参照の温度の形(T-1164・D-671)は正の側と負の側の 2 つ ---
+        CascadeParams params = m_cascade.params;
+        params.referenceMk = CascadeReferenceMk();
+        const bool relative = params.referenceMk != 0 || params.negativePart;
         std::array<CascadeTickResult, 2> sides;
         if (relative) {
             CascadeRelativeResult both = StepCascadeLightRelative(grid, {m_cascadeCarry, m_cascadeCarryNegative},
-                                                                  m_cascade.params, tick);
+                                                                  params, tick);
             sides = std::move(both.sides);
             m_cascadeCarryNegative = sides[1].carry;
         } else {
-            sides[0] = StepCascadeLight(grid, m_cascadeCarry, m_cascade.params, tick);
+            sides[0] = StepCascadeLight(grid, m_cascadeCarry, params, tick);
         }
 
         m_cascadeCarry = sides[0].carry;

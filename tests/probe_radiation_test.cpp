@@ -3,14 +3,16 @@
 // 場面: サンプルの世界の表(MakeCombustionTestTable。real_matter の光の値を写している)の初めの世界(空気の中の木箱)で、
 //       reaction_package_scene と同じ壁に火をつけて進める。
 // 確かめること:
-//   1. 段が既定で動く(光の値を書いた表)。光の値を 1 つも書かない表では流さず、段を切った世界と毎刻み同じ
+//   1. 段が既定で動く。光の値を 1 つも書かない表でも流れる(D-670。書かない固体は D-610 の灰色で放つ)
 //   2. 保存(ビット単位): Σ セルのエネルギー × 2^16 + Σ 持ち越し + Σ 外へ出た + Σ 丸め − Σ つつき × 2^16 が毎刻み一定
 //   3. 温度が 0 K 以下になるセルが無い(陽の段の安定の見張り)
 //   4. 決定的: 2 回走らせてハッシュの列が同じ
 //   5. 放射が火の熱を運ぶ: 箱の中の空気を挟んで向かい合う壁(3 m 先。伝導では 1 秒で届かない)が、段を切った世界より熱い
-//   6. 世界の外の扱い(T-1155・T-1164): 何もしない 300 K の世界は、外 = 0 K の空(今の既定)では面のブロックが毎刻み起き、
+//   6. 世界の外の扱い(T-1155・T-1164): 何もしない 300 K の世界は、外 = 0 K の空では面のブロックが毎刻み起き、
 //      参照の温度(300 K。ADR-0461)の形では 1 刻み目から何も放たず全部眠る。参照の温度の形でも火の世界の保存(正 − 負の持ち越し)が
 //      ビット単位で一定・決定的・火の熱は向かいの壁へ届く
+//   7. 既定の外は環境の温度の物(D-671・ADR-0478): 参照の温度 = 表の基準の大気の高さ 0 の温度(試験の表は earth_environment の 288.15 K)。
+//      基準の大気を書かない表は 0 K の空。基準の大気を 300 K にした表では、何もしない 300 K の世界が既定の値のまま全部眠る
 // `--measure ticks` は比べずに、段あり / なしの燃え方(600 K 以上のセル・炭・CO2)と 1 刻みの時間を表示する(T-1113 の記録)。
 // `--measure-outside ticks` は世界の外の扱い 2 つ(0 K の空 / 参照の温度)で、何もしない世界と火の世界の起きたブロック・光線・時間を表示する(T-1164)。
 #include <algorithm>
@@ -24,6 +26,7 @@
 #include "core/aliases.h"
 #include "reaction_test_table.h"
 #include "sim/probe_sim.h"
+#include "sim/world_atmosphere.h"
 
 using namespace bicameral;
 using namespace bicameral::sim;
@@ -87,14 +90,29 @@ namespace {
         uint32_t facingTemperature = 0;  // 最後の刻みの、火をつけた壁に向かい合う壁(箱の中の空気の 3 m 先)の温度(mK)
     };
 
+    // 参照の温度を決めた値にする(environmentReference = false。0 = 0 K の空)か、既定(表の基準の大気。ENVIRONMENT)
+    constexpr uint32_t ENVIRONMENT = UINT32_MAX;
+
     ProbeCascadeOptions Options(bool radiation, uint32_t referenceMk) {
         ProbeCascadeOptions options{.enabled = radiation};
+        if (referenceMk == ENVIRONMENT)
+            return options;
+
+        options.environmentReference = false;
         options.params.referenceMk = referenceMk;
 
         return options;
     }
 
-    Run RunScene(const BakedReactionTable& table, bool radiation, uint64_t ticks, uint32_t referenceMk = 0) {
+    // 基準の大気の温度をどの点も temperatureMk にした表(成分と圧力はそのまま)
+    BakedReactionTable WithAtmosphereTemperature(ReactionTableDefinition definition, uint32_t temperatureMk) {
+        for (AtmospherePointDefinition& point : definition.atmosphere.points)
+            point.temperatureMilliKelvin = temperatureMk;
+
+        return *BakeReactionTable(definition);
+    }
+
+    Run RunScene(const BakedReactionTable& table, bool radiation, uint64_t ticks, uint32_t referenceMk = ENVIRONMENT) {
         ProbeReference reference(table);
         reference.SetCascadeRadiation(Options(radiation, referenceMk));
         const std::vector<ProbeCommand> commands = MakeCommands();
@@ -146,8 +164,11 @@ namespace {
         const Run on = RunScene(table, true, TOTAL_TICKS / 4);
         const Run off = RunScene(table, false, TOTAL_TICKS / 4);
 
-        EXPECT(!on.ranAnyTick);
-        EXPECT(on.hashes == off.hashes);
+        EXPECT(!ProbeTableWritesLight(table));
+        EXPECT(on.ranEveryTick);  // D-670: 書かない表でも流す
+        EXPECT(on.conserved);
+        EXPECT(on.negativeCells == 0);
+        EXPECT(on.hashes != off.hashes);  // 書かない木箱は灰色で放つ
     }
 
     // --- 世界の外の扱い(T-1164)---
@@ -182,7 +203,7 @@ namespace {
 
     void TestOutside(const BakedReactionTable& table) {
         constexpr uint64_t QUIET_TICKS = 20;
-        const QuietRun space = RunQuiet(table, true, 0, QUIET_TICKS);
+        const QuietRun space = RunQuiet(table, true, 0, QUIET_TICKS);  // 決めた値(0 K の空)
         const QuietRun referenced = RunQuiet(table, true, WORLD_MK, QUIET_TICKS);
         const QuietRun off = RunQuiet(table, false, 0, QUIET_TICKS);
 
@@ -203,6 +224,48 @@ namespace {
         EXPECT(first.negativeCells == 0);
         EXPECT(first.hashes == second.hashes);
         EXPECT(first.facingTemperature > without.facingTemperature);
+    }
+
+    // --- 既定の外 = 環境の温度の物(D-671)---
+
+    void TestEnvironmentDefault(const ReactionTableDefinition& definition, const BakedReactionTable& table) {
+        constexpr uint64_t QUIET_TICKS = 20;
+
+        // 試験の表(earth_environment の基準の大気)の参照の温度は高さ 0 の温度
+        EXPECT(!table.atmosphere.Empty());
+        const ProbeReference earth(table);
+        EXPECT(earth.CascadeReferenceMk() == SampleAtmosphere(table.atmosphere, 0).temperatureMilliKelvin);
+        EXPECT(ProbeCascadeReferenceMk({}, table) == earth.CascadeReferenceMk());
+        std::printf("試験の表の参照の温度(基準の大気の高さ 0): %.2f K\n", earth.CascadeReferenceMk() / 1000.0);
+
+        // 基準の大気を書かない表は 0 K の空
+        ReactionTableDefinition bare = definition;
+        bare.atmosphere = {};
+        const BakedReactionTable bareTable = *BakeReactionTable(bare);
+        EXPECT(ProbeReference(bareTable).CascadeReferenceMk() == 0);
+
+        // 環境の温度 = 世界の温度(300 K)の表: 既定の値のまま何もしない世界が全部眠る
+        const BakedReactionTable warm = WithAtmosphereTemperature(definition, WORLD_MK);
+        EXPECT(ProbeReference(warm).CascadeReferenceMk() == WORLD_MK);
+        const QuietRun quiet = RunQuiet(warm, true, ENVIRONMENT, QUIET_TICKS);
+        const QuietRun off = RunQuiet(warm, false, 0, QUIET_TICKS);
+        EXPECT(quiet.changedCells == 0);
+        EXPECT(quiet.rays == 0);
+        EXPECT(quiet.lastScheduled == off.lastScheduled);
+        EXPECT(quiet.scheduledSum == off.scheduledSum);
+        std::printf(
+            "環境の温度 300 K の表・何もしない 300 K の世界: 予定したブロック 既定 %u・放射なし %u(和 %llu・%llu)\n",
+            quiet.lastScheduled, off.lastScheduled, static_cast<unsigned long long>(quiet.scheduledSum),
+            static_cast<unsigned long long>(off.scheduledSum));
+
+        // 同じ表の火の世界: 保存・決定的・決めた値 300 K と同じ
+        const Run first = RunScene(warm, true, TOTAL_TICKS);
+        const Run second = RunScene(warm, true, TOTAL_TICKS);
+        EXPECT(first.ranEveryTick);
+        EXPECT(first.conserved);
+        EXPECT(first.negativeCells == 0);
+        EXPECT(first.hashes == second.hashes);
+        EXPECT(first.hashes == RunScene(warm, true, TOTAL_TICKS, WORLD_MK).hashes);
     }
 
     void MeasureOutside(const BakedReactionTable& table, uint64_t ticks) {
@@ -293,6 +356,7 @@ int main(int argc, char** argv) {
     TestDefault(*table);
     TestNoLight(definition);
     TestOutside(*table);
+    TestEnvironmentDefault(definition, *table);
     if (failureCount != 0)
         return 1;
 
