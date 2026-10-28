@@ -166,7 +166,7 @@ namespace {
 
     std::optional<Run> RunScene(ID3D12Device5* device, gpu::Queue& queue, const BakedReactionTable& table,
                                 const Scene& scene, uint64_t ticks, bool timing, bool skipIdle = true,
-                                bool indirect = true) {
+                                bool indirect = false) {
         auto created = ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, table,
                                         {.cascadeRadiation = scene.cascade,
                                          .radiationStageTiming = timing,
@@ -297,14 +297,14 @@ namespace {
         for (const Scene& scene : SkipScenes()) {
             const std::optional<Run> skipping = RunScene(device, *queue, table, scene, ticks, false, true);
             const std::optional<Run> running = RunScene(device, *queue, table, scene, ticks, false, false);
-            const std::optional<Run> direct = RunScene(device, *queue, table, scene, ticks, false, true, false);
-            failures.Check(skipping && skipping->ok && running && running->ok && direct && direct->ok,
+            const std::optional<Run> indirect = RunScene(device, *queue, table, scene, ticks, false, true, true);
+            failures.Check(skipping && skipping->ok && running && running->ok && indirect && indirect->ok,
                            std::format("流せた: {}", scene.name));
-            if (!skipping || !running || !direct)
+            if (!skipping || !running || !indirect)
                 continue;
 
-            // 段 1 からの間接の起動(T-1235)を切っても同じ
-            failures.Check(skipping->hashes == direct->hashes,
+            // 段 1 からの間接の起動(T-1235。既定は切る・ADR-0495)を入れても同じ
+            failures.Check(skipping->hashes == indirect->hashes,
                            std::format("間接の起動でも直の起動と刻みごとの世界のハッシュが全部同じ: {}", scene.name));
 
             Log(Channel::Sim, Level::Info, "飛ばした刻み [{}]: 正 {}/{}・負 {}/{}", scene.name,
@@ -327,9 +327,9 @@ namespace {
                 continue;
 
             LogRun(scene, *run, ticks, frequency);
-            // 測りの時は同じ場面を前の形でも(段 1 からを直の起動・側を飛ばさない。T-1235 の前後を同じ回の中で比べる)
+            // 測りの時は同じ場面を別の形でも(段 1 からを間接の起動・側を飛ばさない。T-1235 の前後を同じ回の中で比べる)
             for (const auto& [skipIdle, indirect, label] :
-                 {std::tuple{true, false, "直の起動"}, std::tuple{false, false, "飛ばさない・直の起動"}}) {
+                 {std::tuple{true, true, "間接の起動"}, std::tuple{false, false, "飛ばさない・直の起動"}}) {
                 if (!measureAll || !scene.cascade.enabled)
                     break;
 

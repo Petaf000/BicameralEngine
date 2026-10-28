@@ -86,7 +86,7 @@ namespace bicameral::sim {
         void BeginSkipIfIdle(ID3D12GraphicsCommandList10* list) const;
         void EndSkipIfIdle(ID3D12GraphicsCommandList10* list) const;
 
-        // 段 1 からの間接の起動(仮の世界用・T-1235。既定は入れる)。切っても結果は同じ(比べる試験と測りのため)
+        // 段 1 からの間接の起動(仮の世界用・T-1235。既定は切る: 64³ で速くならなかった。ADR-0495)。入れても結果は同じ
         void SetIndirectLevels(bool enabled) { m_indirectLevels = enabled; }
 
         // 段の印の番号の数(パイプラインの数)と名前(測りのログ用)
@@ -149,7 +149,7 @@ namespace bicameral::sim {
         ComPtr<ID3D12Resource>
             m_levelArgs;  // 段ごとの起動の引数(u3。COMMON で置き、刻みの中で書く間 UAV・読む間 INDIRECT_ARGUMENT)
         ComPtr<ID3D12CommandSignature> m_dispatchSignature;  // 起動 1 回だけの形(ルートの引数は変えない)
-        bool m_indirectLevels = true;
+        bool m_indirectLevels = false;
         std::vector<std::byte> m_workBytesImage;  // 作業の中身(初めの持ち越しの前まで)
         reaction::RcGpuParams m_params{};
         uint64_t m_workBytes = 0;
