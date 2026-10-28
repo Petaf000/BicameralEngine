@@ -357,8 +357,8 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
 
     StoreGraphHeader(MR_GRAPH_INPUT_REFINE_HEADER, g_graphEntries & 0xFFFFu, max(gs_refineCount, 1u),
                      MR_GRAPH_INPUT_REFINE_RECORDS, MR_REFINE_RECORD_BYTES);
-    StoreGraphHeader(MR_GRAPH_INPUT_COARSEN_HEADER, g_graphEntries >> 16, max(gs_coarsenCount, 1u),
-                     MR_GRAPH_INPUT_COARSEN_RECORDS, 4);
+    StoreGraphHeader(MR_GRAPH_INPUT_COARSEN_HEADER, (g_graphEntries >> 16) & MR_GRAPH_ENTRY_MASK,
+                     max(gs_coarsenCount, 1u), MR_GRAPH_INPUT_COARSEN_RECORDS, 4);
 }
 
     // --- 5. 解放(1 グループ): 返す枠を要求の順に積む・取り合いの印を消す・数える ---

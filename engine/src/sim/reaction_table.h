@@ -66,6 +66,11 @@ namespace bicameral::sim {
     constexpr uint32_t REPOSE_ANGLE_MAX_DEGREES = 90;
     constexpr uint32_t DEFAULT_REPOSE_ANGLE_DEGREES = 35;
 
+    // ばらける固体の粒の詰まり(%。積もった時に粒が占める体積の割合。D-679)の範囲と、書き忘れた時の値(ベイクが警告して使う。乾いた砂 約 60)
+    constexpr uint32_t PACKING_PERCENT_MIN = 1;
+    constexpr uint32_t PACKING_PERCENT_MAX = 100;
+    constexpr uint32_t DEFAULT_PACKING_PERCENT = 60;
+
     // 物質の動き方の任意の値(T-0710・土台の決定 3。名前と単位は設計の仮)。書かない値は「今と同じ動き」で、0 と書いたのとは違う。
     // どれも相の決まった物質だけに書ける(ベイクが確かめる)。まだ刻みは読まない(土台の段 1 以降)。GPU の反応の表には入らない
     // (固体の動き方と安息角だけは見立ての相の表 CvSpeciesPhase に写る。sim::MakeSpeciesPhases。T-0819)
@@ -78,6 +83,8 @@ namespace bicameral::sim {
         std::optional<SolidMotion> solidMotion;  // 固体が動くか(T-0819。書かない = Fixed)
         std::optional<uint32_t>
             reposeAngleDegrees;  // ばらける固体の安息角(度。0〜90。砂 34。書かない Loose は 35 と警告)
+        std::optional<uint32_t>
+            packingPercent;  // ばらける固体の粒の詰まり(%。1〜100。乾いた砂 60。書かない Loose は 60 と警告。D-679)
 
         [[nodiscard]] bool operator==(const SpeciesTransport&) const = default;
     };
