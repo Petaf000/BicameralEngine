@@ -184,6 +184,15 @@ namespace bicameral::script {
                                                ENVIRONMENT_GAS_PRESSURE_SPEED_KEY));
         }
 
+        // environment.cell_layers = true / false(成分ごとの層を使う世界。T-1241・ADR-0489 の 3)
+        std::expected<bool, std::string> ReadCellLayers(const TableEntry& entry) {
+            if (entry.value.IsBoolean())
+                return entry.value.boolean;
+
+            return std::unexpected(std::format("パッケージ {}: {}.{}: true(層を使う世界)か false(使わない)で書く",
+                                               entry.package, ENVIRONMENT_CATEGORY, ENVIRONMENT_CELL_LAYERS_KEY));
+        }
+
         // environment.balance_cycles = { gas_pressure, liquid_pressure, support }(T-0955)。書かない法則は既定の 2
         std::expected<sim::BalanceCycles, std::string> ReadBalanceCycles(const TableEntry& entry) {
             const std::string path = std::format("{}.{}", ENVIRONMENT_CATEGORY, ENVIRONMENT_BALANCE_CYCLES_KEY);
@@ -284,6 +293,12 @@ namespace bicameral::script {
                     return std::unexpected(speed.error());
 
                 world.gasPressureSpeed = *speed;
+            } else if (key == ENVIRONMENT_CELL_LAYERS_KEY) {
+                const auto layers = ReadCellLayers(entry);
+                if (!layers)
+                    return std::unexpected(layers.error());
+
+                world.cellLayers = *layers;
             } else if (key == ENVIRONMENT_BALANCE_CYCLES_KEY) {
                 const auto cycles = ReadBalanceCycles(entry);
                 if (!cycles)

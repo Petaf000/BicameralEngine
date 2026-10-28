@@ -119,7 +119,7 @@ namespace bicameral::sim {
         std::optional<WorldLiquidRegion> liquidRegion;  // 世界いっぱい。重力が 0 なら無し(液体は流れない)
 
         // 層を書かなかった粒の物質の知らせ(読み方が Floating の時だけ。領域・物質ごとに 1 つ。T-1236)。
-        // 層を使う世界(EnableCellLayers)を作る所が表の警告に足す(層を使わない世界では層は意味を持たないので出さない)
+        // 層を使う世界(environment.cell_layers)なら、表のベイクが表の警告に足す(使わない世界では出さない。T-1241)
         std::vector<std::string> unsettledGrainNotes;
 
         // セル (x, y, z) が region に入るか(箱の中で、殻なら外側の厚さ shellCells の中)

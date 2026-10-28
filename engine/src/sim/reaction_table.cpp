@@ -797,6 +797,12 @@ namespace bicameral::sim {
         baked.warnings.insert(baked.warnings.end(), ordered.worldLayout.retiredCategories.begin(),
                               ordered.worldLayout.retiredCategories.end());  // 読まない分類(D-510。T-0724)
 
+        // 層を書かなかった粒の知らせは、層を使う世界(environment.cell_layers)だけ警告に(使わない世界では層は舞う粒を分けない。T-1241)。
+        // 読み方が「全部が層」(UnwrittenGrainLayers::Settled)なら知らせは作られないので、どちらの読み方でもここは同じ
+        if (baked.environment.cellLayers)
+            baked.warnings.insert(baked.warnings.end(), baked.worldLayout.unsettledGrainNotes.begin(),
+                                  baked.worldLayout.unsettledGrainNotes.end());
+
         auto playMetrics = BakePlayMetrics(definition.playMetrics, baked);
         if (!playMetrics)
             return std::unexpected(playMetrics.error());

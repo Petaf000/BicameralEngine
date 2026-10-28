@@ -42,6 +42,9 @@ ADR-0481 の 5 は、セルの成分(物質)ごとに「そのうち積もった
 - 2026-10-29 T-1236: 置き口は (a)(b) 共通にした。層つきの根の置き口 `PlaceRootBlock(…, layers)`・パッケージの `world_cells` の `settled_umol`(層 > 量・中身に無い物質はベイクの誤り)。
   書かなかった粒の読み方は `UnwrittenGrainLayers` の値 1 つ(world_layout.h の `UNWRITTEN_GRAIN_LAYERS`。仮 = Floating: 層 0 + ベイクの知らせ / Settled: 層 = 量)。
   (b) に決まった時に残るのは「層の並びが無い ≠ 層 0」の印(刻みの付け替え・層なしの置き方)だけ。
+- 2026-10-29 T-1241: 層を使う世界はパッケージの環境 `environment.cell_layers = true`(書かない = 使わない。名前は仮)で選ぶ(`WorldPhysics::cellLayers`)。
+  多重解像度の木には `ApplyCellLayersChoice` が当てる。層を書かなかった粒の知らせ(`unsettledGrainNotes`)は、使う世界だけ表の警告(`BakedReactionTable::warnings`)に出る。
+  (b) なら知らせが作られないので警告も出ず、選ぶ口も警告の道もそのまま(作り直さない)。
 
 ## 限り(T-1221 で直す)
 - GPU は層を知らない: GPU から読んだ列はインラインの層を付け替えで保ち(`層 ≤ 量`)、溢れの成分の層は消す。溢れを使う世界の一様の値の層は読み戻しで結び直さない(読む時に結ぶので `層 ≤ 量` は保たれる)。
