@@ -6,8 +6,8 @@
 // 違う大きさの面の形 5 つ(④ 対の面 = 既定・③ 面の点のばね・③' 面の点で梁のずれの硬さ・② 細かい側の面ごとの梁・① 中心どうし)と、全部 0.5 m の答えも並べる。
 // 面の縁の力(T-1191): 細かいセルが絡む面(違う大きさの面・細かい面)の縁の力と、全部 0.25 m の答えの同じ面の差 ÷ 全部 0.25 m の縁の力の最大
 // (混ざる場面の板の厚さは 0.5 m なので ÷ 2 で比べる)。
-// 試験が落ちるのは帳簿(毎刻み Σ セルの上の力 = 固定した面の力 − 重さ)・決定性(2 回の実行のハッシュ)・符号・④ の ±5 %・④ の縁の力の差 ≤ 5 %(固定した面から 0.5 m のセル 1 つ以内の面は除いて別に出す。T-1206)。
-// 引数: [--ticks n](既定 240)
+// 試験が落ちるのは帳簿(毎刻み Σ セルの上の力 = 固定した面の力 − 重さ)・決定性(2 回の実行のハッシュ)・符号・④ の ±5 %・④ の縁の力の差 ≤ 5 %(固定した面から 0.5 m のセル 1 つ以内の面は別に出す。T-1206 で固定した面の式を面の点の形にそろえてからは、それも 5 % に入れる)。
+// 引数: [--ticks n](既定 240)[--case n](n 番目の場面だけ。0 から。測り用)
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -179,10 +179,11 @@ namespace {
 
     // 細かいセルが絡む面の縁の力の差 ÷ 全部 0.25 m の縁の力の最大(T-1191)
     struct EdgeError {
-        double mixedFace = 0;    // 違う大きさの面
-        double fineFace = 0;     // 細かいセルどうしの面
-        double clampedFace = 0;  // 固定した面の近くの面(T-1206)
-        std::string worst;       // 違う大きさの面の差が最大の面
+        double mixedFace = 0;      // 違う大きさの面
+        double fineFace = 0;       // 細かいセルどうしの面
+        double clampedFace = 0;    // 固定した面の近くの面(T-1206)
+        std::string worst;         // 違う大きさの面の差が最大の面
+        std::string clampedWorst;  // 固定した面の近くの面の差が最大の面(T-1206)
     };
 
     EdgeError CompareEdges(const sim::SupportScene& fineScene, const sim::SupportLaw& reference,
@@ -191,7 +192,7 @@ namespace {
             return x < fineScene.width && up < fineScene.height &&
                    fineScene.solid[x + (size_t)fineScene.width * up] != 0;
         };
-        // 固定した面の近く: 0.25 m のセルの元の 0.5 m のセルから 0.5 m のセル 1 つ以内に固定した面がある(固定した面の式が大きさで揃っていない分。T-1206)
+        // 固定した面の近く: 0.25 m のセルの元の 0.5 m のセルから 0.5 m のセル 1 つ以内に固定した面がある(T-1206 の前は固定した面の式が大きさで揃っていなかったので別に出した。今は ④ の 5 % に入れる)
         const auto clamped = [&](uint32_t x, uint32_t up) {
             const int64_t lowX = std::max<int64_t>(0, (int64_t)(x & ~1u) - 2);
             const int64_t lowUp = std::max<int64_t>(0, (int64_t)(up & ~1u) - 2);
@@ -233,7 +234,14 @@ namespace {
                                                    std::abs((double)got.highSideMn / 2 - (double)expected.highSideMn)) /
                                           std::max(largest, 1.0);
                     if (clamped(x, up) || clamped(nextX, nextUp)) {
-                        error.clampedFace = std::max(error.clampedFace, differ);
+                        if (differ > error.clampedFace) {
+                            error.clampedFace = differ;
+                            error.clampedWorst = std::format(
+                                "軸 {}・細かい座標 ({}, {})・混ざる 低 {:.0f} 高 {:.0f}・全部 0.25 m 低 {} 高 {} mN",
+                                axis, x, up, (double)got.lowSideMn / 2, (double)got.highSideMn / 2, expected.lowSideMn,
+                                expected.highSideMn);
+                        }
+
                         continue;
                     }
 
@@ -304,17 +312,18 @@ namespace {
             Log(Channel::Sim, Level::Info,
                 "[T-1120] {} {}: {:.4f} mm = 全部 0.25 m の {:.3f}({})・セルの最大の差 {:.3f}・動き {:.1e}・セル {}・"
                 "縁の力の差 ÷ 最大 違う大きさの面 {:.2f} %・細かい面 {:.2f} %・固定した面の近く {:.2f} "
-                "%(違う大きさの面の最大 {})",
+                "%(違う大きさの面の最大 {}・固定した面の近くの最大 {})",
                 each.name, BeamName(beam), run.path.back(), ratio, pass ? "±5 % 合格" : "±5 % 不合格", worst,
                 Drift(run.path), mixed.CellCount(), 100.0 * edges.mixedFace, 100.0 * edges.fineFace,
-                100.0 * edges.clampedFace, edges.worst);
+                100.0 * edges.clampedFace, edges.worst, edges.clampedWorst);
             Expect(run.ledgerOk, std::format("{} {}: 帳簿", each.name, BeamName(beam)));
             Expect(run.path.back() > 0, std::format("{} {}: 重さで下がる", each.name, BeamName(beam)));
             if (beam == sim::MixedBeam::FacePair) {
                 Expect(pass, std::format("{} {}: 全部 0.25 m の ±5 %", each.name, BeamName(beam)));
                 // 細い梁の曲げ(0.5 m のセル 1〜2 つの厚さ)では粗いセルの精度そのもの(全部 0.5 m と全部 0.25 m の差)が入るので 5 %(T-1191)
-                Expect(!each.edgeCheck || (edges.mixedFace <= 0.05 && edges.fineFace <= 0.05),
-                       std::format("{} {}: 縁の力の差 ≤ 5 %", each.name, BeamName(beam)));
+                Expect(
+                    !each.edgeCheck || (edges.mixedFace <= 0.05 && edges.fineFace <= 0.05 && edges.clampedFace <= 0.05),
+                    std::format("{} {}: 縁の力の差 ≤ 5 %", each.name, BeamName(beam)));
             }
 
             sim::SupportLaw again(each.scene, Options(beam));
@@ -347,15 +356,21 @@ namespace {
 
     int RunAll(std::span<char*> arguments) {
         uint32_t ticks = 240;
+        int32_t only = -1;  // --case n: n 番目の場面だけ(0 から。測り用)
         for (size_t i = 1; i < arguments.size(); ++i) {
             const std::string_view name = arguments[i];
             if (name == "--ticks" && i + 1 < arguments.size())
                 ticks = (uint32_t)std::atoi(arguments[++i]);
+            else if (name == "--case" && i + 1 < arguments.size())
+                only = std::atoi(arguments[++i]);
         }
 
         static_assert(FINE_MM * 2 == COARSE_MM);
-        for (const MixedCase& each : Cases())
-            TestCase(each, ticks);
+        const std::vector<MixedCase> cases = Cases();
+        for (size_t i = 0; i < cases.size(); ++i) {
+            if (only < 0 || (size_t)only == i)
+                TestCase(cases[i], ticks);
+        }
 
         if (failureCount != 0) {
             Log(Channel::Sim, Level::Error, "support_mixed_test: FAILED ({} 件)", failureCount);
