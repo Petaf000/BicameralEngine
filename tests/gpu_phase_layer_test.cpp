@@ -2,7 +2,7 @@
 // 層の上の面 → 層の温度の反応 → 混ざり方の変わり目)を GPU(shaders/sim/phase_layer_cells.hlsl)で走らせ、CPU とビット一致を確かめる
 // (T-1211・ADR-0486)。PlEvenCondensedEnergy の 64bit の差と比べ・PlGasEnergyAfter の床の割り算が RTX で壊れないことの確かめ
 // (CLAUDE.md §4。T-1078・T-1159 の形の外れ)。
-// 場面(tests/phase_layer_scene.h の表。セル 1024 個を 8 種の場面に分け、量と温度を番号の乱数で振る)を 50 刻みずつ 8 区間進め、
+// 場面(tests/phase_layer_scene.h の表。セル 1024 個を 9 種の場面に分け、量と温度を番号の乱数で振る)を 50 刻みずつ 8 区間進め、
 // 区間ごとにセルと Ec を読み戻して比べる。どのセルもエネルギー(和)と元素が初めとビット単位で同じことも見る(面の流れが無いので)。
 // 混ざらないセル → 混ざったセル(露が付く: PlEvenCondensedEnergy)と、混ざったセル → 混ざらないセル(露が乾く: Ec を捨てる)の
 // 両方の変わり目が区間の中で起きたことと、層の熱が負にならないこと(薄い層の吸熱の反応。ADR-0497 の 5)も確かめる。
@@ -24,7 +24,7 @@ using namespace bicameral::reaction;
 namespace {
 
     constexpr uint32_t CELL_COUNT = 1024;
-    constexpr uint32_t SCENE_COUNT = 8;
+    constexpr uint32_t SCENE_COUNT = 9;
     constexpr uint32_t THREADS_PER_GROUP = 64;  // phase_layer_cells.hlsl の numthreads
     constexpr uint32_t TICKS_PER_SEGMENT = 50;
     constexpr uint32_t SEGMENT_COUNT = 8;
@@ -80,7 +80,7 @@ namespace {
         scene.condensedEnergies.push_back(mixed ? condensedMj : 0);
     }
 
-    // 8 種: 氷・水たまり・露(乾く)・湿った空気(露が付く)・炭の燃焼・木・満ちた石(孔の気体)・空気だけ
+    // 9 種: 氷・水たまり・露(乾く)・湿った空気(露が付く)・炭の燃焼・木・満ちた石(孔の気体)・冷たい層のそばの燃える気体・空気だけ
     LoneScene MakeScene(const sim::BakedReactionTable& table) {
         LoneScene scene;
         for (uint32_t index = 0; index < CELL_COUNT; ++index) {
@@ -124,6 +124,15 @@ namespace {
                 case 6: {
                     const std::vector<test::PlAmount> stone = {{"stone_real", test::PL_STONE_MICROMOL}};
                     AddCell(table, scene, stone, 300000 + (uint32_t)Pick(index, 3, 100000), air(stone), gasMk);
+                    break;
+                }
+                case 7: {
+                    // 冷たい石の薄い層のそばの熱い燃える気体(気体だけの規則は気体の温度で進む = 2 回目の反応。T-1211)
+                    const std::vector<test::PlAmount> stone = {{"stone_real", amount * 100000}};
+                    std::vector<test::PlAmount> fuel = air(stone);
+                    fuel.push_back({"test_fuel_gas", 200000 + Pick(index, 3, 800000)});
+                    AddCell(table, scene, stone, 290000 + (uint32_t)Pick(index, 4, 20000), fuel,
+                            900000 + (uint32_t)Pick(index, 5, 300000));
                     break;
                 }
                 default: AddCell(table, scene, {}, 0, air({}), gasMk); break;
@@ -246,6 +255,7 @@ namespace {
         uint32_t becameMixed = 0;    // 区間の初めに混ざらず、終わりに混ざったセル
         uint32_t becameUnmixed = 0;  // 区間の初めに混ざり、終わりに混ざらないセル
         uint32_t mixedCells = 0;     // 区間の終わりに混ざったセル(累計)
+        uint32_t gasRuleCells = 0;   // 混ざったまま気体だけの規則が進んだセル(燃える気体が減った。累計)
         // 区間の終わりに層の熱が負のセル(場面ごとの累計。0 でなければ失敗)・気体の部分の熱が負のセル(表示だけ。ADR-0497 の 5)
         std::array<uint32_t, SCENE_COUNT> negativeCondensed{};
         std::array<uint32_t, SCENE_COUNT> negativeGas{};
@@ -255,14 +265,22 @@ namespace {
         return PlLayerOf(table.View(), cell).mixed != 0;
     }
 
+    uint64_t AmountOf(const RxCell& cell, uint32_t speciesId) {
+        const uint32_t slot = RxFindSlot(cell, speciesId);
+
+        return slot < cell.speciesCount ? cell.amounts[slot] : 0;
+    }
+
     // CPU のセルを 1 区間進めて GPU と比べる。食い違ったセル(保存が破れたセルも)の数を返す
     int CompareSegment(const sim::BakedReactionTable& table, LoneScene& cpu, const LoneScene& gpuResult,
                        std::span<const std::vector<uint64_t>> elements, std::span<const int64_t> energies,
                        uint32_t segment, Coverage& coverage) {
         int mismatchCount = 0;
         const uint64_t tickBegin = SegmentTickBegin(segment);
+        const uint32_t fuelId = table.SpeciesId("test_fuel_gas");
         for (uint32_t index = 0; index < CELL_COUNT; ++index) {
             const bool wasMixed = IsMixed(table, cpu.cells[index]);
+            const uint64_t fuelBefore = AmountOf(cpu.cells[index], fuelId);
             const PlLoneCell lone = PlAdvanceLoneCell(
                 table.View(), PlMakeLoneCell(cpu.cells[index], cpu.condensedEnergies[index], tickBegin - 1), WORLD_SEED,
                 tickBegin, TICKS_PER_SEGMENT, index);
@@ -273,6 +291,7 @@ namespace {
             coverage.becameMixed += !wasMixed && mixed ? 1 : 0;
             coverage.becameUnmixed += wasMixed && !mixed ? 1 : 0;
             coverage.mixedCells += mixed ? 1 : 0;
+            coverage.gasRuleCells += wasMixed && mixed && AmountOf(lone.cell, fuelId) < fuelBefore ? 1 : 0;
             if (mixed) {
                 const PlParts parts = PlPartsOf(table.View(), lone.cell, lone.condensedEnergy);
                 coverage.negativeCondensed[index % SCENE_COUNT] += parts.condensed.heat < 0 ? 1 : 0;
@@ -342,12 +361,15 @@ namespace {
         }
 
         Log(Channel::Gpu, Level::Info,
-            "  混ざり方の変わり目: 混ざった {}・混ざらなくなった {}・区間の終わりの混ざったセル(累計){}",
-            coverage.becameMixed, coverage.becameUnmixed, coverage.mixedCells);
+            "  混ざり方の変わり目: 混ざった {}・混ざらなくなった "
+            "{}・区間の終わりの混ざったセル(累計){}・気体だけの規則が進んだ {}",
+            coverage.becameMixed, coverage.becameUnmixed, coverage.mixedCells, coverage.gasRuleCells);
         Log(Channel::Gpu, Level::Info, "  部分の熱が負のセル(場面ごと): 層 {}・気体 {}", coverage.negativeCondensed,
             coverage.negativeGas);
         if (std::ranges::any_of(coverage.negativeCondensed, [](uint32_t count) { return count != 0; }))
             return std::unexpected("層の熱が負になった(PlEndReact の下限が効いていない)");
+        if (coverage.gasRuleCells == 0)
+            return std::unexpected("混ざったセルで気体だけの規則が進んでいない(2 回目の反応を通っていない)");
         if (coverage.becameMixed == 0 || coverage.becameUnmixed == 0)
             return std::unexpected("混ざり方の変わり目の両方が起きていない(場面が核の道を通っていない)");
 
