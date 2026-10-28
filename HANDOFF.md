@@ -1,6 +1,18 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-29(本体の作業役 13 回目・wt4 T-1211・wt6 T-1235 を main へ・T-1250・T-1251 を作った)
+最終更新: 2026-10-29(本体の作業役 14 回目・wt3 T-1236 を main へ・T-1251 の直しをブランチに・Q177。会話の入れ物の再起動で途中で止めた)
+
+## この仕事でしたこと(2026-10-29・本体の作業役・14 回目: wt3 t-1236 のマージ・T-1251)
+- **マージ(--no-ff・衝突なし)**: wt3 da63d0f7(t-1236-layer-placement)。**T-1236 Done**(層つきの根の置き口 PlaceRootBlock・パッケージの world_cells の settled_umol〔名前は仮〕・ベイクの誤り・(a)/(b) を値 UNWRITTEN_GRAIN_LAYERS で切り替え・仮 = (a))。
+  **ADR-0489 は Proposed のまま(Q175)**。ROADMAP: T-1236 Done・T-1241(層を使う世界をパッケージで選ぶ口と、層を書かなかった粒の警告。wt3 が着手)の行。
+- 試験(release・警告 0・ビルド 700 s): world_layout・multires_layers・multires・multires_state・multires_sparse・multires_wide・multires_uniform・luau_type_check・play_metric 合格。archmap --check OK(227 本)。→ push
+- **T-1251(途中)**: 3 本とも試験の期待の古さ(エンジンの不具合ではない)。直しはブランチ **t-1251-old-cpu-tests fe834bde**(main 20799ae7 の上。release のビルドは通った・警告 0。**試験は未実行**。main には入れていない)。
+  radiation_reference = T-1066(f55584f1)でセルロース・炭が放射の吸い込みを書く / standard_packages = T-1164(278c9469)で combustion_test が地面の大気 300 K を書き直す / window_lab = D-637(熱伝導率の倍率 20000 → 1)で実験室の箱の隣の根は 4 mK しか上がらない → 幅 1 K → 1 mK。詳しくはチケット。
+  次: そのブランチで radiation_reference・standard_packages・window_lab・window_lab_blank・window_lab_compare・probe_radiation・cascade_light を流し、合格なら main へ --no-ff。
+- QUESTIONS に **Q177**(司令塔がユーザーに出した判断待ち: 支えで梁の厚さの途中で細かさが変わる所の偽の曲げを引く直し。ADR-0501・wt4 T-1207・t-1207-cantilever-root 9687cbea・未マージ。仮 = 既定)。
+- 次の番号は **D-683・ADR-0479・T-1252・Q178**(本体。この仕事では Q177 を使った)。
+
+(前の版の最終更新: 2026-10-29(本体の作業役 13 回目・wt4 T-1211・wt6 T-1235 を main へ・T-1250・T-1251 を作った))
 
 ## この仕事でしたこと(2026-10-29・本体の作業役・13 回目: wt4 t-1211・wt6 t-1235 のマージ)
 - **マージ(--no-ff)**: wt4 60133b6f(t-1211-phase-layer-world)→ 28b7e124。衝突なし。**T-1211 Done**(担当分 = セルの段の核・反応 2 回・1 セルの GPU のビット一致。世界へつなぐのは T-1230〜T-1232)。
