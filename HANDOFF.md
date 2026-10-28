@@ -1,6 +1,20 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-27(本体の作業役 10 回目・wt3 T-1160・wt5 T-1200/T-1201 を main へ・ADR-0486 Accepted・T-1201 Done)
+最終更新: 2026-10-29(本体の作業役 11 回目・wt4 T-1213/T-1214・wt6 T-1229(+ T-1161 の 1 段目)・wt2 T-1206/T-1192 を main へ・Q174〜Q176)
+
+## この仕事でしたこと(2026-10-29・本体の作業役・11 回目: wt4 t-1213・wt6 t-1229・wt2 t-1206/t-1192 のマージ・Q174〜Q176)
+- **マージ(--no-ff)**: wt4 4fe67487(T-1213・T-1214 Done・ADR-0493 Accepted = ADR-0487 の 3 を置き換え)→ ROADMAP に T-1213・T-1214 の行(Done)・**D-662 の注に「選ぶ段も起動時に測る」(司令塔の仮の決め)**。
+  wt6 14af6d9c(t-1161 9df6b27b を含む。T-1161 の 1 段目〔段ごとの GPU 時間の印 engine/src/gpu/stage_stamps・放つ面の量をセルごとに 1 回〕+ T-1229 Done〔放射の空の所を GPU が飛ばす・ProbeSimOptions::radiationSkipIdle 既定 true〕)。衝突は docs/perf.md の表の行だけ(両方残した)。
+  wt2 dee2f998(T-1206 Done・**ADR-0491 Proposed のまま = Q176**)→ d735bc2e(T-1192 Done)。ROADMAP: T-1192 Done・T-0939 の注・T-1206 の行・**T-1207 の行(研究)に「上の段だけ細かい片持ち梁の根の柱の移り目 10.08 %(T-1206 の後の残り)」**(T-1207 のチケットのファイルはまだ無い)。
+- 試験(release・警告 0): t-1213 後 = time_step_tree(1162 s)・time_step_span_dump・time_step_choose_dump・gpu_time_step_span・gpu_time_step_choose 合格。
+  t-1229 + t-1192 後 = ^support_ 9 本(support_fracture_window 822 s・_thick 704 s)・cascade_light(668 s)・cascade_light_swing(991 s)・cascade_tree_grid・probe_radiation・sky_port・sun_column・float_check 5 本 + GPU 6 本(gpu_sun_column・gpu_cascade_light・gpu_probe_sim・gpu_probe_physics_radiation・gpu_play_metric・gpu_radiation_cost)合格。PC が重い時で時間は長め。→ push
+- archmap --check OK(225 本。t-1229 の後に Linux 側で)。
+- QUESTIONS に **Q174〜Q176**(司令塔がユーザーに出した判断待ち。どれも仮で進めている): Q174 層の流れの費用 約 1 ms(仮 A 重ねて隠す)/ Q175 層を使う世界で層として置かなかった粒(仮 A 舞う粒。司令塔の見立て = B)/ Q176 固定した面を面の点の形を既定に(仮 = 既定)+ support_fracture_refine_scenes の D の確かめ。
+- COMMANDER の「番号の配り方」に 2026-10-27 の追加と 2026-10-29 の司令塔の配り(司令塔の次は T-1253・ADR-0501)。
+- **残り(次の本体の作業役)**: 4. wt3 t-1220-layer-cpu-rest 5ca34fdb(T-1220 Done・ADR-0489 Proposed = Q175)/ 5. wt5 t-1202-shell-multigrid-rebased 64fe0358 → t-1223-shell-step-cost da710a72(T-1202 の段 1 = CPU の多重格子・T-1223。元の t-1202-shell-multigrid は古いまま放置・消さない)。
+- 次の番号は **D-683・ADR-0479・T-1250・Q177**(本体。この仕事では Q174〜Q176 だけ使った)。
+
+(前の版の最終更新: 2026-10-27(本体の作業役 10 回目・wt3 T-1160・wt5 T-1200/T-1201 を main へ・ADR-0486 Accepted・T-1201 Done))
 
 ## この仕事でしたこと(2026-10-27・本体の作業役・10 回目: wt3 t-1160・wt5 t-1200 のマージ)
 - **マージ(--no-ff・衝突なし)**: wt3 cd764aac(T-1160 の 1 回目: 相の層の共通の核 shaders/common/phase_layer.hlsli・tests/phase_layer_test.cpp・ADR-0486。世界へつなぐのは T-1211)→ **ADR-0486 Accepted(D-682)**・T-1160 の判断待ち 3 点を閉じた → push 7074ac45。
