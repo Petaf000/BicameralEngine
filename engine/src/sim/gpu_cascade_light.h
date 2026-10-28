@@ -5,6 +5,7 @@
 // 仮の世界(sim/probe_sim。T-1154)は CreateStandalone で作る: 同じシェーダーを自分のルート署名(u0〜u5 + 定数 26 語 + デバッグのリング。
 // 木のルート署名と同じ並びの部分だけ)で動かし、光の値と温度は呼ぶ側の GPU の段が毎刻み作業のバッファ(Work の workLights・workTemperatures)へ書く。
 // 持ち越しの表は刻みの偶奇で選ぶ(刻み t は表 t & 1 を読み、表 1 − (t & 1) へ書く)ので、CPU に刻みをまたぐ状態が無い(写し・巻き戻しは状態のバッファの頭だけを写す)。
+// 段 1 からの起動は、前の段が GPU の上で書いた袋の数で要るだけ(間接の起動。T-1235・ADR-0495。袋が無い段はグループ 0)。
 //
 // データの流れ: CPU の CascadeGrid・CascadeParams・初めの持ち越し → 作業のバッファ(u4。既定のヒープへ写す)
 //   → 刻みごとに RecordTick(1 刻みの全部の段。持ち越しは GPU の中で次の刻みへ)→ RecordReadback → Read(CascadeTickResult の形)
@@ -19,6 +20,7 @@
 #include <array>
 #include <cstdint>
 #include <expected>
+#include <span>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -76,13 +78,16 @@ namespace bicameral::sim {
                         gpu::StageStamps* stamps = nullptr, uint8_t firstStage = 0);
 
         // 起動の予告(仮の世界用・T-1229): この刻みに流す物が無ければ、RecordTick と呼ぶ側の段を GPU が飛ばす(CPU は読み戻さない)。
-        // RecordPlan は RcPlanTick で「流す」の印を作って予告のバッファへ写す(刻みごとに RecordTick の前に 1 回。放つセルの印は
+        // RecordPlan は RcPlanTick で「流す」の印を作って予告のバッファへ書く(刻みごとに RecordTick の前に 1 回。放つセルの印は
         // 呼ぶ側の写しの段が作業の RC_GPU_WORK_EMITTERS へ書く)。BeginSkipIfIdle〜EndSkipIfIdle の間の起動は、印が 0 なら流れない。
         // 飛ばすのは「前に流した刻みが何も放たず受けず・入る持ち越しが空・放つセルが無い」時だけなので、結果は流した時と同じ(D-428)
         void RecordPlan(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick,
                         gpu::StageStamps* stamps = nullptr, uint8_t firstStage = 0);
         void BeginSkipIfIdle(ID3D12GraphicsCommandList10* list) const;
         void EndSkipIfIdle(ID3D12GraphicsCommandList10* list) const;
+
+        // 段 1 からの間接の起動(仮の世界用・T-1235。既定は切る: 64³ で速くならなかった。ADR-0495)。入れても結果は同じ
+        void SetIndirectLevels(bool enabled) { m_indirectLevels = enabled; }
 
         // 段の印の番号の数(パイプラインの数)と名前(測りのログ用)
         static constexpr uint32_t STAGE_COUNT = 12;
@@ -106,8 +111,21 @@ namespace bicameral::sim {
         GpuCascadeLight() = default;
 
         // nest が nullptr なら自分のルート署名で(CreateStandalone)
+        // ownU3・after は自分のルート署名の時だけ(u3 に結ぶ物・起動の後ろの UAV のバリアにまとめる状態の遷移。T-1235)
         void Dispatch(ID3D12GraphicsCommandList10* list, GpuMultires* nest, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
-                      size_t pipeline, uint64_t items, std::array<uint32_t, 4> external) const;
+                      size_t pipeline, uint64_t items, std::array<uint32_t, 4> external,
+                      ID3D12Resource* ownU3 = nullptr, std::span<const D3D12_RESOURCE_BARRIER> after = {}) const;
+        // 自分のルート署名で結ぶ(external[2] に置いたグループの数の歩幅を入れる)。置いたグループの数を返す
+        uint64_t BindOwn(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, size_t pipeline,
+                         uint64_t items, std::array<uint32_t, 4> external, ID3D12Resource* ownU3) const;
+        // 段 1 から(自分のルート署名・T-1235): 引数の表のグループの数で起動する
+        void DispatchIndirect(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, size_t pipeline,
+                              uint64_t items, std::array<uint32_t, 4> external, uint64_t argsOffset,
+                              std::span<const D3D12_RESOURCE_BARRIER> after) const;
+        static void BarrierAfter(ID3D12GraphicsCommandList10* list, std::span<const D3D12_RESOURCE_BARRIER> after);
+        void RecordLevelsIndirect(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                  uint32_t tickLow, uint32_t out, gpu::StageStamps* stamps, uint8_t firstStage) const;
+        [[nodiscard]] bool CreateLevelArgs(ID3D12Device5* device);
         bool RecordUploadWith(ID3D12GraphicsCommandList10* list, GpuMultires* nest, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                               const CascadeCarry& carry);
         void RecordTickWith(ID3D12GraphicsCommandList10* list, GpuMultires* nest, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
@@ -126,6 +144,12 @@ namespace bicameral::sim {
         ComPtr<ID3D12Resource> m_readback;
         ComPtr<ID3D12Resource>
             m_predicate;  // 起動の予告(uint64 1 語。COMMON で置き、使う間だけ写し先・予告にする。T-1229)
+
+        // --- 段 1 からの間接の起動(CreateStandalone の時だけ。T-1235)---
+        ComPtr<ID3D12Resource>
+            m_levelArgs;  // 段ごとの起動の引数(u3。COMMON で置き、刻みの中で書く間 UAV・読む間 INDIRECT_ARGUMENT)
+        ComPtr<ID3D12CommandSignature> m_dispatchSignature;  // 起動 1 回だけの形(ルートの引数は変えない)
+        bool m_indirectLevels = false;
         std::vector<std::byte> m_workBytesImage;  // 作業の中身(初めの持ち越しの前まで)
         reaction::RcGpuParams m_params{};
         uint64_t m_workBytes = 0;
