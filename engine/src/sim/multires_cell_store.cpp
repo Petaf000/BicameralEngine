@@ -99,6 +99,44 @@ namespace bicameral::sim {
 
     }  // namespace
 
+    // --- 一様の枠の層の置き場(T-1238): 枠ごとの番号 + 層のある枠だけの組。空いた組は次に Set した枠が使う ---
+
+    void MultiresUniformLayerStore::Reset(size_t slotCount) {
+        entryOfSlot.assign(slotCount, MULTIRES_NO_UNIFORM_LAYERS);
+        entries.clear();
+        freeEntries.clear();
+    }
+
+    void MultiresUniformLayerStore::Set(uint32_t slot, MultiresUniformLayers layers) {
+        if (layers.species.empty()) {
+            Clear(slot);
+            return;
+        }
+
+        uint32_t& entry = entryOfSlot[slot];
+        if (entry == MULTIRES_NO_UNIFORM_LAYERS) {
+            if (freeEntries.empty()) {
+                entry = static_cast<uint32_t>(entries.size());
+                entries.emplace_back();
+            } else {
+                entry = freeEntries.back();
+                freeEntries.pop_back();
+            }
+        }
+
+        entries[entry] = std::move(layers);
+    }
+
+    void MultiresUniformLayerStore::Clear(uint32_t slot) {
+        uint32_t& entry = entryOfSlot[slot];
+        if (entry == MULTIRES_NO_UNIFORM_LAYERS)
+            return;
+
+        entries[entry] = {};
+        freeEntries.push_back(entry);
+        entry = MULTIRES_NO_UNIFORM_LAYERS;
+    }
+
     namespace nest_detail {
 
         RxCell LoadPageCell(const MultiresNest& nest, uint32_t page, uint32_t index) {
@@ -242,7 +280,7 @@ namespace bicameral::sim {
         bool BlockKeepsLayers(const MultiresNest& nest, uint32_t slot) {
             const MrBlock& block = nest.blocks[slot];
             if (MrIsUniform(block))
-                return !nest.cells.uniformLayers[slot].species.empty();
+                return nest.cells.uniformLayers.Find(slot) != nullptr;
 
             return PageKeepsLayers(nest, block.page);
         }
@@ -262,19 +300,18 @@ namespace bicameral::sim {
         }
 
         std::vector<uint64_t> LoadUniformLayers(const MultiresNest& nest, uint32_t slot) {
-            const MultiresUniformLayers& stored = nest.cells.uniformLayers[slot];
+            const MultiresUniformLayers* stored = nest.cells.uniformLayers.Find(slot);
             const RxWideCell value = LoadWideUniform(nest, slot);
-            if (stored.species.empty())
+            if (stored == nullptr)
                 return std::vector<uint64_t>(value.speciesCount, 0);
 
-            return RebindLayers(stored.species, stored.layers, value);
+            return RebindLayers(stored->species, stored->layers, value);
         }
 
         void SetUniformLayers(MultiresNest& nest, uint32_t slot, const RxWideCell& value,
                               std::span<const uint64_t> layers) {
             FX_ASSERT(layers.size() <= value.speciesCount);
-            MultiresUniformLayers& stored = nest.cells.uniformLayers[slot];
-            stored = {};
+            MultiresUniformLayers stored;
             for (uint32_t i = 0; i < layers.size(); ++i) {
                 if (layers[i] == 0)
                     continue;
@@ -283,10 +320,12 @@ namespace bicameral::sim {
                 stored.species.push_back(value.species[i]);
                 stored.layers.push_back(layers[i]);
             }
+
+            nest.cells.uniformLayers.Set(slot, std::move(stored));
         }
 
         void ClearUniformLayers(MultiresNest& nest, uint32_t slot) {
-            nest.cells.uniformLayers[slot] = {};
+            nest.cells.uniformLayers.Clear(slot);
         }
 
         void CopyCellToPage(MultiresNest& nest, uint32_t slot, uint32_t cell, uint32_t page, uint32_t index) {
@@ -328,7 +367,7 @@ namespace bicameral::sim {
         }
 
         uint64_t HashUniformLayers(uint64_t hash, const MultiresNest& nest, uint32_t slot, uint64_t address) {
-            if (nest.cells.uniformLayers[slot].species.empty())
+            if (nest.cells.uniformLayers.Find(slot) == nullptr)
                 return hash;
 
             const RxWideCell value = LoadWideUniform(nest, slot);
@@ -425,21 +464,23 @@ namespace bicameral::sim {
         }
 
         // --- 一様の枠の層(T-1220): 一様な枠だけが持ち、物質は一様の値にあって 層 ≤ 量 ---
-        for (uint32_t slot = 0; slot < nest.cells.uniformLayers.size(); ++slot) {
-            const MultiresUniformLayers& stored = nest.cells.uniformLayers[slot];
-            if (stored.species.empty())
+        // 組を持つのに物質が空(Set は空の組を持たない)も外れ(T-1238)
+        for (uint32_t slot = 0; slot < nest.cells.uniformLayers.entryOfSlot.size(); ++slot) {
+            const MultiresUniformLayers* stored = nest.cells.uniformLayers.Find(slot);
+            if (stored == nullptr)
                 continue;
 
-            if (stored.layers.size() != stored.species.size() || !MrIsUniform(nest.blocks[slot])) {
+            if (stored->species.empty() || stored->layers.size() != stored->species.size() ||
+                !MrIsUniform(nest.blocks[slot])) {
                 misfits += 1;
                 continue;
             }
 
             const RxWideCell value = LoadWideUniform(nest, slot);
-            for (size_t k = 0; k < stored.species.size(); ++k) {
+            for (size_t k = 0; k < stored->species.size(); ++k) {
                 bool fits = false;
                 for (uint32_t i = 0; i < value.speciesCount; ++i)
-                    fits |= value.species[i] == stored.species[k] && stored.layers[k] <= value.amounts[i];
+                    fits |= value.species[i] == stored->species[k] && stored->layers[k] <= value.amounts[i];
 
                 misfits += fits ? 0u : 1u;
             }
@@ -503,7 +544,7 @@ namespace bicameral::sim {
             return;
 
         for (uint32_t slot = 0; slot < uniformCount; ++slot) {
-            if (nest.cells.uniformLayers[slot].species.empty())
+            if (nest.cells.uniformLayers.Find(slot) == nullptr)
                 continue;
 
             const std::vector<uint64_t> layers = nest_detail::LoadUniformLayers(nest, slot);
