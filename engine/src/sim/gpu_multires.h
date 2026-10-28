@@ -67,6 +67,13 @@ namespace bicameral::sim {
         // 比例し(1 グループ 64 スレッド × 8 語 × 1 セルの上限)、同時に刻めるブロックの数もグループの数まで
         uint32_t wideSpaceGroups = 0;
 
+        // セルの成分ごとの層の量(T-1221。ADR-0481 の 5): 層の頁(層のある頁だけ。1 頁 48 KiB)の数。0 = 層を持たない(今と同じ。
+        // CPU の頁に層があっても GPU は層を知らず、読み戻しは CPU の前の層を付け替えるだけ)。0 でなければ RecordUpload が層のある頁を写し、
+        // 刻み(RecordStep・RecordStepActive)の後に層を合わせる段が層 = min(前の層, 今の量) に付け替え、Read が CPU の頁の層を GPU の層で置き換える。
+        // 1 段目の限り: 溢れを使う世界・一様の枠の層は写さない(RecordUpload が false)。要求の処理(細かくする・粗くする・畳む・広げる)は
+        // 層を配らない(頁を手放した層の頁は 0 になる)。T-1240
+        uint32_t layerPages = 0;
+
         // 作ったルート署名・パイプライン・Work Graph のプログラムを使い回す置き場(T-0427。無ければ毎回作る)。同じデバイスで
         // 何度も作る所(試験の場面ごと)用。使い回すのはコンパイルの結果だけで、裏のメモリとバッファはこの GpuMultires が持つ。
         // 作る時に使うだけで覚えない
@@ -186,6 +193,8 @@ namespace bicameral::sim {
         // 計測(T-0248): 世界のバッファ(Work Graph の作業場を除く)の VRAM のバイト数と、そのうちの溢れの領域
         [[nodiscard]] uint64_t BufferBytes() const;
         [[nodiscard]] uint64_t OverflowBytes() const;
+        // 層の置き場のバイト数(層の頁を持たなければ 0。T-1221)
+        [[nodiscard]] uint64_t LayerBytes() const;
 
         // 伝導の段を Work Graph で投げるか(計測で切り替える。conductionGraph で作っていなければ true にできず false を返す)
         [[nodiscard]] bool UseConductionGraph(bool use);
@@ -307,6 +316,8 @@ namespace bicameral::sim {
         void RecordWideDeferred(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
         void RecordWideBig(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
         void StampStage(ID3D12GraphicsCommandList10* list);
+        // 層を合わせる段(T-1221。層の頁を持たなければ何もしない): u4 に層の置き場を結び、使った層の頁のセルの層を付け替える
+        void RecordLayerReconcile(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
         [[nodiscard]] uint64_t ActivityBytes() const;
         [[nodiscard]] std::vector<std::byte> MakeActivityList(uint32_t list, std::span<const uint32_t> slots) const;
         void SetTick(uint64_t worldSeed, uint64_t tick);
@@ -380,6 +391,14 @@ namespace bicameral::sim {
 
         // --- 細かいレベルの熱の陰解法(T-0132。EnableImplicitConduction で作る)---
         std::unique_ptr<GpuMultiresImplicit> m_implicit;
+
+        // --- セルの成分ごとの層の量(T-1221。GpuMultiresOptions::layerPages。並びは common/multires_layers.hlsli)---
+        uint32_t m_layerCapacity = 0;  // 層の頁の数(0 = 層を持たない)
+        uint32_t m_layerUsed = 0;      // 写した時に使った層の頁の数(段はこの数だけグループを投げる)
+        ComPtr<ID3D12PipelineState> m_layerPipeline;
+        ComPtr<ID3D12Resource> m_layerBuffer;
+        ComPtr<ID3D12Resource> m_layerUpload;
+        ComPtr<ID3D12Resource> m_layerReadback;
 
         // --- 計測 ---
         ComPtr<ID3D12QueryHeap> m_timestamps;

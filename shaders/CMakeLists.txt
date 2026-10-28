@@ -196,6 +196,7 @@ foreach(_entry IN ITEMS Clear Cells CellLinks NodeHash NodeFirst ParentScanLocal
   string(TOLOWER "${_snake}" _snake)
   bicameral_add_shader(sim/implicit_levels.hlsl PROFILE cs_6_8 ENTRY Lv${_entry} NAME implicit_levels_${_snake})
 endforeach()
+bicameral_add_shader(sim/multires_layers.hlsl PROFILE cs_6_8 ENTRY ReconcileLayers NAME multires_layers)  # 層を合わせる段(T-1221)
 bicameral_add_shader(sim/multires_peek.hlsl PROFILE cs_6_8 ENTRY MirrorWorld NAME multires_peek_mirror)  # 覗き窓の世界の写し(T-0096)
 bicameral_add_shader(sim/multires_peek.hlsl PROFILE cs_6_8 ENTRY ExtractShadow NAME multires_peek_extract)  # 覗き窓の抽出(T-0096)
 bicameral_add_shader(sim/sun_column.hlsl PROFILE cs_6_8 ENTRY SunClear NAME sun_column_clear)  # 太陽の影の柱の出力を 0 に(T-0910)

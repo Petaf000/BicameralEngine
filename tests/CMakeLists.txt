@@ -684,6 +684,11 @@ bicameral_add_gpu_test(gpu_object_shell_flow_test)  # 物のまわりの空気�
 target_link_libraries(gpu_object_shell_flow_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_object_shell_flow gpu_object_shell_flow_test gpu --queue compute)
 
+bicameral_add_gpu_test(gpu_multires_layers_test)  # セルの成分ごとの層の量の GPU と CPU のビット一致(T-1221)
+target_link_libraries(gpu_multires_layers_test PRIVATE bicameral_sim)
+bicameral_add_gpu_test_case(gpu_multires_layers gpu_multires_layers_test gpu --queue compute)
+bicameral_add_gpu_test_case(gpu_multires_layers_warp gpu_multires_layers_test warp --warp --queue compute)
+set_tests_properties(gpu_multires_layers gpu_multires_layers_warp PROPERTIES TIMEOUT 900)  # 活性のグラフの作成を含む
 bicameral_add_gpu_test(gpu_multires_uniform_test)  # 一様なブロックの GPU と CPU のビット一致(T-0102)
 target_link_libraries(gpu_multires_uniform_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_multires_uniform gpu_multires_uniform_test gpu --queue compute)
@@ -1264,7 +1269,7 @@ foreach(_name IN ITEMS
     reaction_wait_test multires_test multires_wide_test multires_layers_test multires_activity_test multires_quiet_test multires_uniform_test
     multires_state_test field_storage_test sun_column_test sun_lens_test object_heat_test object_heat_nest_test grass_wake_test object_shell_test cascade_light_test sky_port_test cascade_light_swing_test cascade_tree_grid_test
     multires_conduction_test multires_edge_test multires_subcycle_test multires_implicit_test multires_implicit_tree_test lab_box_test
-    gpu_reaction_test gpu_sun_column_test gpu_cascade_light_test gpu_object_heat_test gpu_object_heat_nest_test gpu_object_shell_flow_test gpu_multires_test gpu_multires_activity_test gpu_multires_quiet_test gpu_multires_uniform_test
+    gpu_reaction_test gpu_sun_column_test gpu_cascade_light_test gpu_object_heat_test gpu_object_heat_nest_test gpu_object_shell_flow_test gpu_multires_test gpu_multires_activity_test gpu_multires_quiet_test gpu_multires_uniform_test gpu_multires_layers_test
     gpu_multires_conduction_test gpu_multires_implicit_test gpu_multires_implicit_build_test gpu_multires_implicit_tree_test
     gpu_multires_implicit_conduction_test gpu_lab_box_test gpu_probe_sim_test gpu_probe_peek_test gpu_probe_place_test
     gpu_probe_trace_test gpu_probe_rewind_test gpu_world_copy_test gpu_probe_physics_test gpu_probe_fire_test

@@ -221,6 +221,14 @@ namespace bicameral::sim {
                    RxSameCell(result.cell, parentValue);
         }
 
+        // 一様な子 childSlot を一様な親へ粗くしても、親の一様の値の層が同じか(層の無い世界はいつも true。T-1220)
+        bool CoarsenKeepsUniformLayers(const MultiresNest& nest, uint32_t childSlot, uint32_t parentSlot) {
+            if (!nest_detail::BlockKeepsLayers(nest, childSlot) && !nest_detail::BlockKeepsLayers(nest, parentSlot))
+                return true;
+
+            return nest_detail::LoadUniformLayers(nest, childSlot) == nest_detail::LoadUniformLayers(nest, parentSlot);
+        }
+
         // 粗くする要求で親に要る頁の数(MrCoarsenPageNeed の溢れを使う世界の版。T-0199)
         uint32_t CoarsenWidePageNeed(const MultiresNest& nest, uint32_t childSlot, uint32_t parentSlot) {
             const MrBlock& child = nest.blocks[childSlot];
@@ -260,6 +268,11 @@ namespace bicameral::sim {
                 // 一様な親のまま粗くできても、登録した欄の値が違えば頁に広げる(T-0711)
                 if (state.pageNeed == 0 && MrIsUniform(nest.blocks[parent]) &&
                     !nest_fields::CoarsenKeepsUniform(nest, state.target, parent))
+                    state.pageNeed = 1;
+
+                // 一様の値の層が違っても頁に広げる(同じ値の子 8 つの層の和 ÷ 8 = 子の層。T-1220)
+                if (state.pageNeed == 0 && MrIsUniform(nest.blocks[parent]) &&
+                    !CoarsenKeepsUniformLayers(nest, state.target, parent))
                     state.pageNeed = 1;
 
                 return;
@@ -323,7 +336,7 @@ namespace bicameral::sim {
             for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
                 const uint32_t parentCell = MrParentCellOfChild(octant, index);
                 if (!MrIsUniform(parent))
-                    StoreWidePageCell(nest, childPage, index, LoadWideNestCell(nest, parentSlot, parentCell));
+                    nest_detail::CopyCellToPage(nest, parentSlot, parentCell, childPage, index);  // 層ごと(T-1220)
 
                 if (childFraction != MR_NO_FRACTION)
                     StoreWideFraction(nest, childFraction, index, LoadWideFraction(nest, parent.fraction, parentCell));
@@ -359,13 +372,17 @@ namespace bicameral::sim {
             else if (uniform)
                 UniformAt(nest, childSlot) = UniformAt(nest, parentSlot);
 
+            // 一様な子の層は親と同じ(子の層の和 = 親の層 × 8。頁の子は下で写す。T-1220)
+            nest.cells.uniformLayers[childSlot] = uniform ? nest.cells.uniformLayers[parentSlot]
+                                                          : MultiresUniformLayers{};
+
             if (nest.wideCells) {
                 CopyWideToChild(nest, parentSlot, octant, childPage, childFraction);
             } else {
                 for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
                     const uint32_t parentCell = MrParentCellOfChild(octant, index);
                     if (!uniform)
-                        StorePageCell(nest, childPage, index, LoadCellAt(nest, parentSlot, parentCell));
+                        nest_detail::CopyCellToPage(nest, parentSlot, parentCell, childPage, index);  // 層ごと(T-1220)
 
                     if (childFraction != MR_NO_FRACTION)
                         SetFraction(nest, childFraction, index, FractionAt(nest, parent.fraction, parentCell));
@@ -451,6 +468,29 @@ namespace bicameral::sim {
                 return MrCoarsenCell(GatherChildren(nest, childSlot, fractionSlot, local));
         }
 
+        // 子 2³ の層を成分ごとに和 ÷ 8 の切り捨てで(粗いセル coarse の成分と同じ位置。T-1220。ADR-0481 の 5 の 4)。
+        // 子の層 ≤ 子の量なので 層の和 ÷ 8 ≤ 量の和 ÷ 8 ≤ 粗いセルの量(端数は量の側にだけ入る)。切り捨ての余りは層から残りへ移る
+        std::vector<uint64_t> CoarsenLayers(const MultiresNest& nest, uint32_t childSlot, uint32_t local,
+                                            const RxWideCell& coarse) {
+            std::vector<uint64_t> sums(coarse.speciesCount, 0);
+            for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
+                const uint32_t index = MrChildCell(local, j);
+                const std::vector<uint64_t> layers = LoadWideNestCellLayers(nest, childSlot, index);
+                const RxWideCell child = LoadWideNestCell(nest, childSlot, index);
+                for (uint32_t c = 0; c < layers.size(); ++c) {
+                    for (uint32_t k = 0; k < coarse.speciesCount && layers[c] != 0; ++k) {
+                        if (coarse.species[k] == child.species[c])
+                            sums[k] += layers[c];
+                    }
+                }
+            }
+
+            for (uint32_t k = 0; k < coarse.speciesCount; ++k)
+                sums[k] = std::min(sums[k] / MR_CHILDREN_PER_CELL, coarse.amounts[k]);
+
+            return sums;
+        }
+
         template <typename Coarsened>
         void ApplyCoarsenOf(MultiresNest& nest, uint32_t i) {
             MrRequestState& state = nest.states[i];
@@ -458,26 +498,29 @@ namespace bicameral::sim {
             const MrBlock child = nest.blocks[childSlot];
             MrBlock& parent = nest.blocks[child.parent];
 
-            // --- 子 2³ を 1 つに(親の八分の一の 64 セル)---
+            // --- 子 2³ を 1 つに(親の八分の一の 64 セル)。層のある子は層も成分ごとに和 ÷ 8(T-1220)---
             std::array<Coarsened, MR_OCTANT_CELLS> results{};
+            std::array<std::vector<uint64_t>, MR_OCTANT_CELLS> layers{};
+            const bool childLayered = nest_detail::BlockKeepsLayers(nest, childSlot);
             bool octantFraction = false;
             for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
                 results[local] = CoarsenOne<Coarsened>(nest, childSlot, child.fraction, local);
                 RecordCoarsened(nest, results[local], child.level);
                 octantFraction |= !MrFractionIsZero(results[local].fraction);
+                if (!childLayered)
+                    continue;
+
+                if constexpr (std::is_same_v<Coarsened, MrWideCoarsened>)
+                    layers[local] = CoarsenLayers(nest, childSlot, local, results[local].cell);
+                else
+                    layers[local] = CoarsenLayers(nest, childSlot, local, RxWidenCell(results[local].cell));
             }
 
             // --- 一様な親: 子が同じ値に戻らなければ頁に広げる(T-0102)---
             if (state.pageNeed != 0) {
                 const uint32_t page = PoppedPage(nest, state, 0);
                 nest_fields::ExpandPage(nest, child.parent, page);
-                for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-                    if (nest.wideCells)  // 一様の値の溢れごと(返された頁の溢れは空。T-0199)
-                        StoreWidePageCell(nest, page, index, LoadWideNestCell(nest, child.parent, index));
-                    else
-                        StorePageCell(nest, page, index, MrUniformCell(parent, UniformAt(nest, child.parent), index));
-                }
-
+                nest_detail::FillPageFromUniform(nest, child.parent, page);  // 一様の値の溢れ・層ごと(T-0199・T-1220)
                 parent.page = page;
             }
 
@@ -498,12 +541,18 @@ namespace bicameral::sim {
             for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
                 const uint32_t index = MrOctantCell(child.parentOctant, local);
                 if constexpr (std::is_same_v<Coarsened, MrWideCoarsened>) {
-                    if (!MrIsUniform(parent))
+                    if (!MrIsUniform(parent) && childLayered)
+                        nest_detail::StoreWidePageCellWithLayers(nest, parent.page, index, results[local].cell,
+                                                                 layers[local]);
+                    else if (!MrIsUniform(parent))
                         StoreWidePageCell(nest, parent.page, index, results[local].cell);
 
                     StoreWideFraction(nest, parent.fraction, index, results[local].fraction);
                 } else {
-                    if (!MrIsUniform(parent))
+                    if (!MrIsUniform(parent) && childLayered)
+                        nest_detail::StoreWidePageCellWithLayers(nest, parent.page, index,
+                                                                 RxWidenCell(results[local].cell), layers[local]);
+                    else if (!MrIsUniform(parent))
                         StoreCellAt(nest, child.parent, index, results[local].cell);
 
                     SetFraction(nest, parent.fraction, index, results[local].fraction);
@@ -532,6 +581,7 @@ namespace bicameral::sim {
 
             parent.children[child.parentOctant] = MR_NO_BLOCK;
             IndexRemove(nest, childSlot);
+            nest_detail::ClearUniformLayers(nest, childSlot);  // 次に使う枠に古い層を残さない(T-1220)
             nest.blocks[childSlot] = MrMakeUnusedBlock();
             PokeBlock(nest, child.parent);
         }
@@ -594,6 +644,7 @@ namespace bicameral::sim {
 
         // --- 全部同じなら一様(頁なし)、でなければ頁を取る(T-0102)---
         const bool uniform = std::ranges::all_of(cells, [&](const RxCell& cell) { return MrSameCell(cell, cells[0]); });
+        nest_detail::ClearUniformLayers(nest, slot);  // 根は層 0 で置く(T-1220)
         if (uniform) {
             UniformAt(nest, slot) = cells[0];
             if (nest.wideCells)

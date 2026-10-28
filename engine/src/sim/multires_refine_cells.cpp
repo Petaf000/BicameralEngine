@@ -8,6 +8,11 @@
 // 傾きは同じ親のブロックの中の隣の列から(SfSurfaceSlopeQ16)。ブロックの外・子に覆われたセルは無いと読む(1 本目の仮。チケットの設計の詰め 6):
 //   横が無い → 傾き 0・下が無い → 詰まり切る・上が無い → 空。1 刻みに 1 つの親は 1 つの要求だけが触るので、読む所は順番に依存しない。
 // GPU(shaders/sim/multires_graph.hlsl の RefineLevel)はまだ SAME(T-1188)。それまで MultiresNest::refineCells は既定で空(使わない)。
+// 成分ごとの層(T-1220。ADR-0481 の 5 の 4・ADR-0489): 層を持つ成分は「層 = 沈む側(凝縮相)」と「残り = 物質の置かれ方」の 2 つの物質に分けて配り、
+// 子の層 = 子へ配った層の分(子の層の和 = 親の層 × 8・子の量の和 = 親 × 8)。層を使う世界(EnableCellLayers)では粒の残りは舞う粒(空きに同じ濃さ)。
+// 層の無いセル(層を使わない世界)は前と同じ 1 つの物質のまま = ビット単位で同じ。
+#include <algorithm>
+
 #include "sim/multires_nest.h"
 #include "sim/multires_nest_internal.h"
 #include "sim/placement_refine.h"
@@ -39,16 +44,47 @@ namespace bicameral::sim {
             return material;
         }
 
+        // セルの成分を置かれ方の物質に。層を持つ成分(と層を使う世界の粒)は層の分と残りの 2 つに分ける(T-1220)
         struct CellMaterials {
             std::vector<PlaceMaterial> materials;
-            std::vector<int64_t> amounts;  // 子のレベルの単位(親の数 × 8)
+            std::vector<int64_t> amounts;      // 子のレベルの単位(親の数 × 8)
+            std::vector<uint32_t> components;  // [物質] セルの成分の位置
+            std::vector<uint8_t> layerParts;   // [物質] 層の分なら 1
+
+            void Push(const PlaceMaterial& material, uint64_t amount, uint32_t component, bool layerPart) {
+                materials.push_back(material);
+                amounts.push_back((int64_t)amount * 8);
+                components.push_back(component);
+                layerParts.push_back(layerPart ? 1 : 0);
+            }
         };
 
-        CellMaterials MaterialsOf(std::span<const RxSpecies> table, const RxCell& cell) {
+        CellMaterials MaterialsOf(const MultiresNest& nest, std::span<const RxSpecies> table, const RxCell& cell,
+                                  const MrCellLayers& layers) {
             CellMaterials result;
             for (uint32_t i = 0; i < cell.speciesCount; ++i) {
-                result.materials.push_back(MaterialOf(table[cell.species[i]]));
-                result.amounts.push_back((int64_t)cell.amounts[i] * 8);
+                const PlaceMaterial material = MaterialOf(table[cell.species[i]]);
+                const bool floats = nest.cellLayers.enabled && material.kind == SF_SETTLE_GRAIN;
+                const uint64_t layer = layers.amounts[i];
+                if (layer == 0 && !floats) {
+                    result.Push(material, cell.amounts[i], i, false);  // 前と同じ 1 つの物質
+                    continue;
+                }
+
+                // --- 層は沈む側(凝縮相)・残りは物質の置かれ方(層を使う世界の粒の残りは舞う粒 = 空きに同じ濃さ)---
+                PlaceMaterial settled = material;
+                if (settled.kind == SF_SETTLE_GAS)
+                    settled.kind = SF_SETTLE_GRAIN;
+
+                PlaceMaterial rest = material;
+                if (floats)
+                    rest.kind = SF_SETTLE_GAS;
+
+                if (layer != 0)
+                    result.Push(settled, layer, i, true);
+
+                if (cell.amounts[i] > layer)
+                    result.Push(rest, cell.amounts[i] - layer, i, false);
             }
 
             return result;
@@ -72,9 +108,10 @@ namespace bicameral::sim {
         }
 
         int64_t FullnessAt(const Neighborhood& around, int32_t x, int32_t y, int32_t z) {
-            const RxCell cell = nest_detail::LoadCellAt(around.nest, around.slot,
-                                                        MrCellIndex((uint32_t)x, (uint32_t)y, (uint32_t)z));
-            const CellMaterials cellMaterials = MaterialsOf(around.table, cell);
+            const uint32_t index = MrCellIndex((uint32_t)x, (uint32_t)y, (uint32_t)z);
+            const RxCell cell = nest_detail::LoadCellAt(around.nest, around.slot, index);
+            const MrCellLayers layers = LoadNestCellLayers(around.nest, around.slot, index);
+            const CellMaterials cellMaterials = MaterialsOf(around.nest, around.table, cell, layers);
             const SfSettleSum sum = PlaceSettleSum(cellMaterials.materials, cellMaterials.amounts);
 
             return SfSettleFullnessQ16(SfSettledVolume(sum), MR_CELL_VOLUME_MM3 * 8, sum.anchored);
@@ -142,29 +179,53 @@ namespace bicameral::sim {
             return energies;
         }
 
-        // --- 配った子のセル(成分は親の並びのまま、量 0 の成分を消して詰める = 同じ中身なら同じ並び)---
-        std::array<RxCell, 8> ChildCells(std::span<const RxSpecies> table, const RxCell& parent,
-                                         const PlacedChildren& placed) {
-            std::array<RxCell, 8> children{};
+        // --- 配った子のセル(成分は親の並びのまま、量 0 の成分を消して詰める = 同じ中身なら同じ並び)と子の層(層の分の和。T-1220)---
+        struct ChildCellSet {
+            std::array<RxCell, 8> cells{};
+            std::array<MrCellLayers, 8> layers{};
+        };
+
+        ChildCellSet ChildCells(std::span<const RxSpecies> table, const RxCell& parent,
+                                const CellMaterials& cellMaterials, const PlacedChildren& placed) {
+            ChildCellSet children;
             for (uint32_t j = 0; j < 8; ++j) {
-                RxCell& child = children[j];
+                RxCell& child = children.cells[j];
                 child = RxMakeEmptyCell(0);
                 const std::vector<int64_t>& amounts = placed.massMg[PlaceIndexOfMrChild(placed, j)];
+
+                // --- 物質(層の分と残り)を成分へ足し戻す ---
+                std::array<int64_t, RX_MAX_CELL_SPECIES> totals{};
+                std::array<int64_t, RX_MAX_CELL_SPECIES> layerTotals{};
+                for (size_t m = 0; m < cellMaterials.materials.size(); ++m) {
+                    const uint32_t component = cellMaterials.components[m];
+                    totals[component] += amounts[m];
+                    if (cellMaterials.layerParts[m] != 0)
+                        layerTotals[component] += amounts[m];
+                }
+
                 for (uint32_t i = 0; i < parent.speciesCount; ++i) {
-                    if (amounts[i] <= 0)
+                    if (totals[i] <= 0)
                         continue;
 
                     child.species[child.speciesCount] = parent.species[i];
-                    child.amounts[child.speciesCount] = (uint64_t)amounts[i];
+                    child.amounts[child.speciesCount] = (uint64_t)totals[i];
+                    children.layers[j].amounts[child.speciesCount] = (uint64_t)std::max<int64_t>(layerTotals[i], 0);
                     child.speciesCount += 1;
                 }
             }
 
-            const std::array<int64_t, 8> energies = ChildEnergies(table, parent, children);
+            const std::array<int64_t, 8> energies = ChildEnergies(table, parent, children.cells);
             for (uint32_t j = 0; j < 8; ++j)
-                children[j].energy = energies[j];
+                children.cells[j].energy = energies[j];
 
             return children;
+        }
+
+        // 親のセルの置かれ方の物質(層まで)
+        CellMaterials ParentMaterials(const MultiresNest& nest, uint32_t parentSlot, uint32_t parentCell) {
+            const RxCell cell = nest_detail::LoadCellAt(nest, parentSlot, parentCell);
+
+            return MaterialsOf(nest, nest.refineCells.species, cell, LoadNestCellLayers(nest, parentSlot, parentCell));
         }
 
     }  // namespace
@@ -175,8 +236,7 @@ namespace bicameral::sim {
             return std::nullopt;
 
         // --- 寄せるか(寄せないセルは隣を読まずに抜ける)---
-        const RxCell cell = nest_detail::LoadCellAt(nest, parentSlot, parentCell);
-        CellMaterials cellMaterials = MaterialsOf(table, cell);
+        CellMaterials cellMaterials = ParentMaterials(nest, parentSlot, parentCell);
         const SfSettleSum sum = PlaceSettleSum(cellMaterials.materials, cellMaterials.amounts);
         if (!SfSettles(SfSettledVolume(sum), MR_CELL_VOLUME_MM3 * 8, sum.anchored))
             return std::nullopt;
@@ -211,13 +271,22 @@ namespace bicameral::sim {
                     continue;
 
                 const RxCell parent = LoadCellAt(nest, parentSlot, parentCell);
-                const std::array<RxCell, 8> children = ChildCells(nest.refineCells.species, parent, *placed);
+                const CellMaterials cellMaterials = ParentMaterials(nest, parentSlot, parentCell);
+                const ChildCellSet children = ChildCells(nest.refineCells.species, parent, cellMaterials, *placed);
                 for (uint32_t j = 0; j < 8; ++j)
-                    StorePageCell(nest, childPage, MrChildCell(local, j), children[j]);
+                    StorePageCellWithLayers(nest, childPage, MrChildCell(local, j), children.cells[j],
+                                            children.layers[j]);
             }
         }
 
     }  // namespace nest_detail
+
+    void EnableCellLayers(MultiresNest& nest, const BakedReactionTable& table) {
+        nest.cellLayers.enabled = true;
+        nest.cellLayers.grain.assign(table.species.size(), 0);
+        for (size_t i = 0; i < table.species.size(); ++i)
+            nest.cellLayers.grain[i] = (table.species[i].flags & RX_SPECIES_GRAIN) != 0 ? 1 : 0;
+    }
 
     void EnableRefineCellPlacement(MultiresNest& nest, const BakedReactionTable& table) {
         nest.refineCells.species = table.species;
@@ -229,12 +298,9 @@ namespace bicameral::sim {
             if (!placed)
                 return false;
 
-            std::vector<PlaceMaterial> materials;
-            const RxCell cell = nest_detail::LoadCellAt(owner, parentSlot, parentCell);
-            for (uint32_t i = 0; i < cell.speciesCount; ++i)
-                materials.push_back(MaterialOf(owner.refineCells.species[cell.species[i]]));
-
-            const PlaceWeights placeWeights = PlaceChildWeights(materials, *placed, MR_CELL_VOLUME_MM3);
+            const CellMaterials cellMaterials = ParentMaterials(owner, parentSlot,
+                                                                parentCell);  // 層の分けまで同じ(T-1220)
+            const PlaceWeights placeWeights = PlaceChildWeights(cellMaterials.materials, *placed, MR_CELL_VOLUME_MM3);
             for (uint32_t j = 0; j < 8; ++j) {
                 const uint32_t index = PlaceIndexOfMrChild(*placed, j);
                 weights.condensed[j] = placeWeights.condensed[index];

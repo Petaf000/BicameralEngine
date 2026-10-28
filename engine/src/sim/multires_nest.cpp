@@ -39,14 +39,10 @@ namespace bicameral::sim {
 
             // --- セル: 子は親と同じ数(影は端数を持たず、親を覆わない。影はいつも頁を持つ。
             //     溢れを使う世界は溢れごと写す。T-0187)---
+            //     層も子は親と同じ(影の頁の古い層は残さない。T-1220)
             const uint32_t page = MrObserverPage(childSlot, nest.capacity.worldBlocks);
-            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-                const uint32_t parentCell = MrParentCellOfChild(octant, index);
-                if (nest.wideCells)
-                    StoreWidePageCell(nest, page, index, LoadWideNestCell(nest, parentSlot, parentCell));
-                else
-                    StorePageCell(nest, page, index, LoadNestCell(nest, parentSlot, parentCell));
-            }
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
+                nest_detail::CopyCellToPage(nest, parentSlot, MrParentCellOfChild(octant, index), page, index);
 
             // --- 登録した欄も子は親と同じ数(親は変えない。T-0761)---
             nest_fields::RefineShadow(nest, parentSlot, octant, childSlot, page);
@@ -286,6 +282,9 @@ namespace bicameral::sim {
             return hash;
         }
 
+        // 一様の枠の層の要約の番地(頁のセルの番地と分ける。T-1220)
+        constexpr uint64_t UNIFORM_LAYER_ADDRESS = uint64_t{1} << 63u;
+
         // セル index の溢れ(セルと端数。無ければ hash のまま)
         uint64_t HashCellOverflow(uint64_t hash, const MultiresNest& nest, uint32_t slot, uint32_t index) {
             if (!nest.wideCells)
@@ -321,13 +320,16 @@ namespace bicameral::sim {
                     hash = FxHashCombine(hash, HashReactionCell(nest_detail::LoadPageCell(nest, page, index)));
             }
 
-            // 成分ごとの層(T-1210。0 でない層だけ。層の無い世界はここで何も足さない)
+            // 成分ごとの層(T-1210。0 でない層だけ。層の無い世界はここで何も足さない。溢れの成分・一様の枠の層も。T-1220)
             for (uint32_t page = 0; page < cells.pages.size(); ++page) {
                 for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
                     const uint64_t address = (uint64_t{page} * MR_BLOCK_CELLS) + index;
                     hash = nest_detail::HashCellLayers(hash, nest, page, index, address);
                 }
             }
+
+            for (uint32_t slot = 0; slot < cells.uniformLayers.size(); ++slot)
+                hash = nest_detail::HashUniformLayers(hash, nest, slot, UNIFORM_LAYER_ADDRESS | slot);
 
             return hash;
         }
@@ -653,16 +655,10 @@ namespace bicameral::sim {
                     continue;
                 }
 
-                // --- 一様の値で埋める(溢れを使う世界は一様の値の溢れごと。返された頁の溢れは空。T-0199)---
+                // --- 一様の値で埋める(溢れを使う世界は一様の値の溢れごと。返された頁の溢れは空。T-0199。一様の値の層も。T-1220)---
                 const uint32_t page = PopPage(nest);
                 nest_fields::ExpandPage(nest, slot, page);
-                for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-                    if (nest.wideCells)
-                        StoreWidePageCell(nest, page, index, LoadWideNestCell(nest, slot, index));
-                    else
-                        StorePageCell(nest, page, index, MrUniformCell(block, UniformAt(nest, slot), index));
-                }
-
+                FillPageFromUniform(nest, slot, page);
                 block.page = page;
 
                 nest.counters[MR_COUNTER_EXPANDED] += 1;
@@ -722,6 +718,7 @@ namespace bicameral::sim {
         nest.capacity = capacity;
         nest.blocks.assign(blockCount, MrMakeUnusedBlock());
         nest.cells.uniform.assign(blockCount, RxMakeEmptyCell(0));
+        nest.cells.uniformLayers.assign(blockCount, MultiresUniformLayers{});
         nest.cells.pages.assign(pageCount, MultiresCellPage{});
         nest.fractions.assign(size_t{capacity.fractions} * MR_BLOCK_CELLS, MrMakeEmptyFraction());
         nest.ledger.assign(WlLedgerWords(capacity.ledgerColumns), 0);
@@ -822,7 +819,9 @@ namespace bicameral::sim {
                     hash = FxHashCombine(hash, HashReactionCell(LoadNestCell(nest, slot, index)));
                     hash = FxHashCombine(hash, HashFraction(FractionAt(nest, block.fraction, index)));
                     hash = HashCellOverflow(hash, nest, slot, index);
-                    if (!MrIsUniform(block))
+                    if (MrIsUniform(block))
+                        hash = nest_detail::HashUniformLayers(hash, nest, slot, index);  // T-1220
+                    else
                         hash = nest_detail::HashCellLayers(hash, nest, block.page, index, index);  // T-1210
                     hash = HashCellFields(hash, nest, slot, index, truthOnly);
                 }

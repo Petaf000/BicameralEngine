@@ -2,6 +2,8 @@
 // セルと端数は「インライン RX_MAX_CELL_SPECIES 個(nest.cells〔頁は成分の数に合わせた幅。T-0931〕・nest.fractions)+ 頁・端数の枠ごとの溢れ」に分けて持つ。
 // 読む時は合わせて上限の無い形(RxWideCell・MrWideFraction)にし、書く時は先頭をインラインへ・残りを溢れへ。
 // 溢れはセルの番号の順に詰める(1 セルを書き直すと後ろのセルの位置がずれる)。並びは書いた順に依らず、内容だけで決まる。
+// 成分ごとの層(T-1220。ADR-0489): セルの溢れの領域は成分と同じ並びの層(layers。層のある領域だけ)を持つ。層のある頁に書く時は、
+// 書く前のセル(インライン + 溢れ)と物質で結んで付け替える(インライン ↔ 溢れの間で物質が動いても層は物質についていく)。
 #include <algorithm>
 
 #include "sim/multires_nest.h"
@@ -14,17 +16,32 @@ namespace bicameral::sim {
 
     namespace {
 
-        // 溢れの領域のセル index の範囲を、species・amounts の [first, first + count) で置き換える
+        // 溢れの領域のセル index の範囲を、species・amounts(と層 layers。空 = 全部 0)で置き換える
         template <typename Amount>
         void ReplaceOverflow(MultiresOverflowArea& area, uint32_t index, std::span<const uint32_t> species,
-                             std::span<const Amount> amounts) {
+                             std::span<const Amount> amounts, std::span<const uint64_t> layers) {
             FX_ASSERT(species.size() == amounts.size());
+            FX_ASSERT(layers.empty() || layers.size() == species.size());
             const uint32_t begin = area.offsets[index];
             const uint32_t end = area.offsets[index + 1];
             const auto oldCount = static_cast<int64_t>(end - begin);
             const auto newCount = static_cast<int64_t>(species.size());
             if (oldCount == 0 && newCount == 0)
                 return;  // 溢れの無いセル(ほとんど)は何もしない
+
+            // --- 層: 0 でない層を初めて書く時だけ領域に層の並びを取る(T-1220)---
+            const bool anyLayer = std::ranges::any_of(layers, [](uint64_t layer) { return layer != 0; });
+            const bool layered = anyLayer || !area.layers.empty();
+            if (layered && area.layers.size() != area.species.size())
+                area.layers.assign(area.species.size(), 0);
+
+            if (layered) {
+                area.layers.erase(area.layers.begin() + begin, area.layers.begin() + end);
+                if (layers.empty())
+                    area.layers.insert(area.layers.begin() + begin, species.size(), 0);
+                else
+                    area.layers.insert(area.layers.begin() + begin, layers.begin(), layers.end());
+            }
 
             area.species.erase(area.species.begin() + begin, area.species.begin() + end);
             area.amounts.erase(area.amounts.begin() + begin, area.amounts.begin() + end);
@@ -37,13 +54,15 @@ namespace bicameral::sim {
         }
 
         // 一覧(species・amounts の先頭 count 個)の、インラインに入らない後ろの部分
+        // (層 layers は一覧と同じ位置。空 = 全部 0)
         template <typename Amount>
         void WriteTail(MultiresOverflowArea& area, uint32_t index, const std::vector<uint32_t>& species,
-                       const std::vector<Amount>& amounts, uint32_t count) {
+                       const std::vector<Amount>& amounts, uint32_t count, std::span<const uint64_t> layers = {}) {
             const uint32_t inlineCount = std::min(count, RX_MAX_CELL_SPECIES);
             const std::span<const uint32_t> tailSpecies(species.data() + inlineCount, count - inlineCount);
             const std::span<const Amount> tailAmounts(amounts.data() + inlineCount, count - inlineCount);
-            ReplaceOverflow(area, index, tailSpecies, tailAmounts);
+            const std::span<const uint64_t> tailLayers = layers.empty() ? layers : layers.subspan(inlineCount);
+            ReplaceOverflow(area, index, tailSpecies, tailAmounts, tailLayers);
         }
 
         bool AreaIsEmpty(const MultiresOverflowArea& area) {
@@ -54,6 +73,19 @@ namespace bicameral::sim {
             area.offsets.fill(0);
             area.species.clear();
             area.amounts.clear();
+            area.layers.clear();
+        }
+
+        // 上限の無い形のセルのインラインの部分(StoreWidePageCell の分け方)
+        RxCell InlinePart(const RxWideCell& cell) {
+            RxCell narrow = RxMakeEmptyCell(cell.energy);
+            narrow.speciesCount = std::min(cell.speciesCount, RX_MAX_CELL_SPECIES);
+            for (uint32_t i = 0; i < narrow.speciesCount; ++i) {
+                narrow.species[i] = cell.species[i];
+                narrow.amounts[i] = cell.amounts[i];
+            }
+
+            return narrow;
         }
 
     }  // namespace
@@ -137,13 +169,18 @@ namespace bicameral::sim {
 
     void StoreWidePageCell(MultiresNest& nest, uint32_t page, uint32_t index, const RxWideCell& cell) {
         FX_ASSERT(nest.wideCells || RxFitsInline(cell));
-        RxCell narrow = RxMakeEmptyCell(cell.energy);
-        narrow.speciesCount = std::min(cell.speciesCount, RX_MAX_CELL_SPECIES);
-        for (uint32_t i = 0; i < narrow.speciesCount; ++i) {
-            narrow.species[i] = cell.species[i];
-            narrow.amounts[i] = cell.amounts[i];
+
+        // --- 層のある頁: 書く前のセル(インライン + 溢れ)と物質で結んで付け替える(T-1220)---
+        if (nest_detail::PageKeepsLayers(nest, page)) {
+            const RxWideCell before = nest_detail::LoadWidePageCell(nest, page, index);
+            const std::vector<uint64_t> layers = nest_detail::LoadWidePageCellLayers(nest, page, index);
+            const std::span<const uint32_t> species(before.species.data(), before.speciesCount);
+            nest_detail::StoreWidePageCellWithLayers(nest, page, index, cell,
+                                                     nest_detail::RebindLayers(species, layers, cell));
+            return;
         }
 
+        const RxCell narrow = InlinePart(cell);
         nest_detail::StorePageCell(nest, page, index, narrow);
 
         if (nest.wideCells)
@@ -183,5 +220,57 @@ namespace bicameral::sim {
     bool FractionHasOverflow(const MultiresNest& nest, uint32_t fractionSlot) {
         return nest.wideCells && fractionSlot != MR_NO_FRACTION && !AreaIsEmpty(nest.fractionOverflow[fractionSlot]);
     }
+
+    // --- 成分ごとの層(T-1220)---
+
+    namespace nest_detail {
+
+        RxWideCell LoadWidePageCell(const MultiresNest& nest, uint32_t page, uint32_t index) {
+            RxWideCell wide = RxWidenCell(LoadPageCell(nest, page, index));
+            if (!nest.wideCells)
+                return wide;
+
+            const MultiresOverflowArea& area = nest.cellOverflow[page];
+            const uint32_t begin = area.offsets[index];
+            const uint32_t end = area.offsets[index + 1];
+            wide.species.insert(wide.species.end(), area.species.begin() + begin, area.species.begin() + end);
+            wide.amounts.insert(wide.amounts.end(), area.amounts.begin() + begin, area.amounts.begin() + end);
+            wide.speciesCount += end - begin;
+
+            return wide;
+        }
+
+        std::vector<uint64_t> LoadWidePageCellLayers(const MultiresNest& nest, uint32_t page, uint32_t index) {
+            const MultiresCellPage& cells = nest.cells.pages[page];
+            const uint32_t inlineCount = cells.energy.empty() ? 0u : cells.counts[index];
+            const MrCellLayers inlineLayers = LoadPageCellLayers(nest, page, index);
+            std::vector<uint64_t> layers(inlineLayers.amounts.begin(), inlineLayers.amounts.begin() + inlineCount);
+            if (!nest.wideCells)
+                return layers;
+
+            const MultiresOverflowArea& area = nest.cellOverflow[page];
+            for (uint32_t k = area.offsets[index]; k < area.offsets[index + 1]; ++k)
+                layers.push_back(area.layers.empty() ? 0 : area.layers[k]);
+
+            return layers;
+        }
+
+        void StoreWidePageCellWithLayers(MultiresNest& nest, uint32_t page, uint32_t index, const RxWideCell& cell,
+                                         std::span<const uint64_t> layers) {
+            FX_ASSERT(nest.wideCells || RxFitsInline(cell));
+            FX_ASSERT(layers.size() == cell.speciesCount);
+            MrCellLayers inlineLayers;
+            for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+                FX_ASSERT(layers[i] <= cell.amounts[i]);
+                if (i < RX_MAX_CELL_SPECIES)
+                    inlineLayers.amounts[i] = layers[i];
+            }
+
+            StorePageCellWithLayers(nest, page, index, InlinePart(cell), inlineLayers);
+            if (nest.wideCells)
+                WriteTail(nest.cellOverflow[page], index, cell.species, cell.amounts, cell.speciesCount, layers);
+        }
+
+    }  // namespace nest_detail
 
 }  // namespace bicameral::sim
