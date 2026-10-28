@@ -23,7 +23,7 @@ RC の写し(段 0 の CascadeGrid)を CPU で作って写すのではなく、G
 - [x] GpuCascadeLight::CreateFromTree(箱は世界の箱 = MakeCascadeTreeBox・物質の光の値を作業へ)・RecordTreeGrid(RcTreeGrid。1 スレッド = 葉のセル 1 つ・2^−L 角へ広げる)
 - [x] gpu_cascade_tree_grid(HW・WARP): 0.5 m / 1 m / 2 m の根・粗い葉と 0.5 m の葉が混ざった木で、16 刻み GPU が木から写しを作って流した結果が
       CPU の MakeCascadeTreeGrid の写しの StepCascadeLight と全部の刻みでビット一致。0.5 m より細かい葉は GPU が溢れの印 4(CPU は誤り)
-- [x] 費用を docs/perf.md へ(木を読む写しの段の µs/刻み)
+- [ ] 費用を docs/perf.md へ(木を読む写しの段の µs/刻み。下の「引き継ぎ」の途中の値まで。perf.md は未記入)
 - [ ] 段取り 4(出どころ・袋の鍵の相対化。127 の限りを外す)・段取り 2(粗い葉を葉の大きさで歩く)= 2 本目から
 
 ## 重なり(並走)
@@ -64,6 +64,16 @@ RC の写し(段 0 の CascadeGrid)を CPU で作って写すのではなく、G
 
 ## 見積もり(作業)
 - 1〜2 は 1 チャット、3〜5 は 1〜2 チャット、6・7 は T-1102 の続き(既定に入れる時)。合わせて 3〜4 チャットの見込み(全体の期間は見積もらない: D-411)。
+
+## 引き継ぎ(2026-10-29 wt6。会話の入れ物の再起動で止めた)
+- ブランチ t-1117-rc-multires-tree(t-1235-radiation-skip-positive の上。`git rebase main` はまだ)。release のビルドは通った(警告 0)。
+- 通した試験: gpu_cascade_tree_grid・gpu_cascade_tree_grid_warp・gpu_cascade_light・cascade_tree_grid・gpu_radiation_cost(release・全部通過)。archmap --check OK。
+- 測りの途中(RTX 3070 Ti・release・compute・16 刻みの平均。`run -Exe gpu_cascade_tree_grid_test -- --queue compute`): 0.5 m の根(葉の枠 40)木を読む写し 53 µs/刻み・RC 643 µs、
+  1 m の根(葉の枠 12)100 µs・RC 2561 µs、2 m の根(32768 セル・枠 9)227 µs・RC 2671 µs、1 m の根の一部を 0.5 m に 103 µs・RC 3028 µs。全部ビット一致・細かい葉は印 4(OK。perf.md へはまだ)。
+- 分かったこと: 写しの段は 1 スレッド = 葉のセル 1 つが 2^−L 角を順に書くので、粗い葉ほど 1 スレッドの仕事が増えて遅い(1 m の根で 0.5 m の倍)。
+  RC の 1 m の根の 2561 µs は升目 16384 セルの小さな箱にしては重い(未確認。重なり・熱い塊の放つ面の数か。T-1101 の 64³ 0.6〜0.9 ms と比べて調べる)。
+- 次の一手: (1) 止めた測りの残りを読んで perf.md へ。(2) 写しを 1 スレッド = 升目のセル 1 つ(LookupBlock で葉を引く)に変えるか比べる(結果は同じ)。
+  (3) `git rebase main`。(4) 段取り 4(127 の限りを外す)→ 段取り 2(粗い葉を葉の大きさで歩く。CPU リファレンスから)。5 と木へ当てるのは T-1227・T-1228 の後。
 
 ## 作業ログ
 - 2026-10-29(wt6): 見直し(上)。1 本目 = 木を読む写しの GPU(RcTreeGrid・CreateFromTree・RecordTreeGrid・MakeCascadeTreeBox)と
