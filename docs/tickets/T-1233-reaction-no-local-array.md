@@ -53,3 +53,21 @@ shaders/common/reaction.hlsli などシミュの共通のコードで、セル�
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-10-27 wt5(前の作業役): reaction.hlsli ほかの読み方を直し、dxil_alloca_check.py を足した。release のビルドは通った。コミット前に区切れた。
 - 2026-10-29 wt5: 途中の作業を読み、heat_conduction の行末コメントの折り返しを直し、上限の表 limits.txt を作ってチケットとともに WIP でコミット。
+- 2026-10-29 wt5(続き): release のビルド OK(警告 0)。CPU の試験(gpu_ 以外 129 本)を流し始めた: 40 本目まで radiation_reference だけ落ちる
+  (FAILED line 394 allZero = 試験の表の物質の放射の吸収の欄。シェーダーと関係ない C++ のパッケージの焼き。wt3・wt4 のログでも同じく落ちている = 前からの失敗)。
+  GPU の試験(HW 99 本を 9 本ずつ 10 組。runner/t1233/groups.txt の 1〜10 行目)と費用の 3 本(gpu_object_heat_test --measure-only・
+  gpu_multires_test --measure-wide・gpu_object_shell_flow_test --profile)を wt5 のランナーに積んだまま 2 時間で区切った。
+
+## 引き継ぎメモ(次の作業役・司令塔へ)
+- 結果は wt5 の runner/logs の z- で始まる test / run のログ(積んだ順)。全部 Passed なら完了条件の「全 GPU 試験」は HW の分を満たす。
+  WARP の 34 本(groups.txt の 11〜15 行目)はまだ積んでいない。
+- 費用の比べ: 前の値は runner/t1233/before_object_heat.log・before_multires_wide.log・before_shell_profile.log(同じ作業ツリーで直す前に測った)。
+  後の値と並べて docs/perf.md に 1 行(反応の段の ms・多重解像度の ns/セル)。
+- **GPU の試験の途中の結果(HW、2026-10-29)**: 組 1(gpu_fixed・gpu_reaction ほか 9 本)・組 4(activity・quiet・sun_column・cascade_light(_wide)・object_heat(_nest)ほか 9 本)は全部通った。
+  **陰解法の組が落ちた**: gpu_multires_implicit(計測: 鎖を測れない)・gpu_multires_implicit_tree / _build(CPU 側で SegFault。GPU を使う前)・
+  gpu_multires_implicit_conduction_blocks(_chain)/ _levels(_chain)(「ブロックが入らない上限なのに陽解法に回したブロックが無い」「陰解法の上限は全部の欄が要る(T-0178)」)。
+  同じ組の _stress・_chain・cheapest は通っている。落ち方は試験の設定・CPU 側に見え、読み方の直しとの関係は未確認(最後に通ったログは wt2 の 2026-10-21)。
+  **次にやること**: 同じ試験を直す前のビルド(main か da710a72)で流し、前から落ちているかを確かめる。前からなら本体へ(このチケットの外)、この直しのせいなら heat_conduction.hlsli の 2 か所を戻して切り分ける。
+- CPU の試験は --timeout 3600 で 41 本目(probe_gas)で打ち切られた(40 本: radiation_reference・standard_packages の 2 本が落ちる。どちらも C++ のパッケージの焼きで、
+  シェーダーと関係ない。standard_packages は「real_matter → combustion_test の上書き」の検査)。残りの 89 本は --timeout を長くして流し直す。
+- 残り: `git rebase main`(main に t-1202・t-1223 が入った後)・wt2 T-1188 との reaction.hlsli の重なりの解消(上の「重なり」)・Status を Done に。
