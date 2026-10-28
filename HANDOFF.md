@@ -1,6 +1,23 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-29(本体の作業役 11 回目・wt4 T-1213/T-1214・wt6 T-1229(+ T-1161 の 1 段目)・wt2 T-1206/T-1192 を main へ・Q174〜Q176)
+最終更新: 2026-10-29(本体の作業役 12 回目・wt3 T-1220/T-1221・wt5 T-1202 段 1/T-1223 を main へ・main で gpu_multires_implicit 系・near_fold を 1 回)
+
+## この仕事でしたこと(2026-10-29・本体の作業役・12 回目: wt3 t-1221・wt5 t-1202/t-1223 のマージ)
+- **マージ(--no-ff)**: wt3 17479a6c(t-1221-layer-gpu。T-1220 の CPU〔rebase 後 d67725a8〕と T-1221 の GPU の 1 段目を含む。元の t-1220-layer-cpu-rest 5ca34fdb は別に入れていない)。
+  **T-1220・T-1221 Done・ADR-0489 は Proposed のまま(Q175)**。ROADMAP に T-1220・T-1221(Done)・T-1236〜T-1239・T-1240(T-1188 の後)の行。衝突なし。
+  wt5 64fe0358(t-1202-shell-multigrid-rebased。T-1202 段 1 = CPU リファレンスの多重格子)→ da710a72(t-1223-shell-step-cost。T-1223 の 1 回目)。衝突は docs/perf.md の表の行だけ(両方残した)。
+  ROADMAP に T-1202 の注(段 1 を main へ)・T-1222・T-1223 の行(どちらも Doing / Todo)。元の t-1202-shell-multigrid は消していない。
+- 試験(release・警告 0): t-1221 後 = multires_layers・tree_refine_placement・placement_refine・multires・multires_state・multires_sparse・multires_wide・multires_activity・multires_quiet・multires_uniform・float_check 5 本(15 本 170 s)+
+  GPU gpu_multires_layers・_warp・gpu_multires_uniform・_warp・gpu_multires(5 本 307 s)合格。t-1223 後 = object_shell(--quick 393 s)・float_check 5 本・gpu_object_shell_flow 合格。
+  archmap --check OK(225 本)。clang-format の --dry-run --Werror を変わった C++ 18 ファイルに: ずれ無し。→ push
+- **main(f668e8e2)で HW の GPU 試験を 1 回(直していない。司令塔へ)**: gpu_multires_implicit = 落ちる(「計測: 鎖を測れない」gpu_multires_implicit_test.cpp:512)・
+  gpu_multires_implicit_tree = SegFault(鎖を CPU で作った直後)・gpu_multires_implicit_build = SegFault(アダプタの後すぐ)・
+  gpu_multires_near_fold = 落ちる(4000 刻み一致だが「頁が全部畳まれる・端数の枠を返す、になっていない」畳んだ頁 0。gpu_multires_conduction_test.cpp:742)・
+  gpu_multires_implicit_tree_stress = 合格。**wt5 の t-1233 と同じ形で main でも落ちる = t-1233 の変更のせいではない**(T-1221 の前の da710a72 の上の wt5 でも落ちていたので、T-1221 のせいでもないと見る。いつから落ちるかは未確認)。
+- COMMANDER の「番号の配り方」に 2026-10-29 追加(wt3 T-1253〜T-1254。**司令塔の次は T-1255・ADR-0501**)。
+- 次の番号は **D-683・ADR-0479・T-1250・Q177**(本体。この仕事では使っていない)。
+
+(前の版の最終更新: 2026-10-29(本体の作業役 11 回目・wt4 T-1213/T-1214・wt6 T-1229(+ T-1161 の 1 段目)・wt2 T-1206/T-1192 を main へ・Q174〜Q176))
 
 ## この仕事でしたこと(2026-10-29・本体の作業役・11 回目: wt4 t-1213・wt6 t-1229・wt2 t-1206/t-1192 のマージ・Q174〜Q176)
 - **マージ(--no-ff)**: wt4 4fe67487(T-1213・T-1214 Done・ADR-0493 Accepted = ADR-0487 の 3 を置き換え)→ ROADMAP に T-1213・T-1214 の行(Done)・**D-662 の注に「選ぶ段も起動時に測る」(司令塔の仮の決め)**。

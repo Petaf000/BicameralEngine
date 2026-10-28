@@ -1,5 +1,10 @@
 # NEXT.md — 次にやること(上から順に)
 
+**2026-10-29 本体の作業役(12 回目): wt3 T-1220・T-1221(ADR-0489 Proposed = Q175)・wt5 T-1202 段 1・T-1223 の 1 回目を main へ(試験合格・push)。**
+次: **main で HW の gpu_multires_implicit・_tree・_build(SegFault)・gpu_multires_near_fold が落ちる**(wt5 の T-1233 の切り分けと同じ。いつから落ちるかを決めて直す。司令塔が配る)。
+T-1240 は T-1188 の後・T-1236 は ADR-0489 の 3(Q175)の答えの後。Q174〜Q176 の答え待ち(仮で進めている)。
+次の番号は **D-683・ADR-0479・T-1250・Q177**(本体)。司令塔の次は T-1255・ADR-0501(COMMANDER)。
+
 **2026-10-29 本体の作業役(11 回目): wt4 T-1213・T-1214(ADR-0493)・wt6 T-1229(+ T-1161 の 1 段目)・wt2 T-1206(ADR-0491 Proposed)・T-1192 を main へ(試験合格・push)・Q174〜Q176。**
 次(本体): **4. wt3 t-1220-layer-cpu-rest 5ca34fdb(T-1220 Done・ADR-0489 Proposed)→ 5. wt5 t-1202-shell-multigrid-rebased 64fe0358 → t-1223-shell-step-cost da710a72**(元の t-1202-shell-multigrid は放置・消さない)のマージと試験。Q174〜Q176 の答え待ち(仮で進めている)。
 次の番号は **D-683・ADR-0479・T-1250・Q177**(本体)。司令塔の次は T-1253・ADR-0501(COMMANDER)。
