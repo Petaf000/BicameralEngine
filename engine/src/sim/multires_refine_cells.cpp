@@ -288,6 +288,16 @@ namespace bicameral::sim {
             nest.cellLayers.grain[i] = (table.species[i].flags & RX_SPECIES_GRAIN) != 0 ? 1 : 0;
     }
 
+    void ApplyCellLayersChoice(MultiresNest& nest, const BakedReactionTable& table) {
+        if (table.environment.cellLayers) {
+            EnableCellLayers(nest, table);
+
+            return;
+        }
+
+        nest.cellLayers = {};
+    }
+
     void EnableRefineCellPlacement(MultiresNest& nest, const BakedReactionTable& table) {
         nest.refineCells.species = table.species;
 

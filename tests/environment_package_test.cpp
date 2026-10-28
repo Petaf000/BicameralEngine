@@ -282,6 +282,21 @@ namespace {
         }
     }
 
+    // 成分ごとの層を使う世界(T-1241・ADR-0489 の 3): 書かない世界は使わない・true / false・ほかの値は名前付きで誤り
+    void TestCellLayers() {
+        const auto blank = ReadEnvironmentInit("return { elements = {} }");
+        EXPECT(blank && !blank->cellLayers);
+
+        const auto on = ReadEnvironmentInit("return { environment = { cell_layers = true } }");
+        EXPECT(on && on->cellLayers);
+
+        const auto off = ReadEnvironmentInit("return { environment = { cell_layers = false } }");
+        EXPECT(off && *off == sim::WorldPhysics{});  // 書かないのと同じ
+
+        ExpectRejected("return { environment = { cell_layers = 1 } }", "environment.cell_layers");
+        ExpectRejected("return { environment = { cell_layers = \"on\" } }", "true(層を使う世界)か false");
+    }
+
     // ベイクの知らせ(T-0710・土台の設計 §1.4): 液体を置いて重力 0 は警告・端が全部 wall で基準の大気が無いのは注意。
     // open があるのに基準の大気が無い(外は真空)のも注意(T-0772・ADR-0338)。セルを置かない世界(ブランク)は知らせない
     void TestWorldNotices() {
@@ -375,6 +390,7 @@ int main() {
     TestRejectsBrokenEnvironment();
     TestWorldEdges();
     TestGasPressureSpeed();
+    TestCellLayers();
     TestBalanceCycles();
     TestFineRegion();
     TestWorldNotices();
