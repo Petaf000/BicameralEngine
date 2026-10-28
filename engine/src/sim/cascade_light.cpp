@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <map>
 #include <tuple>
+#include <utility>
 
 namespace bicameral::sim {
 
@@ -430,8 +431,7 @@ namespace bicameral::sim {
         return grid;
     }
 
-    std::expected<CascadeTreeGrid, std::string> MakeCascadeTreeGrid(const MultiresNest& nest,
-                                                                    const BakedReactionTable& table) {
+    std::expected<CascadeGrid, std::string> MakeCascadeTreeBox(const MultiresNest& nest) {
         const mr::WeWorld& world = nest.edges.world;
         if (world.highX <= world.lowX || world.highY <= world.lowY || world.highZ <= world.lowZ)
             return std::unexpected("世界の箱(nest.edges.world)が空");
@@ -441,8 +441,7 @@ namespace bicameral::sim {
 
         // --- 箱をレベル 0 の升目へ ---
         const auto rootShift = static_cast<uint32_t>(-world.rootLevel);
-        CascadeTreeGrid tree;
-        CascadeGrid& grid = tree.grid;
+        CascadeGrid grid;
         grid.low = {world.lowX << rootShift, world.lowY << rootShift, world.lowZ << rootShift};
         grid.size = {(world.highX - world.lowX) << rootShift, (world.highY - world.lowY) << rootShift,
                      (world.highZ - world.lowZ) << rootShift};
@@ -452,6 +451,20 @@ namespace bicameral::sim {
 
         grid.lights.assign(count, {});
         grid.temperatureMk.assign(count, 0);
+
+        return grid;
+    }
+
+    std::expected<CascadeTreeGrid, std::string> MakeCascadeTreeGrid(const MultiresNest& nest,
+                                                                    const BakedReactionTable& table) {
+        auto box = MakeCascadeTreeBox(nest);
+        if (!box)
+            return std::unexpected(box.error());
+
+        CascadeTreeGrid tree;
+        tree.grid = std::move(*box);
+        CascadeGrid& grid = tree.grid;
+        const size_t count = grid.CellCount();
         tree.leafSlot.assign(count, mr::MR_NO_BLOCK);
         tree.leafIndex.assign(count, 0);
         const ReactionTableView view = table.View();

@@ -140,6 +140,10 @@ namespace bicameral::sim {
     [[nodiscard]] std::expected<CascadeTreeGrid, std::string> MakeCascadeTreeGrid(const MultiresNest& nest,
                                                                                   const BakedReactionTable& table);
 
+    // 木を読む写しの升目の箱だけ(光の値・温度は 0。世界の箱 nest.edges.world をレベル 0 の升目へ)。
+    // GPU が木から升目を書く形(GpuCascadeLight::CreateFromTree。T-1117)が置き場の大きさを決めるのに使う(箱は世界の形で、状態ではない)
+    [[nodiscard]] std::expected<CascadeGrid, std::string> MakeCascadeTreeBox(const MultiresNest& nest);
+
     // 升目ごとの結果を葉ごとに足す(枠・セルの順。吸った・放ったがどちらも 0 の葉は入れない)。和は升目の和とビット単位で同じ
     [[nodiscard]] std::vector<CascadeLeafNet> FoldCascadeToLeaves(const CascadeTreeGrid& tree,
                                                                   const CascadeTickResult& result);

@@ -677,3 +677,73 @@ uint64_t Level0WeightOf(RcGpuParams params, RcStepConstants constants, uint32_t 
     if (dispatchThreadId.x == 0)
         StoreWord(HeaderOffset(RC_GPU_CARRY_COUNT), (uint64_t)params.initialCarryCount);
 }
+
+// --- 木を読む写し(T-1117。CPU の MakeCascadeTreeGrid と同じ値。多重解像度の木のルート署名だけ)---
+// 刻みの初めの木の葉(覆われていないセル)の光の値と温度を、0.5 m の升目へ 2^−L 角ずつ広げて作業の光の値・温度へ書く。
+// セルの値はレベルの単位の数(同じ数 = 同じ密度・温度)なので、粗い葉の升目は粗いセルのものそのまま(T-1155 の写しの性質)。
+// g_external0 = 世界の枠の数(観察の枠は読まない)・g_external1 = 作業の中の物質の光の値の位置(バイト)。1 スレッド = 葉のセル 1 つ。
+// 0.5 m より細かい葉は読まずに溢れの印 RC_GPU_OVERFLOW_FINE_LEAF を立てる(CPU は誤り。細かい葉へ配る規則は土台)。
+// 升目のセルはどれも 1 つの葉からだけ書かれる(葉は重ならない)ので、書く順は結果に入らない
+struct RcTreeLights {
+    uint32_t speciesOffset;
+
+    LtSpeciesLight Light(uint32_t speciesId) { return g_rcWork.Load<LtSpeciesLight>(speciesOffset + (speciesId * 16)); }
+};
+
+[numthreads(RC_GROUP_THREADS, 1, 1)] void RcTreeGrid(uint3 dispatchThreadId : SV_DispatchThreadID) {
+    const RcGpuParams params = LoadParams();
+    const GpuRcGrid grid = GridOf(params);
+    RcTreeLights lights;
+    lights.speciesOffset = g_external1;
+    for (uint32_t item = dispatchThreadId.x; item < g_external0 * MR_BLOCK_CELLS; item += g_external2) {
+        const uint32_t slot = item / MR_BLOCK_CELLS;
+        const uint32_t index = item % MR_BLOCK_CELLS;
+        const MrBlock block = g_blocks[slot];
+        if (block.kind != MR_BLOCK_REAL || MrIsCoveredCell(block, index))
+            continue;
+
+        if (block.level > 0) {
+            SetOverflow(RC_GPU_OVERFLOW_FINE_LEAF);
+            continue;
+        }
+
+        // --- 葉のセルの光の値と温度(CPU の MakeCascadeTreeGrid と同じ式)---
+        const RxCell cell = LoadCell(slot, index);
+        const LtCellBand shortBand = LtCellBandOf(lights, cell, LT_BAND_SHORT);
+        const LtCellBand longBand = LtCellBandOf(lights, cell, LT_BAND_LONG);
+        RcCellLight light;
+        light.depthShortQ32 = RdOpticalDepthQ32(shortBand.absorption);
+        light.depthLongQ32 = RdOpticalDepthQ32(longBand.absorption);
+        light.reflectanceShortQ16 = shortBand.reflectanceQ16;
+        light.reflectanceLongQ16 = longBand.reflectanceQ16;
+        const int32_t thermal = RxComputeThermal(MakeTable(), cell).temperature;
+        const uint32_t temperatureMk = thermal > 0 ? (uint32_t)thermal : 0u;
+
+        // --- 2^−L 角へ広げる(箱の外は書かない)---
+        const uint32_t shift = (uint32_t)(-block.level);
+        const uint32_t cellsPerSide = 1u << shift;
+        const int64_t x0 = (block.originX + (int64_t)MrCellX(index)) << shift;
+        const int64_t y0 = (block.originY + (int64_t)MrCellY(index)) << shift;
+        const int64_t z0 = (block.originZ + (int64_t)MrCellZ(index)) << shift;
+        for (uint32_t k = 0; k < cellsPerSide; ++k) {
+            for (uint32_t j = 0; j < cellsPerSide; ++j) {
+                for (uint32_t i = 0; i < cellsPerSide; ++i) {
+                    const int64_t x = x0 + (int64_t)i;
+                    const int64_t y = y0 + (int64_t)j;
+                    const int64_t z = z0 + (int64_t)k;
+                    if (!grid.Contains(x, y, z))
+                        continue;
+
+                    // 箱の中なので差は 0 以上・32bit に収まる(差は比べずに番号にだけ使う。T-1078)
+                    const uint32_t relativeX = (uint32_t)(x - params.lowX);
+                    const uint32_t relativeY = (uint32_t)(y - params.lowY);
+                    const uint32_t relativeZ = (uint32_t)(z - params.lowZ);
+                    const uint32_t at = (((relativeZ * (uint32_t)params.sizeY) + relativeY) * (uint32_t)params.sizeX) +
+                                        relativeX;
+                    g_rcWork.Store<RcCellLight>(params.workLights + (at * 24), light);
+                    g_rcWork.Store(params.workTemperatures + (at * 4), temperatureMk);
+                }
+            }
+        }
+    }
+}

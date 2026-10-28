@@ -1138,7 +1138,8 @@ FX_CONST uint32_t RC_GPU_STEPS = 18;        // 通ったセルの数
 FX_CONST uint32_t RC_GPU_FACE_COUNT = 19;   // 放つ面の数
 FX_CONST uint32_t RC_GPU_BAG_COUNT = 20;    // 袋の表ごとの袋の数(2)
 FX_CONST uint32_t RC_GPU_CARRY_COUNT = 22;  // 持ち越しの表ごとの 0 でない鍵の数(2。測りの目安)
-FX_CONST uint32_t RC_GPU_OVERFLOW = 24;     // 溢れの印(1 = 放つ面・2 = 袋。持ち越しは密な表なので溢れない)
+FX_CONST uint32_t RC_GPU_OVERFLOW = 24;     // 溢れの印(1 = 放つ面・2 = 袋・4 = 木を読む写しが 0.5 m より細かい葉に当たった〔T-1117〕。持ち越しは密な表なので溢れない)
+FX_CONST uint32_t RC_GPU_OVERFLOW_FINE_LEAF = 4;
 FX_CONST uint32_t RC_GPU_BAG_PEAK = 25;     // 段 1 つの袋の数の最大(置き場の大きさを決める目安。作ってからの最大)
 FX_CONST uint32_t RC_GPU_HELD = 26;         // 帯ごとの、熱で放って組の刻みまで待たせた量(2。T-1010)
 FX_CONST uint32_t RC_GPU_KEPT = 28;         // 帯ごとの、持ち越しの表で次の刻みへそのまま送った量(2)
