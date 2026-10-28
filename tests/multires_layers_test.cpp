@@ -12,11 +12,16 @@
 //   - 一様の枠: 層まで一様な頁は層ごと畳む・一様な子へ写す・同じ層なら一様な親のまま・頁に広げると写す・要約と保存点に入る
 //   - 溢れ: インライン ↔ 溢れの間で物質が動いても層は物質についていく・要約と保存点
 //   - 層を使う世界の眠る: 粒の物質の残り(舞う粒)のある頁は畳まない(気体などほかの物質の残りは数えない)
+// 層つきの根の置き口(T-1236):
+//   - 層が全部 0(か空)の置き方は層の無い置き方とビット単位で同じ(要約・頁に層の並びを持たない。インライン・溢れの世界)
+//   - 層まで一様なら一様の枠の層・セルか層が違えば頁の層。層は読め、要約(HashWholeNest)と保存点に入る
 // 表は試験のパッケージの表(tests/reaction_test_table.h)。
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <format>
+#include <span>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -665,6 +670,103 @@ namespace {
         Expect(!foldsWith(0), "層を使う世界: 層の無い粒は舞う粒(畳まない)");
     }
 
+    // --- 層つきの根の置き口(T-1236)---
+
+    struct PlacedRoot {
+        MultiresNest nest;
+        uint32_t root = MR_NO_BLOCK;
+    };
+
+    // 根を 1 つ置いた世界(wide なら溢れを使う世界。layers が空なら層の無い置き方)
+    PlacedRoot PlaceTestRoot(const BakedReactionTable& table, bool wide, std::span<const RxCell> cells,
+                             std::span<const MrCellLayers> layers) {
+        PlacedRoot placed{.nest = MakeMultiresNest(test::MakeMultiresCapacity(table, 4, 0, 4))};
+        if (wide)
+            EnableWideCells(placed.nest);
+
+        placed.root = layers.empty() ? PlaceRootBlock(placed.nest, 0, 0, 0, cells)
+                                     : PlaceRootBlock(placed.nest, 0, 0, 0, cells, layers);
+        return placed;
+    }
+
+    // 層が全部 0 の置き方は層の無い置き方と同じ(一様な根・頁の根)
+    void TestPlaceZeroLayers(const BakedReactionTable& table, bool wide) {
+        const std::string_view name = wide ? "溢れの世界" : "インラインの世界";
+        const RxCell sand = MakeCell(table, {{"cellulose", 38600000}, {"oxygen", 983000}});
+        std::vector<RxCell> paged(MR_BLOCK_CELLS, sand);
+        paged[5] = MakeCell(table, {{"nitrogen", 4000}});
+        const std::vector<MrCellLayers> zero(MR_BLOCK_CELLS);
+        for (const std::vector<RxCell>& cells : {std::vector<RxCell>(MR_BLOCK_CELLS, sand), paged}) {
+            const PlacedRoot plain = PlaceTestRoot(table, wide, cells, {});
+            const PlacedRoot zeroed = PlaceTestRoot(table, wide, cells, zero);
+            const MrBlock& block = zeroed.nest.blocks[zeroed.root];
+            Expect(HashWholeNest(zeroed.nest) == HashWholeNest(plain.nest) &&
+                       HashRealLeaves(zeroed.nest) == HashRealLeaves(plain.nest),
+                   std::format("根の置き口({}): 層 0 の置き方は層の無い置き方と同じ要約", name));
+            Expect(MrIsUniform(block) == MrIsUniform(plain.nest.blocks[plain.root]) &&
+                       !nest_detail::BlockKeepsLayers(zeroed.nest, zeroed.root),
+                   std::format("根の置き口({}): 層 0 なら層の並びを持たない", name));
+        }
+    }
+
+    // 層つきで置いた根: 読める・要約と保存点に入る
+    void ExpectPlacedLayers(PlacedRoot& placed, std::span<const RxCell> cells, std::span<const MrCellLayers> layers,
+                            uint64_t plainHash, std::string_view name) {
+        bool readBack = true;
+        for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
+            readBack = readBack && LoadNestCellLayers(placed.nest, placed.root, index).amounts == layers[index].amounts;
+
+        Expect(readBack, std::format("根の置き口({}): 置いた層を読む", name));
+        Expect(CountLayerMisfits(placed.nest) == 0, std::format("根の置き口({}): 0 ≤ 層 ≤ 量", name));
+
+        const uint64_t layeredHash = HashWholeNest(placed.nest);
+        Expect(layeredHash != plainHash, std::format("根の置き口({}): 層は要約に入る", name));
+
+        // --- 頁に広げても層は写り、量だけを書いても保たれる(付け替え)。層を消してから保存点に戻す ---
+        const MultiresSaveState save = SaveNestState(placed.nest);
+        Expect(ExpandNestPage(placed.nest, placed.root), "根の置き口: 頁に広げる");
+        if (!placed.nest.wideCells)
+            StoreNestCell(placed.nest, placed.root, 3, cells[3]);
+
+        Expect(LoadNestCellLayers(placed.nest, placed.root, 3).amounts == layers[3].amounts,
+               std::format("根の置き口({}): 頁に広げて量を書いても層は保たれる", name));
+        StoreNestCellWithLayers(placed.nest, placed.root, 3, cells[3], MrCellLayers{});
+        Expect(RestoreNestState(placed.nest, save) && HashWholeNest(placed.nest) == layeredHash &&
+                   LoadNestCellLayers(placed.nest, placed.root, 3).amounts == layers[3].amounts,
+               std::format("根の置き口({}): 保存点から層まで戻る", name));
+    }
+
+    void TestPlaceLayeredRoot(const BakedReactionTable& table, bool wide) {
+        const std::string wideName = wide ? "溢れの世界" : "インラインの世界";
+        const RxCell sand = MakeCell(table, {{"cellulose", 38600000}, {"oxygen", 983000}});
+        const std::vector<RxCell> same(MR_BLOCK_CELLS, sand);
+        const std::vector<MrCellLayers> settled(MR_BLOCK_CELLS, QuarterLayers(sand, 3));
+
+        // --- 層まで一様: 一様の枠の層 ---
+        PlacedRoot uniform = PlaceTestRoot(table, wide, same, settled);
+        Expect(MrIsUniform(uniform.nest.blocks[uniform.root]), "根の置き口: 層まで一様なら一様の枠");
+        ExpectPlacedLayers(uniform, same, settled, HashWholeNest(PlaceTestRoot(table, wide, same, {}).nest),
+                           "一様・" + wideName);
+
+        // --- 層だけが違う: 頁の層 ---
+        std::vector<MrCellLayers> varied = settled;
+        varied[9] = QuarterLayers(sand, 1);
+        PlacedRoot layerPaged = PlaceTestRoot(table, wide, same, varied);
+        Expect(!MrIsUniform(layerPaged.nest.blocks[layerPaged.root]), "根の置き口: 層が違えば頁");
+        ExpectPlacedLayers(layerPaged, same, varied, HashWholeNest(PlaceTestRoot(table, wide, same, {}).nest),
+                           "層が違う頁・" + wideName);
+
+        // --- セルが違う: 頁の層(層の無いセルが混ざる)---
+        std::vector<RxCell> cells = same;
+        cells[5] = MakeCell(table, {{"nitrogen", 4000}});
+        std::vector<MrCellLayers> mixed = settled;
+        mixed[5] = MrCellLayers{};
+        PlacedRoot paged = PlaceTestRoot(table, wide, cells, mixed);
+        Expect(!MrIsUniform(paged.nest.blocks[paged.root]), "根の置き口: セルが違えば頁");
+        ExpectPlacedLayers(paged, cells, mixed, HashWholeNest(PlaceTestRoot(table, wide, cells, {}).nest),
+                           "頁・" + wideName);
+    }
+
     // --- 費用(表示だけ)---
 
     void MeasureCost(const BakedReactionTable& table) {
@@ -723,6 +825,11 @@ namespace {
         TestUniformLayers(inert, true);
         TestOverflowRebind(inert);
         TestFloatingGrainStaysAwake();
+        for (const bool wide : {false, true}) {
+            TestPlaceZeroLayers(*table, wide);
+            TestPlaceLayeredRoot(*table, wide);
+        }
+
         MeasureCost(*table);
         if (failureCount != 0) {
             Log(Channel::Sim, Level::Error, "multires_layers_test: FAILED ({} 件)", failureCount);

@@ -1,5 +1,6 @@
 // world_layout_package.cpp — 分類 world_cells・world_bodies を読む(world_layout_package.h。T-0398)。gas_regions・liquid_regions は読まず注意だけ(D-510・T-0724)。
 // ここで落とすのは「形」の誤り(欄の綴り・型・整数でない数・範囲の外)。物質の名前はベイク(sim::BakeWorldLayout)が確かめる。
+// 層(settled_umol。T-1236)も形だけを読み、層 ≤ 量・中身にある物質かはベイクが確かめる。
 #include "script/world_layout_package.h"
 
 #include <array>
@@ -45,13 +46,16 @@ namespace bicameral::script {
 
         // --- セルの領域 ---
 
+        // 物質 → 1 セルの量の表(欄 fieldName。量は minimum 以上)
         std::expected<std::vector<WorldCellAmount>, std::string> ReadAmounts(const ScriptValue& table,
-                                                                             const std::string& path) {
-            const auto value = RequireField(table, "amounts_umol", path);
+                                                                             const std::string& path,
+                                                                             std::string_view fieldName = "amounts_umol",
+                                                                             int64_t minimum = 1) {
+            const auto value = RequireField(table, fieldName, path);
             if (!value)
                 return std::unexpected(value.error());
 
-            const std::string amountsPath = path + ".amounts_umol";
+            const std::string amountsPath = std::format("{}.{}", path, fieldName);
             if (auto record = RequireTable(**value, amountsPath); !record)
                 return std::unexpected(record.error());
 
@@ -60,7 +64,7 @@ namespace bicameral::script {
                 if (!field.key.IsString())
                     return std::unexpected(std::format("{}: 鍵は物質の名前", amountsPath));
 
-                const auto amount = ReadInteger(field.value, std::format("{}.{}", amountsPath, field.key.text), 1,
+                const auto amount = ReadInteger(field.value, std::format("{}.{}", amountsPath, field.key.text), minimum,
                                                 CELL_AMOUNT_MAX);
                 if (!amount)
                     return std::unexpected(amount.error());
@@ -109,8 +113,8 @@ namespace bicameral::script {
         std::expected<WorldCellRegionDefinition, std::string> ReadCellRegion(const std::string& name,
                                                                              const ScriptValue& value,
                                                                              const std::string& path) {
-            static constexpr std::string_view FIELDS[] = {"layer",       "min_cell",     "size_cells",
-                                                          "shell_cells", "amounts_umol", "temperature_mk"};
+            static constexpr std::string_view FIELDS[] = {
+                "layer", "min_cell", "size_cells", "shell_cells", "amounts_umol", "temperature_mk", "settled_umol"};
             if (auto record = CheckRecord(value, FIELDS, path); !record)
                 return std::unexpected(record.error());
 
@@ -129,6 +133,15 @@ namespace bicameral::script {
             const auto temperature = ReadIntegerField(value, "temperature_mk", path, 0, TEMPERATURE_MAX);
             if (!temperature)
                 return std::unexpected(temperature.error());
+
+            // 中身のうち積もった層の量(T-1236。省ける。0 = 舞わせると書いた。層 ≤ 量と物質はベイクが確かめる)
+            if (value.Find("settled_umol") != nullptr) {
+                auto settled = ReadAmounts(value, path, "settled_umol", 0);
+                if (!settled)
+                    return std::unexpected(settled.error());
+
+                region.settled = std::move(*settled);
+            }
 
             region.layer = *layer;
             region.contents = std::move(*amounts);

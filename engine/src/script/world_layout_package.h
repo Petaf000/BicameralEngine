@@ -8,6 +8,9 @@
 //       air = { amounts_umol = { oxygen = 1063800, nitrogen = 4014200 }, temperature_mk = 300000 },  -- 場所を省けば格子の全部
 //       crate_wall = { layer = 1, min_cell = { 28, 28, 28 }, size_cells = { 8, 8, 8 }, shell_cells = 1,   -- 箱の外側の厚さ 1 の殻
 //                      amounts_umol = { cellulose = 38600000 }, temperature_mk = 300000 },
+//       sand_floor = { layer = 2, min_cell = { 0, 0, 0 }, size_cells = { 64, 2, 64 },                       -- 積もった砂の床(T-1236)
+//                      amounts_umol = { sand = 20000000, nitrogen = 4000 }, settled_umol = { sand = 20000000 },
+//                      temperature_mk = 300000 },  -- settled_umol = 中身のうち積もった層の量(層 ≤ 量。省けば層 0)
 //   }
 //   world_bodies = {
 //       ground = { size_mm = { 100000, 1000, 100000 }, position_mm = { 16000, -500, 16000 }, mass_g = 0 },  -- 0 = 動かない

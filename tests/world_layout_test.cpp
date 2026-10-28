@@ -10,6 +10,7 @@
 //   - Mod が領域と物を鍵で足せる(層の順に重ね書き・番号は order の順)。綴りの誤り・知らない物質・半端な場所・小数は誤りになる
 //   - 流れる所(D-510・T-0724): 区画の箱はやめ、基準の大気があれば気体・重力があれば液体が世界いっぱいで流れる(SetLayoutRegions)。
 //     前の分類 gas_regions・liquid_regions は読まずに注意を出す
+//   - 層(T-1236): settled_umol の層・書かなかった粒の読み方(舞う粒は知らせ・全部が層)・書き間違いの誤り・層つきで根を置く
 // GPU の刻みは今まで通り gpu_probe_* が同じ初めの世界で確かめる(初めの世界の作り方だけが変わった)。
 #include <algorithm>
 #include <array>
@@ -24,10 +25,14 @@
 #include "common/fixed.hlsli"
 #include "common/units.hlsli"
 #include "core/aliases.h"
+#include "multires_test_scene.h"
 #include "reaction_test_table.h"
 #include "script/luau_sandbox.h"
 #include "script/reaction_package.h"
 #include "script/reaction_table_loader.h"
+#include "sim/multires_nest.h"
+#include "sim/multires_nest_internal.h"
+#include "sim/multires_state.h"
 #include "sim/physics_scene.h"
 #include "sim/probe_sim.h"
 
@@ -175,8 +180,8 @@ namespace {
 
     // --- Mod で足す・誤り ---
 
-    // 試験のパッケージ + init.luau が modEntry を返す Mod を読んでベイクする
-    std::expected<BakedReactionTable, std::string> BakeWithMod(const std::string& modEntry) {
+    // 試験のパッケージ + init.luau が modEntry を返す Mod を読んで表の定義にする
+    std::expected<ReactionTableDefinition, std::string> DefinitionWithMod(const std::string& modEntry) {
         auto sandbox = script::LuauSandbox::Create(script::SandboxLimits{});
         if (!sandbox)
             return std::unexpected(std::string("殻を作れない"));
@@ -194,7 +199,12 @@ namespace {
         if (!loaded->rejected.empty())
             return std::unexpected(loaded->rejected.front().reason);
 
-        const auto definition = script::ReadReactionTableDefinition(*loaded);
+        return script::ReadReactionTableDefinition(*loaded);
+    }
+
+    // 同じ Mod を読んでベイクする
+    std::expected<BakedReactionTable, std::string> BakeWithMod(const std::string& modEntry) {
+        const auto definition = DefinitionWithMod(modEntry);
         if (!definition)
             return std::unexpected(definition.error());
 
@@ -341,6 +351,118 @@ namespace {
         EXPECT(FailsWith(material(LIMIT + 1), "合計"));
     }
 
+    // --- 層(T-1236・ADR-0489): settled_umol・書かなかった粒の読み方・層つきで根を置く ---
+
+    // 粒の物質(ばらける固体)test_sand と、砂の床(層つき)・砂の山(層を書かない)を足す Mod。floorSettled が空なら床も層を書かない
+    std::string SandMod(const std::string& floorSettled) {
+        const std::string settled = floorSettled.empty() ? "" : "settled_umol = { " + floorSettled + " }, ";
+        return R"(return {
+            species = { test_sand = { composition = { C = 1 }, formation_enthalpy_j_per_mol = -100000,
+                                      heat_capacity_mj_per_mol_k = 40000, thermal_conductivity_mw_per_m_k = 300,
+                                      phase = "solid", density_kg_per_m3 = 1600, solid_motion = "loose",
+                                      repose_angle_deg = 34 } },
+            world_cells = {
+                sand_floor = { layer = 2, min_cell = { 0, 0, 0 }, size_cells = { 16, 2, 16 },
+                               amounts_umol = { test_sand = 20000000, nitrogen = 4000 }, )" +
+               settled + R"(temperature_mk = 300000 },
+                sand_heap = { layer = 3, min_cell = { 0, 2, 0 }, size_cells = { 1, 1, 1 },
+                              amounts_umol = { test_sand = 1000000 }, temperature_mk = 300000 },
+            },
+        })";
+    }
+
+    // 組み立ての領域 index の物質 name の層
+    uint64_t RegionLayer(const BakedReactionTable& table, const WorldLayout& layout, size_t index,
+                         std::string_view name) {
+        const WorldCellRegion& region = layout.cellRegions[index];
+        const uint32_t slot = reaction::RxFindSlot(region.cell, table.SpeciesId(name));
+        return slot == reaction::RX_NO_SLOT ? 0 : region.layers[slot];
+    }
+
+    size_t NotesNaming(const WorldLayout& layout, std::string_view text) {
+        return (size_t)rng::count_if(layout.unsettledGrainNotes,
+                                     [&](const std::string& note) { return note.find(text) != std::string::npos; });
+    }
+
+    void TestSettledLayers() {
+        const auto definition = DefinitionWithMod(SandMod("test_sand = 15000000"));
+        if (!definition)
+            std::printf("読めない: %s\n", definition.error().c_str());
+
+        EXPECT(definition.has_value());
+        if (!definition)
+            return;
+
+        const auto baked = BakeReactionTable(*definition);
+        EXPECT(baked.has_value());
+        if (!baked)
+            return;
+
+        // --- (a) 舞う粒(今の読み方): 書いた層だけ。書かなかった粒は層 0 で、領域ごとに知らせる ---
+        const WorldLayout& floating = baked->worldLayout;
+        const size_t floor = floating.cellRegions.size() - 2;
+        const size_t heap = floating.cellRegions.size() - 1;
+        EXPECT(RegionLayer(*baked, floating, floor, "test_sand") == 15000000);
+        EXPECT(RegionLayer(*baked, floating, floor, "nitrogen") == 0);
+        EXPECT(RegionLayer(*baked, floating, heap, "test_sand") == 0);
+        EXPECT(floating.unsettledGrainNotes.size() == 1 && NotesNaming(floating, "sand_heap") == 1 &&
+               NotesNaming(floating, "test_sand") == 1);
+
+        // --- (b) 全部が層: 書かなかった粒は層 = 量・知らせなし。書いた層はそのまま ---
+        const auto settled = BakeWorldLayout(definition->worldLayout, *baked, UnwrittenGrainLayers::Settled);
+        EXPECT(settled.has_value());
+        if (settled) {
+            EXPECT(RegionLayer(*baked, *settled, heap, "test_sand") == 1000000);
+            EXPECT(RegionLayer(*baked, *settled, floor, "test_sand") == 15000000);
+            EXPECT(settled->unsettledGrainNotes.empty());
+        }
+
+        // --- 0 と書けば舞わせると書いたことになる(知らせない)---
+        const auto zero = BakeWithMod(SandMod("test_sand = 0"));
+        EXPECT(zero && RegionLayer(*zero, zero->worldLayout, floor, "test_sand") == 0 &&
+               NotesNaming(zero->worldLayout, "sand_floor") == 0 && NotesNaming(zero->worldLayout, "sand_heap") == 1);
+
+        // --- 書き間違い: 層 > 量・中身に無い物質・知らない物質・負の数・同じ物質が 2 回 ---
+        EXPECT(FailsWith(SandMod("test_sand = 20000001"), "超える"));
+        EXPECT(FailsWith(SandMod("oxygen = 1"), "settled_umol.oxygen: 中身(amounts_umol)に無い"));
+        EXPECT(FailsWith(SandMod("unobtainium = 1"), "中身(amounts_umol)に無い"));
+        EXPECT(FailsWith(SandMod("test_sand = -1"), "settled_umol.test_sand"));
+
+        // --- 層つきで根を置く(多重解像度の世界。根のセル 1 つ = 格子のセル 1 つ)---
+        MultiresNest nest = MakeMultiresNest(test::MakeMultiresCapacity(*baked, 4, 0, 4));
+        const uint32_t root = PlaceLayoutRootBlock(nest, floating, 0, 0, 0);
+        const uint32_t sand = baked->SpeciesId("test_sand");
+        bool placed = true;
+        for (uint32_t index = 0; index < multires::MR_BLOCK_CELLS; ++index) {
+            const uint32_t y = multires::MrCellY(index);
+            const reaction::RxCell cell = LoadNestCell(nest, root, index);
+            const MrCellLayers layers = LoadNestCellLayers(nest, root, index);
+            const uint32_t slot = reaction::RxFindSlot(cell, sand);
+            const bool heapCell = y == 2 && multires::MrCellX(index) == 0 && multires::MrCellZ(index) == 0;
+            const uint64_t want = y < 2 ? 15000000 : 0;
+            const bool hasSand = y < 2 || heapCell;
+            placed = placed && (slot != reaction::RX_NO_SLOT) == hasSand &&
+                     (slot == reaction::RX_NO_SLOT || layers.amounts[slot] == want);
+        }
+
+        EXPECT(placed);
+        EXPECT(CountLayerMisfits(nest) == 0);
+
+        // 層を書かない同じ組み立てとは要約が違い、層の無い置き方と同じ値のセル
+        const auto plain = BakeWithMod(SandMod(""));
+        EXPECT(plain.has_value());
+        if (!plain)
+            return;
+
+        MultiresNest plainNest = MakeMultiresNest(test::MakeMultiresCapacity(*plain, 4, 0, 4));
+        const uint32_t plainRoot = PlaceLayoutRootBlock(plainNest, plain->worldLayout, 0, 0, 0);
+        EXPECT(HashWholeNest(plainNest) != HashWholeNest(nest));
+        EXPECT(!nest_detail::BlockKeepsLayers(plainNest, plainRoot));
+        const reaction::RxCell plainCell = LoadNestCell(plainNest, plainRoot, 0);
+        const reaction::RxCell layeredCell = LoadNestCell(nest, root, 0);
+        EXPECT(std::memcmp(&plainCell, &layeredCell, sizeof(plainCell)) == 0);
+    }
+
 }  // namespace
 
 int main() {
@@ -350,6 +472,7 @@ int main() {
     TestModAddsAndErrors();
     TestCellAmountLimits();
     TestFlowAreas();
+    TestSettledLayers();
 
     std::printf("world_layout_test: %s\n", failureCount == 0 ? "OK" : "FAILED");
 

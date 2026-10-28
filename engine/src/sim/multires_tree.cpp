@@ -6,12 +6,17 @@
 // 枠の番号(ADR-0016): 要求 i は空きのスタックの上から「i より前の許可した要求の数の和」だけ下から順に取る。返すのも要求の順に積む。
 // 索引は開番地法(線形探査)。入れる = 空の所(墓石は使い回さない)、消す = 墓石。表の中の並びは GPU と違ってよい。
 #include <algorithm>
+#include <array>
+#include <ranges>
+#include <span>
 #include <type_traits>
+#include <vector>
 
 #include "common/multires_activity.hlsli"
 #include "sim/multires_fields.h"
 #include "sim/multires_nest.h"
 #include "sim/multires_nest_internal.h"
+#include "sim/world_layout.h"
 
 using namespace bicameral::multires;
 using namespace bicameral::reaction;
@@ -627,11 +632,34 @@ namespace bicameral::sim {
             nest.counters[MR_COUNTER_REQUESTS] = 0;
         }
 
+        // 根の頁のセル index に書く(layers があれば層まで。溢れを使う世界は上限の無い形で。T-1236)
+        void StoreRootPageCell(MultiresNest& nest, uint32_t page, uint32_t index, const RxCell& cell,
+                               const MrCellLayers* layers) {
+            if (layers == nullptr) {
+                StorePageCell(nest, page, index, cell);
+                return;
+            }
+
+            if (!nest.wideCells) {
+                nest_detail::StorePageCellWithLayers(nest, page, index, cell, *layers);
+                return;
+            }
+
+            const std::span<const uint64_t> used(layers->amounts.data(), cell.speciesCount);
+            nest_detail::StoreWidePageCellWithLayers(nest, page, index, RxWidenCell(cell), used);
+        }
+
     }  // namespace
 
     uint32_t PlaceRootBlock(MultiresNest& nest, int64_t originX, int64_t originY, int64_t originZ,
                             std::span<const RxCell> cells) {
+        return PlaceRootBlock(nest, originX, originY, originZ, cells, {});
+    }
+
+    uint32_t PlaceRootBlock(MultiresNest& nest, int64_t originX, int64_t originY, int64_t originZ,
+                            std::span<const RxCell> cells, std::span<const MrCellLayers> layers) {
         FX_ASSERT(cells.size() == MR_BLOCK_CELLS);
+        FX_ASSERT(layers.empty() || layers.size() == MR_BLOCK_CELLS);
         FX_ASSERT(nest.counters[MR_COUNTER_FREE_BLOCKS] > 0);
         const uint32_t slot = nest.freeBlocks[--nest.counters[MR_COUNTER_FREE_BLOCKS]];
 
@@ -642,17 +670,32 @@ namespace bicameral::sim {
         block.level = nest.capacity.rootLevel;
         block.kind = MR_BLOCK_REAL;
 
-        // --- 全部同じなら一様(頁なし)、でなければ頁を取る(T-0102)---
-        const bool uniform = std::ranges::all_of(cells, [&](const RxCell& cell) { return MrSameCell(cell, cells[0]); });
-        nest_detail::ClearUniformLayers(nest, slot);  // 根は層 0 で置く(T-1220)
+        // --- 層が全部 0 なら層の無い置き方(T-1220 までと同じ書き方 = ビット単位で同じ。T-1236)---
+        const bool layered = std::ranges::any_of(layers, [](const MrCellLayers& cell) {
+            return std::ranges::any_of(cell.amounts, [](uint64_t amount) { return amount != 0; });
+        });
+        for (uint32_t index = 0; layered && index < MR_BLOCK_CELLS; ++index)
+            FX_ASSERT(MrLayersFit(cells[index], layers[index]));
+
+        // --- 全部同じ(層まで)なら一様(頁なし)、でなければ頁を取る(T-0102)---
+        const auto sameAsFirst = [&](uint32_t index) {
+            return MrSameCell(cells[index], cells[0]) && (!layered || layers[index].amounts == layers[0].amounts);
+        };
+        const bool uniform = std::ranges::all_of(std::views::iota(0u, MR_BLOCK_CELLS), sameAsFirst);
+        nest_detail::ClearUniformLayers(nest, slot);
         if (uniform) {
             UniformAt(nest, slot) = cells[0];
             if (nest.wideCells)
                 nest.uniformOverflow[slot] = {};  // 前に使った枠の一様の値の溢れを残さない(T-0199)
+
+            if (layered) {
+                const std::span<const uint64_t> used(layers[0].amounts.data(), cells[0].speciesCount);
+                nest_detail::SetUniformLayers(nest, slot, LoadWideUniform(nest, slot), used);  // 一様の枠の層(T-1236)
+            }
         } else {
             block.page = nest_detail::PopPage(nest);
             for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
-                StorePageCell(nest, block.page, index, cells[index]);
+                StoreRootPageCell(nest, block.page, index, cells[index], layered ? &layers[index] : nullptr);
         }
 
         nest.blocks[slot] = block;
@@ -661,6 +704,30 @@ namespace bicameral::sim {
         nest_detail::PokeBlock(nest, slot);
 
         return slot;
+    }
+
+    uint32_t PlaceLayoutRootBlock(MultiresNest& nest, const WorldLayout& layout, int64_t originX, int64_t originY,
+                                  int64_t originZ) {
+        // --- 根のセル 1 つ = 組み立ての格子のセル 1 つ。格子の外(負・32 bit の外)は空のセル ---
+        constexpr int64_t GRID_LIMIT = int64_t{1} << 32;
+        std::vector<RxCell> cells(MR_BLOCK_CELLS);
+        std::vector<MrCellLayers> layers(MR_BLOCK_CELLS);
+        for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+            const std::array<int64_t, 3> at = {originX + int64_t{MrCellX(index)}, originY + int64_t{MrCellY(index)},
+                                               originZ + int64_t{MrCellZ(index)}};
+            const bool inGrid = std::ranges::all_of(at, [](int64_t value) { return value >= 0 && value < GRID_LIMIT; });
+            if (!inGrid) {
+                cells[index] = RxMakeEmptyCell(0);
+                continue;
+            }
+
+            const WorldLayoutCell placed = LayoutCellAt(layout, static_cast<uint32_t>(at[0]),
+                                                        static_cast<uint32_t>(at[1]), static_cast<uint32_t>(at[2]));
+            cells[index] = placed.cell;
+            layers[index].amounts = placed.layers;
+        }
+
+        return PlaceRootBlock(nest, originX, originY, originZ, cells, layers);
     }
 
     void SubmitRequests(MultiresNest& nest, std::span<const MrRequest> requests) {

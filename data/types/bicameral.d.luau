@@ -83,6 +83,9 @@ export type WorldCellRegion = {
     shell_cells: number?, -- 外側の殻の厚さ(セル。既定 0 = 中まで埋める)
     amounts_umol: { [string]: number }, -- 物質 → 1 セルの量(µmol)。合計 2^36(約 68,719 mol)まで・気体(phase が gas)の物質の合計は 2^31(約 2147 mol)未満(ADR-0260)
     temperature_mk: number, -- 温度(mK)
+    -- 中身のうち積もった層の量(物質 → 1 セルの µmol。T-1236・ADR-0489。名前は仮)。物質は amounts_umol にあること・層 ≤ 量(破ればベイクが場所付きで止める)。
+    -- 書かない物質は層 0。層を使う世界では、層を書かなかった粒(solid_motion = "loose")はベイクが知らせる(舞わせるなら 0 と書く)
+    settled_umol: { [string]: number }?,
 }
 
 -- 物(直方体)。物理の座標(y が上)。order の小さい順に番号が付く(同じなら鍵の順)

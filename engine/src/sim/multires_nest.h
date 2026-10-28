@@ -444,6 +444,16 @@ namespace bicameral::sim {
     uint32_t PlaceRootBlock(MultiresNest& nest, int64_t originX, int64_t originY, int64_t originZ,
                             std::span<const reaction::RxCell> cells);
 
+    // 層つきで根を置く(T-1236・ADR-0489。layers は空か MR_BLOCK_CELLS 個。セルごとに 0 ≤ 層 ≤ 量)。
+    // セルと層まで全部同じなら一様の枠の層、でなければ頁の層。層が全部 0(か空)なら上と同じ置き方(ビット単位で同じ)
+    uint32_t PlaceRootBlock(MultiresNest& nest, int64_t originX, int64_t originY, int64_t originZ,
+                            std::span<const reaction::RxCell> cells, std::span<const MrCellLayers> layers);
+
+    // 世界の組み立て(パッケージの world_cells。層は settled_umol)から根を置く(T-1236)。根のレベルのセル 1 つを
+    // 組み立ての格子のセル 1 つとして読む(セル (originX + x, …) = LayoutCellAt。格子の外〔負〕は空のセル)
+    uint32_t PlaceLayoutRootBlock(MultiresNest& nest, const WorldLayout& layout, int64_t originX, int64_t originY,
+                                  int64_t originZ);
+
     // 要求を一覧の後ろに足す(一覧は決定的な順に。1 刻み MR_MAX_REQUESTS 件まで)
     void SubmitRequests(MultiresNest& nest, std::span<const multires::MrRequest> requests);
 
