@@ -2,6 +2,9 @@
 // 細かくする鎖は再帰(1 レベル = 1 グループ。段の数は実行時に決まる。D-302)。
 // 入口は 4 つ: RefineNode(CPU の入力 = 手で決めた影の鎖 / GPU の入力 = 許可した要求の鎖。multires_tree.hlsl の TreeAllocate が作る)・
 // CoarsenRequestNode(GPU の入力 = 許可した粗くする要求)・PullBackNode・RemoveShadowNode(CPU の入力)。
+// 変種は 3 つ: 既定(multires_graph)・溢れを使う世界(MR_WIDE_CELLS。multires_graph_wide)・細かくする段で寄せるセルの中身を置かれ方で配る世界
+// (MR_REFINE_PLACE。multires_graph_place。T-1188・ADR-0499)。置かれ方の段は重く、同じプログラムに入れると使わない木でも RTX の HW の
+// Work Graph が止まった(DEVICE_HUNG)ので、別のプログラムにして置かれ方の世界だけが持つ(gpu_multires.cpp の RecordUpload が選ぶ)。
 // CPU リファレンスは engine/src/sim/multires_tree.cpp の RefineRequestLevel・ApplyCoarsen と、multires_nest.cpp の RefineShadowLevel・
 // PullBackLevel・RemoveShadowChain(同じ順・同じ関数)。
 // 木を変えたブロック(細かくした親と子・粗くした親)は活性の一覧(u13 = この刻みの種)に足す(つつく。T-0100)。
@@ -14,7 +17,11 @@
 #include "sim/multires_bindings.hlsli"
 #ifdef MR_WIDE_CELLS
 #include "sim/multires_wide_access.hlsli"
-#else
+#endif
+#ifdef MR_REFINE_PLACE
+#ifdef MR_WIDE_CELLS
+#error 置かれ方の変種は溢れを使わない世界だけ(T-1188)
+#endif
 #include "sim/multires_refine_place.hlsli"
 #endif
 
@@ -131,8 +138,7 @@ void CoverWideTails(uint32_t page, uint32_t octant) {
 #endif
 
 // 1 段を細かくする(1 スレッド = 子のセル t。親のセル t も読む)
-// place: 寄せるセルの中身を置かれ方で配るか(T-1188。入口のノードで決まる定数。RefinePlaceNode だけが true)
-void RefineLevel(MrRefineRecord record, uint32_t t, bool place) {
+void RefineLevel(MrRefineRecord record, uint32_t t) {
     const bool fromRequest = record.request != MR_NO_BLOCK;
     const bool real = record.kind == MR_BLOCK_REAL;
     const MrBlock parent = g_blocks[record.parentSlot];
@@ -178,10 +184,10 @@ void RefineLevel(MrRefineRecord record, uint32_t t, bool place) {
     if (childFraction != MR_NO_FRACTION)
         g_fractions[FractionAddress(childFraction, t)] = LoadFraction(parent.fraction, parentCell);
 
-#ifndef MR_WIDE_CELLS
+#ifdef MR_REFINE_PLACE
     // --- 寄せるセルの中身は置かれ方で(T-1188・T-1176。CPU の PlaceRefineOctantCells。端数は上で写した SAME のまま。
     //     グループで同じ条件なので、中のバリアは全部のスレッドが通る)---
-    if (place && fromRequest && real && !uniformChild)
+    if (fromRequest && real && !uniformChild)
         PlaceRefineChildren(parent, record.parentSlot, octant, childPage, t);
 #endif
 
@@ -760,32 +766,6 @@ void CoarsenRequest(uint32_t request, uint32_t t) {
 // clang-format は HLSL のノードの属性を並べ崩すので、属性つきの宣言だけ整形を止める
 // clang-format off
 
-// 2 つの入口の中身(同じ。place だけ違う)。置かれ方の段は重いので、使わない世界の木は軽い RefineNode を通す:
-// 1 つのノードに置かれ方の段を入れたまま使わない木でも、RTX の HW の Work Graph の gpu_multires が DEVICE_HUNG になった
-// (置かれ方の段を外すと通る。グループ共有を 12 → 6 KiB にしても止まった = コードの重さ。T-1188 の作業ログ)。
-// 入口は CPU が選ぶ(gpu_multires.cpp の RecordUpload が graphEntries の下位 16bit に書く)
-#define MR_REFINE_NODE_BODY(place) \
-    const MrRefineRecord record = input.Get(); \
-    if (record.levelsLeft > 0) \
-        RefineLevel(record, thread, place); \
- \
-    /* --- 次のレベル --- */ \
-    Barrier(UAV_MEMORY, DEVICE_SCOPE | GROUP_SYNC); \
-    const bool recurse = record.levelsLeft > 1; \
-    GroupNodeOutputRecords<MrRefineRecord> output = next.GetGroupNodeOutputRecords(recurse ? 1 : 0); \
-    if (recurse && thread == 0) { \
-        const bool fromRequest = record.request != MR_NO_BLOCK; \
-        const uint32_t childSlot = fromRequest ? PoppedBlock(g_states[record.request], record.depth) : record.childSlot; \
-        output.Get().request = record.request; \
-        output.Get().parentSlot = childSlot; \
-        output.Get().childSlot = childSlot + 1; \
-        output.Get().levelsLeft = record.levelsLeft - 1; \
-        output.Get().kind = record.kind; \
-        output.Get().depth = record.depth + 1; \
-    } \
- \
-    output.OutputComplete();
-
 // 親の八分の一を子ブロックに細かくし、次の段を自分に投げる(1 スレッド = 子のセル 1 つ)
 [Shader("node")]
 [NodeLaunch("broadcasting")]
@@ -795,22 +775,27 @@ void CoarsenRequest(uint32_t request, uint32_t t) {
 [NodeIsProgramEntry]
 void RefineNode(DispatchNodeInputRecord<MrRefineRecord> input, uint32_t thread : SV_GroupIndex,
                 [MaxRecords(1)] [NodeId("RefineNode")] NodeOutput<MrRefineRecord> next) {
-    MR_REFINE_NODE_BODY(false)
-}
+    const MrRefineRecord record = input.Get();
+    if (record.levelsLeft > 0)
+        RefineLevel(record, thread);
 
-#ifndef MR_WIDE_CELLS
-// RefineNode と同じで、寄せるセルの中身を置かれ方で配る(T-1188。溢れを使わない変種だけ)
-[Shader("node")]
-[NodeLaunch("broadcasting")]
-[NodeDispatchGrid(1, 1, 1)]
-[NumThreads(512, 1, 1)]
-[NodeMaxRecursionDepth(MR_MAX_RECURSION)]
-[NodeIsProgramEntry]
-void RefinePlaceNode(DispatchNodeInputRecord<MrRefineRecord> input, uint32_t thread : SV_GroupIndex,
-                     [MaxRecords(1)] [NodeId("RefinePlaceNode")] NodeOutput<MrRefineRecord> next) {
-    MR_REFINE_NODE_BODY(true)
+    // --- 次のレベル ---
+    Barrier(UAV_MEMORY, DEVICE_SCOPE | GROUP_SYNC);
+    const bool recurse = record.levelsLeft > 1;
+    GroupNodeOutputRecords<MrRefineRecord> output = next.GetGroupNodeOutputRecords(recurse ? 1 : 0);
+    if (recurse && thread == 0) {
+        const bool fromRequest = record.request != MR_NO_BLOCK;
+        const uint32_t childSlot = fromRequest ? PoppedBlock(g_states[record.request], record.depth) : record.childSlot;
+        output.Get().request = record.request;
+        output.Get().parentSlot = childSlot;
+        output.Get().childSlot = childSlot + 1;
+        output.Get().levelsLeft = record.levelsLeft - 1;
+        output.Get().kind = record.kind;
+        output.Get().depth = record.depth + 1;
+    }
+
+    output.OutputComplete();
 }
-#endif
 
 // 許可した粗くする要求: 子ブロックを親の八分の一へ戻す(1 スレッド = 親のセル 1 つ)
 [Shader("node")]

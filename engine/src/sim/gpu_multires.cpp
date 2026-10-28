@@ -506,22 +506,42 @@ namespace bicameral::sim {
         Log(Channel::Gpu, Level::Info, "多重解像度: Compute のパイプラインの作成 {} ms(プロセスの CPU {} ms)",
             computeCost.wallMs, computeCost.processCpuMs);
 
-        // 溢れを使う世界は細かくする時に溢れを写す変種(T-0237)
-        auto graph = LoadWorkGraph(device, m_rootSignature.Get(), options.pipelineCache,
-                                   options.wideCells ? "sim/multires_graph_wide.cso" : "sim/multires_graph.cso",
-                                   L"Multires");
-        if (!graph)
-            return std::unexpected(graph.error());
+        // --- 木を変える Work Graph: 溢れを使う世界は細かくする時に溢れを写す変種(T-0237)。溢れを使わない世界は、
+        //     細かくする段で寄せるセルの中身を置かれ方で配る変種も作る(T-1188・ADR-0499。置かれ方の段を同じプログラムに入れると、
+        //     使わない木でも RTX の HW の Work Graph が止まったので別のプログラム)---
+        const auto loadGraph = [&](const char* path,
+                                   std::wstring_view name) -> std::expected<GraphProgram, std::string> {
+            auto graph = LoadWorkGraph(device, m_rootSignature.Get(), options.pipelineCache, path, name);
+            if (!graph)
+                return std::unexpected(graph.error());
 
-        m_graph = std::move(*graph);
-        m_entries = {m_graph->EntrypointIndex(L"RefineNode"), m_graph->EntrypointIndex(L"CoarsenRequestNode"),
-                     m_graph->EntrypointIndex(L"PullBackNode"), m_graph->EntrypointIndex(L"RemoveShadowNode")};
-        if (std::ranges::contains(m_entries, UINT32_MAX))
-            return std::unexpected("multires_graph.cso に入口のノードが足りない");
+            GraphProgram program{.graph = std::move(*graph)};
+            program.entries = {
+                program.graph->EntrypointIndex(L"RefineNode"), program.graph->EntrypointIndex(L"CoarsenRequestNode"),
+                program.graph->EntrypointIndex(L"PullBackNode"), program.graph->EntrypointIndex(L"RemoveShadowNode")};
+            if (std::ranges::contains(program.entries, UINT32_MAX))
+                return std::unexpected(std::format("{} に入口のノードが足りない", path));
 
-        m_refinePlaceEntry = m_graph->EntrypointIndex(L"RefinePlaceNode");  // 溢れを使う変種には無い(UINT32_MAX)
+            return program;
+        };
 
-        m_constants.graphEntries = m_entries[EntryRefine] | (m_entries[EntryCoarsenRequest] << 16);
+        auto plain = loadGraph(options.wideCells ? "sim/multires_graph_wide.cso" : "sim/multires_graph.cso",
+                               L"Multires");
+        if (!plain)
+            return std::unexpected(plain.error());
+
+        m_graphs[GraphPlain] = std::move(*plain);
+        if (!options.wideCells) {
+            auto place = loadGraph("sim/multires_graph_place.cso", L"MultiresPlace");
+            if (!place)
+                return std::unexpected(place.error());
+
+            m_graphs[GraphPlace] = std::move(*place);
+        }
+
+        m_activeGraph = GraphPlain;
+        const auto& entries = m_graphs[m_activeGraph].entries;
+        m_constants.graphEntries = entries[EntryRefine] | (entries[EntryCoarsenRequest] << 16);
         if (options.conductionGraph) {
             if (auto created = CreateConductionGraph(device, options.pipelineCache); !created)
                 return created;
@@ -978,10 +998,12 @@ namespace bicameral::sim {
         }
 
         // --- 細かくする段の置かれ方(T-1188): CPU の木が物質の表を持つ世界(EnableRefineCellPlacement)だけ。溢れを使う世界は SAME ---
-        //     置かれ方の段は別の入口(RefinePlaceNode)にある。使わない世界は軽い RefineNode を通す(1 つのノードに入れると HW で止まった)
-        const bool place = !nest.refineCells.species.empty() && !nest.wideCells && m_refinePlaceEntry != UINT32_MAX;
-        const uint32_t refineEntry = place ? m_refinePlaceEntry : m_entries[EntryRefine];
-        m_constants.graphEntries = refineEntry | (m_entries[EntryCoarsenRequest] << 16);
+        //     置かれ方の段は別のプログラム(multires_graph_place)にある。使わない世界は軽いプログラムを通す(ADR-0499)。
+        //     GPU の入力の見出しの入口の番号も、使うプログラムの番号(g_graphEntries)
+        const bool place = !nest.refineCells.species.empty() && !nest.wideCells && m_graphs[GraphPlace].graph;
+        m_activeGraph = place ? GraphPlace : GraphPlain;
+        const auto& entries = m_graphs[m_activeGraph].entries;
+        m_constants.graphEntries = entries[EntryRefine] | (entries[EntryCoarsenRequest] << 16);
 
         // --- 世界の端(表の語。前のリストは GPU で終わっている約束なので、前に外した表の語はもう読まれない)---
         m_retiredTables.clear();
@@ -1094,8 +1116,9 @@ namespace bicameral::sim {
 
     void GpuMultires::SetGraphProgram(ID3D12GraphicsCommandList10* list) {
         list->SetComputeRootSignature(m_rootSignature.Get());
-        m_graph->SetProgram(list, !m_graphInitialized);
-        m_graphInitialized = true;
+        GraphProgram& program = m_graphs[m_activeGraph];
+        program.graph->SetProgram(list, !program.initialized);
+        program.initialized = true;
     }
 
     void GpuMultires::SetActivityProgram(ID3D12GraphicsCommandList10* list) {
@@ -1108,7 +1131,7 @@ namespace bicameral::sim {
                                     uint32_t entry, const void* record, uint32_t recordBytes) {
         SetGraphProgram(list);
         BindRoot(list, debugRing);
-        gpu::WorkGraph::DispatchFromCpu(list, m_entries[entry], record, 1, recordBytes);
+        gpu::WorkGraph::DispatchFromCpu(list, m_graphs[m_activeGraph].entries[entry], record, 1, recordBytes);
         UavBarrier(list);
     }
 
