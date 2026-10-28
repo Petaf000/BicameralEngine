@@ -31,3 +31,8 @@ main の HW の GPU で落ちる陰解法(gpu_multires_implicit 系)と近くの
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-10-29 本体 13 回目: チケットを作った(司令塔の配り)。
+- 2026-10-29 作業役(wt4)1 回目: 入れ物の再起動で中断。**未着手**(ビルド・試験は 1 本も投げていない)。wt4 に枝 t-1250-implicit-fold-regression を main から切っただけ。
+  - 中断の時、device_bash が runner/ の一覧で何度も止まった(ファイル数が多い所の ls -t が返らない)。次は find -newermt か名前を決めて見る。
+  - 引き継ぎ(次の一手): 1) 71930728(T-0931)の前 = 71930728^ と後 = 71930728 を `git switch --detach` → release でビルド → gpu_multires_implicit_build(CPU の SegFault)を先に 1 本流して境目を確かめる。違えば 10-21 の wt2 のログ(20261021-122121-test.log)のコミットから main までを二分。
+  - 2) 境目が T-0931 なら、tests/multires_implicit_scene.h・multires_conduction_scene.h が成分の幅のセルの頁(ADR-0417)に追いついているかを先に見る(試験の側の直しか、エンジンの側かをここに明記)。
+  - 3) CPU 版の multires_implicit・multires_implicit_tree も同じ根で落ちるか確かめる。最後に HW と WARP で全部・`git rebase main`。
