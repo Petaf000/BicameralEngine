@@ -1,6 +1,20 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-29(本体の作業役 12 回目・wt3 T-1220/T-1221・wt5 T-1202 段 1/T-1223 を main へ・main で gpu_multires_implicit 系・near_fold を 1 回)
+最終更新: 2026-10-29(本体の作業役 13 回目・wt4 T-1211・wt6 T-1235 を main へ・T-1250・T-1251 を作った)
+
+## この仕事でしたこと(2026-10-29・本体の作業役・13 回目: wt4 t-1211・wt6 t-1235 のマージ)
+- **マージ(--no-ff)**: wt4 60133b6f(t-1211-phase-layer-world)→ 28b7e124。衝突なし。**T-1211 Done**(担当分 = セルの段の核・反応 2 回・1 セルの GPU のビット一致。世界へつなぐのは T-1230〜T-1232)。
+  **ADR-0497 Accepted**(Claude の一旦の決定・作り手から見た違いなし)・**ADR-0500 Proposed**(土台に足りないもの = 相の層のエネルギー Ec の欄の置き方。**司令塔が設計として預かる**。T-1230・T-1231 はその後)。
+  wt6 b48663d3(t-1235-radiation-skip-positive。27bb6f11 の後の「間接の起動の既定を切る〔radiationIndirectLevels = false〕」が載っていた)→ b0666fa9。衝突は docs/perf.md の表の行だけ(両方残した)。**T-1235 Done・ADR-0495 Accepted**。
+- ROADMAP: 土台の変更要求の束に T-1250・T-1251(順 0)・T-1211(Done)・T-1230〜T-1232・T-1235(Done)の行。
+- チケットを作った: **T-1250**(main の HW で落ちる gpu_multires_implicit・_tree・_build〔SegFault〕・gpu_multires_near_fold の、いつから落ちるかの切り分けと直し。implicit_conduction_blocks/levels〔_chain〕も同じ組か。wt5 が確かめ中)・
+  **T-1251**(前から落ちている CPU の radiation_reference〔line 394 allZero〕・standard_packages〔line 269 overrides〕・window_lab〔300004 mK〕)。どちらも Todo(司令塔が配る)。
+- 試験(release・警告 0・ビルド 267 s): phase_layer・probe_phase_porous_stone(687 s)・cascade_light(561 s)・probe_radiation・float_check 5 本(9 本)+
+  GPU gpu_phase_layer・_warp・gpu_radiation_cost・gpu_play_metric・gpu_probe_sim・gpu_probe_physics_radiation(6 本 124 s)合格。archmap --check OK(227 本)。clang-format --dry-run --Werror を変わった C++ 9 ファイルに: ずれ無し。→ push
+- COMMANDER の「番号の配り方」に 2026-10-29 追加 2(wt4 T-1255〜T-1256・ADR-0501 / wt6 ADR-0502 / 本体 T-1250〜T-1251。**司令塔の次は T-1257・ADR-0503**)。
+- 次の番号は **D-683・ADR-0479・T-1252・Q177**(本体。この仕事では T-1250・T-1251 を使った)。
+
+(前の版の最終更新: 2026-10-29(本体の作業役 12 回目・wt3 T-1220/T-1221・wt5 T-1202 段 1/T-1223 を main へ・main で gpu_multires_implicit 系・near_fold を 1 回))
 
 ## この仕事でしたこと(2026-10-29・本体の作業役・12 回目: wt3 t-1221・wt5 t-1202/t-1223 のマージ)
 - **マージ(--no-ff)**: wt3 17479a6c(t-1221-layer-gpu。T-1220 の CPU〔rebase 後 d67725a8〕と T-1221 の GPU の 1 段目を含む。元の t-1220-layer-cpu-rest 5ca34fdb は別に入れていない)。
