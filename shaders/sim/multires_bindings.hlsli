@@ -62,7 +62,7 @@ cbuffer RootConstants : register(b0) {
     uint32_t g_ledgerColumns;
     uint32_t g_graphInputLow;  // u12 の GPU の番地(DispatchGraph の GPU の入力の見出しに書く)
     uint32_t g_graphInputHigh;
-    // 下位 16bit = RefineNode、16〜30 = CoarsenRequestNode の入口の番号、31 = MR_GRAPH_ENTRY_PLACE
+    // 下位 16bit = 細かくする入口(RefineNode か、置かれ方の世界は RefinePlaceNode。T-1188)、上位 16bit = CoarsenRequestNode の入口の番号
     uint32_t g_graphEntries;
 
     // --- 刻み(T-0107)---
@@ -83,11 +83,6 @@ static const bool UNIFORM_EXPANDS_HELD = true;
 #else
 static const bool UNIFORM_EXPANDS_HELD = false;
 #endif
-
-// g_graphEntries の一番上のビット: 細かくする段が寄せるセルの中身を置かれ方で配る(T-1188。CPU の MultiresNest::refineCells が
-// 物質の表を持つ世界。gpu_multires.cpp の RecordUpload が決める。ルート署名の語が残っていないので入口の番号の語に詰めた)
-static const uint32_t MR_GRAPH_ENTRY_PLACE = 0x80000000u;
-static const uint32_t MR_GRAPH_ENTRY_MASK = 0x7FFFu;
 
 // g_stepFlags(gpu_multires.cpp の STEP_FLAG_*)
 static const uint32_t MR_STEP_CONDUCTION = 1;  // 熱の伝導を入れる(活性の刻むノードは刻まずに伝導の一覧に足す)
