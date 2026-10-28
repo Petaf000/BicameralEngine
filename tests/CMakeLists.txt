@@ -874,10 +874,15 @@ target_link_libraries(gpu_placement_refine_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_placement_refine gpu_placement_refine_test gpu --queue compute)
 bicameral_add_gpu_test_case(gpu_placement_refine_warp gpu_placement_refine_test warp --warp --queue compute)
 
-bicameral_add_gpu_test(gpu_phase_layer_test gpu_tree_refine_placement_test)  # 凝縮相と気体が混ざるセルの 2 つのエネルギーのセルの段の GPU と CPU のビット一致(T-1211・ADR-0486)
+bicameral_add_gpu_test(gpu_phase_layer_test)  # 凝縮相と気体が混ざるセルの 2 つのエネルギーのセルの段の GPU と CPU のビット一致(T-1211・ADR-0486)
 target_link_libraries(gpu_phase_layer_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_phase_layer gpu_phase_layer_test gpu --queue compute)
 bicameral_add_gpu_test_case(gpu_phase_layer_warp gpu_phase_layer_test warp --warp --queue compute)
+
+bicameral_add_gpu_test(gpu_tree_refine_placement_test)  # 木を細かくする段のセルの中身の置かれ方の GPU と CPU のビット一致(T-1188)
+target_link_libraries(gpu_tree_refine_placement_test PRIVATE bicameral_sim)
+bicameral_add_gpu_test_case(gpu_tree_refine_placement gpu_tree_refine_placement_test gpu --queue compute)
+bicameral_add_gpu_test_case(gpu_tree_refine_placement_warp gpu_tree_refine_placement_test warp --warp --queue compute)
 
 bicameral_add_gpu_test(gpu_probe_liquid_test)
 target_link_libraries(gpu_probe_liquid_test PRIVATE bicameral_sim)
