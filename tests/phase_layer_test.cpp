@@ -1,6 +1,6 @@
 // phase_layer_test.cpp — セルより小さい層の 2 つのエネルギー(shaders/common/phase_layer.hlsli。D-665・ADR-0486。T-1160)の CPU の試験と測り。
 // 1 列のセル(0.5 m 角・横は断熱)を、今の 1 つのエネルギー(heat_conduction.hlsli の HcFaceFlow)と、混ざったセルだけ層と気体の
-// 2 つのエネルギーにした形で同じ刻み・同じ反応の核(RxStepCellWait)で回して比べる。世界(仮の世界・世界の木)へつなぐのは T-1211。
+// 2 つのエネルギーにした形で同じ刻み・同じ反応の核(RxStepCellWait)で回して比べる。反応と混ざり方はセルの段の形(PlBeginReact・PlEndReact・PlRemixCondensedEnergy。T-1211)で呼ぶ。
 //
 // 確かめること:
 //   1. 気体だけ・凝縮相だけのセルの列は、2 つのエネルギーの形でも今とビット単位で同じ(混ざったセルが無ければ道が同じ)
@@ -9,7 +9,7 @@
 //   4. 層の温度と気体の温度が分かれる(氷の上の空気は暖かいまま)
 //   測り(試験ではなく表示): 氷(400 mol・台の石 500 K)と水たまり(300 mol・石 700 K)が 20 秒に受ける熱と溶けた量を、
 //   試験の石(伝導率 2000 W/(m·K))・現実の石(2.8 W/(m·K))・層の側の道(層の高さ / 無し)で並べる(T-1160 のチケットの表)。
-// 表は試験の表(combustion_test。real_matter・real_reactions を写したもの)+ 地球の環境 + 石 2 つ。
+// 表とセルの作り方は tests/phase_layer_scene.h(GPU の試験と共有)。
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -17,10 +17,7 @@
 #include <utility>
 #include <vector>
 
-#include "common/phase_layer.hlsli"
-#include "reaction_test_table.h"
-#include "sim/reaction_table.h"
-#include "standard_world_physics.h"
+#include "phase_layer_scene.h"
 
 using namespace bicameral;
 using namespace bicameral::sim;
@@ -43,70 +40,22 @@ namespace {
 
     constexpr uint64_t TICKS = 1200;  // 20 秒
     constexpr uint64_t WORLD_SEED = 11;
-    // µmol(0.125 m³ の岩 ≒ 337 kg を C の 12 g/mol で。密度 2000 でセルを満たす。probe_phase と同じ)
-    constexpr uint64_t STONE = 28000000000;
-    // 0.125 m³ の空気(300 K・1 気圧で 5.08 mol)の N2・O2
-    constexpr uint64_t AIR_NITROGEN = 4013000;
-    constexpr uint64_t AIR_OXYGEN = 1067000;
+    constexpr uint64_t STONE = test::PL_STONE_MICROMOL;
+    constexpr uint64_t AIR_NITROGEN = test::PL_AIR_NITROGEN_MICROMOL;
+    constexpr uint64_t AIR_OXYGEN = test::PL_AIR_OXYGEN_MICROMOL;
+    using Amount = test::PlAmount;
 
     BakedReactionTable MakeTable() {
-        ReactionTableDefinition definition = MakeCombustionTestTable();
-        definition.gasHeatCapacityAtConstantPressure = true;
-        definition.environment = StandardWorldPhysics();
-        // 試験の石(伝導率 2000 W/(m·K)・ほぼ一様な温度の台)と現実の石(2.8 W/(m·K)。ρc ≈ 1.9 MJ/(m³·K))
-        definition.species.push_back({.name = "stone",
-                                      .composition = {{.element = "C", .count = 1}},
-                                      .formationEnthalpy = 0,
-                                      .heatCapacity = 8500,
-                                      .thermalConductivity = 2000000,
-                                      .phase = SpeciesPhase::Solid,
-                                      .density = 2000});
-        definition.species.push_back({.name = "stone_real",
-                                      .composition = {{.element = "C", .count = 1}},
-                                      .formationEnthalpy = 0,
-                                      .heatCapacity = 8500,
-                                      .thermalConductivity = 2800,
-                                      .phase = SpeciesPhase::Solid,
-                                      .density = 2000});
-        auto baked = BakeReactionTable(definition);
-        if (!baked) {
-            std::printf("表を作れない: %s\n", baked.error().c_str());
-            std::exit(1);
-        }
-
-        return std::move(*baked);
+        return test::MakePhaseLayerTable();
     }
-
-    // --- セルを作る(成分は ID の昇順。エネルギー = Σ 量 × H0 + 熱容量 × 温度)---
-    struct Amount {
-        std::string_view name;
-        uint64_t amount;
-    };
 
     int64_t PartEnergyMicrojoules(const BakedReactionTable& table, const std::vector<Amount>& amounts,
                                   uint32_t temperatureMk) {
-        int64_t energy = 0;
-        for (const Amount& entry : amounts) {
-            const rx::RxSpecies species = table.View().Species(table.SpeciesId(entry.name));
-            energy += (int64_t)entry.amount * species.h0;
-            energy += fx::FxMulDivS64((int64_t)(entry.amount * species.heatCapacity), temperatureMk, 1000000);
-        }
-
-        return energy;
+        return test::PlPartEnergyMicrojoules(table, amounts, temperatureMk);
     }
 
     rx::RxCell MakeCell(const BakedReactionTable& table, std::vector<Amount> amounts, int64_t energyMj) {
-        std::ranges::sort(amounts, [&](const Amount& a, const Amount& b) {
-            return table.SpeciesId(a.name) < table.SpeciesId(b.name);
-        });
-        rx::RxCell cell = rx::RxMakeEmptyCell(energyMj);
-        for (const Amount& entry : amounts) {
-            cell.species[cell.speciesCount] = table.SpeciesId(entry.name);
-            cell.amounts[cell.speciesCount] = entry.amount;
-            ++cell.speciesCount;
-        }
-
-        return cell;
+        return test::MakePhaseLayerCell(table, std::move(amounts), energyMj);
     }
 
     // 列の 1 セル: 凝縮相の部分と気体の部分をそれぞれの温度で(1 つのエネルギーの形では和だけを使う)
@@ -182,31 +131,22 @@ namespace {
             return;
         }
 
-        const rx::PlParts parts = rx::PlPartsOf(table.View(), cell.cell, cell.condensedEnergy);
-        const uint32_t condensedMk = rx::HcCacheTemperature(parts.condensed);
-        const uint32_t gasMk = rx::HcCacheTemperature(parts.gas);
-        rx::RxCell view = cell.cell;
-        view.energy = rx::PlCondensedViewEnergy(table.View(), cell.cell, cell.condensedEnergy, condensedMk);
-        const auto step = rx::RxStepCellWait(table.View(), view, WORLD_SEED, tick, tick - 1, cellId);
-        const int64_t gasBefore = cell.cell.energy - cell.condensedEnergy;
-        const int64_t gasAfter = rx::PlGasEnergyAfter(table.View(), view, step.cell, gasBefore,
-                                                      rx::HcCacheTemperature(step.thermal), gasMk);
+        // セルの段の形(T-1211。世界の段と同じ関数): 見るセル → 反応の核 → 気体の項の出入りを気体の側へ
+        const auto begin = rx::PlBeginReact(table.View(), cell.cell, cell.condensedEnergy);
+        const auto step = rx::RxStepCellWait(table.View(), begin.view, WORLD_SEED, tick, tick - 1, cellId);
         const int64_t energy = cell.cell.energy;
+        cell.condensedEnergy = rx::PlEndReact(table.View(), begin, step.cell, step.thermal, energy);
         cell.cell = step.cell;
         cell.cell.energy = energy;
-        cell.condensedEnergy = energy - gasAfter;
     }
 
     // 混ざり方が変わったセル: 混ざったら温度が揃う配り、混ざらなくなったら 1 つへ
-    void Remix(const BakedReactionTable& table, const Column& column, ColumnCell& cell) {
-        const bool mixed = column.twoEnergies && rx::PlLayerOf(table.View(), cell.cell).mixed != 0;
-        if (mixed && !cell.mixed)
-            cell.condensedEnergy = rx::PlEvenCondensedEnergy(table.View(), cell.cell);
+    void Remix(const BakedReactionTable& table, const Column& column, ColumnCell& cell, const rx::RxCell& before) {
+        if (!column.twoEnergies)
+            return;
 
-        if (!mixed)
-            cell.condensedEnergy = 0;
-
-        cell.mixed = mixed;
+        cell.condensedEnergy = rx::PlRemixCondensedEnergy(table.View(), before, cell.cell, cell.condensedEnergy);
+        cell.mixed = rx::PlLayerOf(table.View(), cell.cell).mixed != 0;
     }
 
     bool PartsNonNegative(const BakedReactionTable& table, const ColumnCell& cell) {
@@ -243,12 +183,8 @@ namespace {
         // --- 層の上の面(層 → 気体)---
         for (size_t i = 0; i < count; ++i) {
             const ColumnCell& cell = column.cells[i];
-            if (!cell.mixed)
-                continue;
-
-            const rx::PlLayer layer = rx::PlLayerOf(table.View(), cell.cell);
-            const rx::PlParts parts = rx::PlPartsOf(table.View(), cell.cell, cell.condensedEnergy);
-            condensedDelta[i] -= rx::PlInnerFlow(parts, layer);
+            if (cell.mixed)
+                condensedDelta[i] -= rx::PlInnerFlowOf(table.View(), cell.cell, cell.condensedEnergy);
         }
 
         for (size_t i = 0; i < count; ++i) {
@@ -259,8 +195,9 @@ namespace {
         // --- 反応 ---
         bool nonNegative = true;
         for (size_t i = 0; i < count; ++i) {
+            const rx::RxCell unreacted = column.cells[i].cell;
             React(table, column.cells[i], tick, i);
-            Remix(table, column, column.cells[i]);
+            Remix(table, column, column.cells[i], unreacted);
             nonNegative = nonNegative && PartsNonNegative(table, column.cells[i]);
         }
 
