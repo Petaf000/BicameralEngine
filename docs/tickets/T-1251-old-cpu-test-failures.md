@@ -1,6 +1,6 @@
 # T-1251 main で前から落ちている CPU の試験 3 本を直す
 
-- Status: Todo
+- Status: Doing
 - 種類: 工学(小)
 - PC: 必須(release の ctest)
 - 見積もり: チャット 1 回分
@@ -25,3 +25,8 @@ main でも前から落ちている CPU の試験 radiation_reference・standard
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-10-29 本体 13 回目: チケットを作った(司令塔の配り)。
+- 2026-10-29 本体 14 回目: 原因を決めた(3 本とも試験の期待の古さ。エンジンの不具合ではない)。ブランチ t-1251-old-cpu-tests に直しをコミット(release のビルドは通った・警告 0。**試験は未実行**。会話の入れ物の再起動で止めた)。
+  radiation_reference: T-1066(f55584f1・Q161 の一旦の決定)で real_matter のセルロース(11000000)と炭(40000000)が放射の吸い込みを書くようになった → その 2 つは書いた値、ほかは 0 と期待を直した。
+  standard_packages: T-1164(278c9469・仮)で combustion_test が earth_environment の environment.atmosphere_profile(地面 300 K)を書き直す → その書き直しも許し、思わない書き直しを表示するようにした。
+  window_lab: D-637・T-1066(熱伝導率の試験の倍率 20000 → 1)で、放射の段を持たない実験室の箱では隣の根の木が 57 刻みで 4 mK しか上がらない → 温まったと見る幅を 1 K → 1 mK に(engine/src/editor/lab_panel.cpp)。
+  次: release で radiation_reference・standard_packages・window_lab・window_lab_blank・window_lab_compare・probe_radiation・cascade_light を流し、合格なら main へ。

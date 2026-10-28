@@ -385,10 +385,17 @@ namespace {
         }
         EXPECT(monotone);
 
-        // 試験の表(combustion_test)の物質は欄を書いていない → すべて 0(今までの世界は変わらない)
+        // 試験の表(combustion_test)の物質は欄を書いていない → 0(今までの世界は変わらない)。
+        // ただし標準パッケージ real_matter のセルロースと炭は T-1066(Q161 の一旦の決定・f55584f1)から放射の吸い込みを書く
+        // (長い帯の光と同じ値)ので、その 2 つだけは書いた値
+        const uint32_t cellulose = baked->SpeciesId("cellulose");
+        const uint32_t carbon = baked->SpeciesId("carbon");
+        EXPECT(cellulose != 0 && baked->speciesRadiationAbsorption[cellulose] == 11000000);
+        EXPECT(carbon != 0 && baked->speciesRadiationAbsorption[carbon] == 40000000);
+
         bool allZero = true;
         for (uint32_t id = 0; id < baked->speciesNames.size(); ++id) {
-            if (id != dark)
+            if (id != dark && id != cellulose && id != carbon)
                 allZero = allZero && baked->speciesRadiationAbsorption[id] == 0;
         }
         EXPECT(allZero);
