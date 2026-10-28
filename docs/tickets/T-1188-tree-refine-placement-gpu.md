@@ -79,8 +79,8 @@ T-1176 の CPU リファレンス(PlaceTreeCell・PlaceRefineOctantCells)と同�
 ## 引き継ぎ(2026-10-29 wt2・作業役 2 回目)
 - 状態: ブランチ t-1188-refine-gpu-2(main 20799ae7 の上に rebase 済み)。**rebase の後の試験はまだ**(会話の入れ物の再起動で止めた)。
   rebase 前(main 140f2f0c の上)の release は警告 0 で、上の作業ログの試験が合格。rebase で tests/CMakeLists.txt が gpu_phase_layer_test(T-1211)と重なり、
-  1 回目の解き方を誤って configure が落ちた → 直した(この WIP に入っている)。直した後の build(20261028-231601)は止める時に走っていた。
-- 次の一手: (1) release のビルド(警告 0)を確かめる (2) `^(tree_refine_placement|placement_refine|reaction_package|lab_box|gpu_multires|gpu_multires_stress|gpu_multires_warp|gpu_multires_activity|gpu_multires_quiet|gpu_multires_layers|gpu_multires_uniform|gpu_multires_wide_many|gpu_lab_box|gpu_lab_box_warp|gpu_tree_refine_placement|gpu_tree_refine_placement_warp|gpu_placement_refine|gpu_placement_refine_warp|gpu_phase_layer)$`
+  1 回目の解き方を誤って configure が落ちた → 直した(この WIP に入っている)。直した後の release のビルドは通った(警告 0・20261028-231601)。
+- 次の一手: (1) ビルドは済み (2) `^(tree_refine_placement|placement_refine|reaction_package|lab_box|gpu_multires|gpu_multires_stress|gpu_multires_warp|gpu_multires_activity|gpu_multires_quiet|gpu_multires_layers|gpu_multires_uniform|gpu_multires_wide_many|gpu_lab_box|gpu_lab_box_warp|gpu_tree_refine_placement|gpu_tree_refine_placement_warp|gpu_placement_refine|gpu_placement_refine_warp|gpu_phase_layer)$`
   を流す(main に T-1211 の相の層・T-1236 の層の置き口が入ったので、gpu_lab_box・gpu_tree_refine_placement が変わらないかを見る)
   (3) gpu_tree_refine_placement のログの「要求を処理する段 x ms」(SAME と置かれ方の 1 段・2 段)を docs/perf.md と ADR-0499 の「結果」へ (4) Status は Done にしてあるが、(2) が通るまではマージしない。
 - 前の枝 t-1188-refine-gpu は使わない(この枝に cherry-pick 済み)。
