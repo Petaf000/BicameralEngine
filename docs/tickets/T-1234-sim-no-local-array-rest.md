@@ -24,5 +24,6 @@ T-1233 で反応の道具(reaction.hlsli)の読み方を直した後も、DXIL �
 - alloca の多いシェーダー(T-1233 の後): multires_step_wide_wait 88・multires_graph_wide 82・multires_step_wide_expanded_wait 62・multires_graph 60・multires_step_wide_big 47
   (速い形 RxGpuMidCell は 32 種を開くと命令が増えすぎるので動的な添字のまま。ADR-0052 追記 14)。physics_*(83・65・62)は物理の側で別。
 - T-1233 で増えた multires_tree_settle 20 → 27 の原因を見る。
+- **T-1233 で遅くなった所(2026-10-29 測った。docs/perf.md)**: `gpu_multires_test --measure-wide` の「上限の種のセル・溢れ」伝導なし 932 → 1347 ns/セル(+45%)・伝導あり 139 → 155(+11%)、`gpu_object_heat_test --measure-only` の反応の段 0.81 → 0.90 ms(+11%)。成分の多いセルで、決まった数の回しの中で毎回 RX_MAX_CELL_SPECIES 個から選ぶ形が重いと見る(未確認)。選ぶ回数を減らす(回しの外で 1 度だけ局所の値に写す・同じ i の読みをまとめる)形を先に見る。負荷で遅れるのは不具合(D-468)。
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)

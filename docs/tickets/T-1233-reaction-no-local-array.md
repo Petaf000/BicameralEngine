@@ -42,6 +42,10 @@ shaders/common/reaction.hlsli などシミュの共通のコードで、セル�
 - **wt2 T-1188 と shaders/common/reaction.hlsli が重なる**(木の細かくする段・粒の詰まり)。こちらは読み方の形(上の道具とマクロ)だけに絞った。
   マージの時は、wt2 側で増えた `cell.species[i]`・`.amounts[i]`・`candidates.rules[c]` などの直読みを上のマクロに直す。
 
+## 前から落ちている試験(T-1233 のせいではない。2026-10-29 に直す前の土台 da710a72 を release でビルドして同じに落ちるのを確かめた)
+- GPU(HW): gpu_multires_implicit(計測: 鎖を測れない)・gpu_multires_implicit_tree / _build(SegFault。GPU の前の CPU 側)・gpu_multires_implicit_conduction_blocks(_chain)(ブロックが入らない上限なのに陽解法に回したブロックが無い)・_levels(_chain)(陰解法の上限は全部の欄が要る)・gpu_multires_near_fold(場面の確認: 頁が全部畳まれる・端数の枠を返す、になっていない)。CPU: standard_packages(line 269 の上書きの検査)・radiation_reference。
+- 手がかり: 最後に通ったログは wt2 の 2026-10-21 12:21(runner/logs/20261021-122121-test.log)と wt3 の 10-18。その後にこの組の C++(implicit_conduction・multires_implicit_conduction・gpu_multires_implicit・試験)を触ったのは T-0931(71930728・10-22「セルの頁を成分の数に合わせた幅で持つ・CPU。ADR-0417」)だけ。落ち方(上限を計る CPU の系が空・畳みの場面にならない)は頁の幅の変更と合う。直すのはこのチケットの外(司令塔へ)。
+
 ## 残り(このチケットでは触らない。T-1234 の候補)
 - multires.hlsli(MrFraction・MrFold の stats・MrSplit の parent など)・cell_view.hlsli・light.hlsli・probe_place.hlsli・object_heat.hlsli の気体の欄(flow.amounts[g] など)
   にも動的な添字の読み書きが残る。physics_*(83・65・62 など)は反応ではなく物理の側。
@@ -57,6 +61,7 @@ shaders/common/reaction.hlsli などシミュの共通のコードで、セル�
   (FAILED line 394 allZero = 試験の表の物質の放射の吸収の欄。シェーダーと関係ない C++ のパッケージの焼き。wt3・wt4 のログでも同じく落ちている = 前からの失敗)。
   GPU の試験(HW 99 本を 9 本ずつ 10 組。runner/t1233/groups.txt の 1〜10 行目)と費用の 3 本(gpu_object_heat_test --measure-only・
   gpu_multires_test --measure-wide・gpu_object_shell_flow_test --profile)を wt5 のランナーに積んだまま 2 時間で区切った。
+- 2026-10-29 wt5(3 人目): HW の GPU 試験 10 組を全部見た(落ちたのは上の 8 本だけ・ほかは全部通った)。da710a72 を release でビルドし 8 本 + standard_packages を流して 全部同じに落ちる = 前からの失敗と確かめた。費用の前後を docs/perf.md へ(上限の種のセル・伝導なしで +45%・反応の段 +11%。T-1234 へ)。
 
 ## 引き継ぎメモ(次の作業役・司令塔へ)
 - 結果は wt5 の runner/logs の z- で始まる test / run のログ(積んだ順)。全部 Passed なら完了条件の「全 GPU 試験」は HW の分を満たす。
@@ -71,3 +76,4 @@ shaders/common/reaction.hlsli などシミュの共通のコードで、セル�
 - CPU の試験は --timeout 3600 で 41 本目(probe_gas)で打ち切られた(40 本: radiation_reference・standard_packages の 2 本が落ちる。どちらも C++ のパッケージの焼きで、
   シェーダーと関係ない。standard_packages は「real_matter → combustion_test の上書き」の検査)。残りの 89 本は --timeout を長くして流し直す。
 - 残り: `git rebase main`(main に t-1202・t-1223 が入った後)・wt2 T-1188 との reaction.hlsli の重なりの解消(上の「重なり」)・Status を Done に。
+- **2026-10-29(3 人目)の引き継ぎ**: t-1233 に戻して release をビルドし直した(警告 0)。wt5 のキューに CPU の残り 86 本(runner/t1233/cpu_groups.txt の 4 組。--timeout 5400)と WARP の 5 組(groups.txt の 11〜15 行目)を積んだ(20261028-201913〜201923 の test)。結果は wt5 の runner/logs のそのログ。 前からの失敗(上の節)を除いて全部通ったら、`git rebase main` → release のビルドと代表の試験(組 1・組 4)→ push。CPU の multires_implicit・multires_implicit_tree(組 4)が落ちたら、上の陰解法の失敗と同じ根(T-0931)と見て前からの失敗に足す(da710a72 で確かめる)。
