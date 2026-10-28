@@ -131,7 +131,8 @@ void CoverWideTails(uint32_t page, uint32_t octant) {
 #endif
 
 // 1 段を細かくする(1 スレッド = 子のセル t。親のセル t も読む)
-void RefineLevel(MrRefineRecord record, uint32_t t) {
+// place: 寄せるセルの中身を置かれ方で配るか(T-1188。入口のノードで決まる定数。RefinePlaceNode だけが true)
+void RefineLevel(MrRefineRecord record, uint32_t t, bool place) {
     const bool fromRequest = record.request != MR_NO_BLOCK;
     const bool real = record.kind == MR_BLOCK_REAL;
     const MrBlock parent = g_blocks[record.parentSlot];
@@ -180,7 +181,7 @@ void RefineLevel(MrRefineRecord record, uint32_t t) {
 #ifndef MR_WIDE_CELLS
     // --- 寄せるセルの中身は置かれ方で(T-1188・T-1176。CPU の PlaceRefineOctantCells。端数は上で写した SAME のまま。
     //     グループで同じ条件なので、中のバリアは全部のスレッドが通る)---
-    if (fromRequest && real && !uniformChild && (g_graphEntries & MR_GRAPH_ENTRY_PLACE) != 0u)
+    if (place && fromRequest && real && !uniformChild)
         PlaceRefineChildren(parent, record.parentSlot, octant, childPage, t);
 #endif
 
@@ -759,6 +760,32 @@ void CoarsenRequest(uint32_t request, uint32_t t) {
 // clang-format は HLSL のノードの属性を並べ崩すので、属性つきの宣言だけ整形を止める
 // clang-format off
 
+// 2 つの入口の中身(同じ。place だけ違う)。置かれ方の段は重いので、使わない世界の木は軽い RefineNode を通す:
+// 1 つのノードに置かれ方の段を入れたまま使わない木でも、RTX の HW の Work Graph の gpu_multires が DEVICE_HUNG になった
+// (置かれ方の段を外すと通る。グループ共有を 12 → 6 KiB にしても止まった = コードの重さ。T-1188 の作業ログ)。
+// 入口は CPU が選ぶ(gpu_multires.cpp の RecordUpload が graphEntries の下位 16bit に書く)
+#define MR_REFINE_NODE_BODY(place) \
+    const MrRefineRecord record = input.Get(); \
+    if (record.levelsLeft > 0) \
+        RefineLevel(record, thread, place); \
+ \
+    /* --- 次のレベル --- */ \
+    Barrier(UAV_MEMORY, DEVICE_SCOPE | GROUP_SYNC); \
+    const bool recurse = record.levelsLeft > 1; \
+    GroupNodeOutputRecords<MrRefineRecord> output = next.GetGroupNodeOutputRecords(recurse ? 1 : 0); \
+    if (recurse && thread == 0) { \
+        const bool fromRequest = record.request != MR_NO_BLOCK; \
+        const uint32_t childSlot = fromRequest ? PoppedBlock(g_states[record.request], record.depth) : record.childSlot; \
+        output.Get().request = record.request; \
+        output.Get().parentSlot = childSlot; \
+        output.Get().childSlot = childSlot + 1; \
+        output.Get().levelsLeft = record.levelsLeft - 1; \
+        output.Get().kind = record.kind; \
+        output.Get().depth = record.depth + 1; \
+    } \
+ \
+    output.OutputComplete();
+
 // 親の八分の一を子ブロックに細かくし、次の段を自分に投げる(1 スレッド = 子のセル 1 つ)
 [Shader("node")]
 [NodeLaunch("broadcasting")]
@@ -768,27 +795,22 @@ void CoarsenRequest(uint32_t request, uint32_t t) {
 [NodeIsProgramEntry]
 void RefineNode(DispatchNodeInputRecord<MrRefineRecord> input, uint32_t thread : SV_GroupIndex,
                 [MaxRecords(1)] [NodeId("RefineNode")] NodeOutput<MrRefineRecord> next) {
-    const MrRefineRecord record = input.Get();
-    if (record.levelsLeft > 0)
-        RefineLevel(record, thread);
-
-    // --- 次のレベル ---
-    Barrier(UAV_MEMORY, DEVICE_SCOPE | GROUP_SYNC);
-    const bool recurse = record.levelsLeft > 1;
-    GroupNodeOutputRecords<MrRefineRecord> output = next.GetGroupNodeOutputRecords(recurse ? 1 : 0);
-    if (recurse && thread == 0) {
-        const bool fromRequest = record.request != MR_NO_BLOCK;
-        const uint32_t childSlot = fromRequest ? PoppedBlock(g_states[record.request], record.depth) : record.childSlot;
-        output.Get().request = record.request;
-        output.Get().parentSlot = childSlot;
-        output.Get().childSlot = childSlot + 1;
-        output.Get().levelsLeft = record.levelsLeft - 1;
-        output.Get().kind = record.kind;
-        output.Get().depth = record.depth + 1;
-    }
-
-    output.OutputComplete();
+    MR_REFINE_NODE_BODY(false)
 }
+
+#ifndef MR_WIDE_CELLS
+// RefineNode と同じで、寄せるセルの中身を置かれ方で配る(T-1188。溢れを使わない変種だけ)
+[Shader("node")]
+[NodeLaunch("broadcasting")]
+[NodeDispatchGrid(1, 1, 1)]
+[NumThreads(512, 1, 1)]
+[NodeMaxRecursionDepth(MR_MAX_RECURSION)]
+[NodeIsProgramEntry]
+void RefinePlaceNode(DispatchNodeInputRecord<MrRefineRecord> input, uint32_t thread : SV_GroupIndex,
+                     [MaxRecords(1)] [NodeId("RefinePlaceNode")] NodeOutput<MrRefineRecord> next) {
+    MR_REFINE_NODE_BODY(true)
+}
+#endif
 
 // 許可した粗くする要求: 子ブロックを親の八分の一へ戻す(1 スレッド = 親のセル 1 つ)
 [Shader("node")]

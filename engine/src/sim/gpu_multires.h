@@ -221,7 +221,7 @@ namespace bicameral::sim {
             uint32_t ledgerColumns = 0;
             uint32_t graphInputLow = 0;
             uint32_t graphInputHigh = 0;
-            uint32_t graphEntries = 0;  // 下位 16bit = RefineNode、16〜30 = CoarsenRequestNode、31 = GRAPH_ENTRY_PLACE
+            uint32_t graphEntries = 0;  // 下位 16bit = RefineNode か RefinePlaceNode、上位 16bit = CoarsenRequestNode
 
             // --- 刻み(T-0107)---
             uint32_t stepFlags = 0;  // STEP_FLAG_*(multires_bindings.hlsli の MR_STEP_*)
@@ -232,9 +232,6 @@ namespace bicameral::sim {
             // --- 成分の二段(T-0176。溢れを使う変種だけが読む)---
             uint32_t overflowBase = 0;  // u6 の溢れの領域の始まり(語)
         };
-
-        // graphEntries の一番上のビット: 細かくする段が置かれ方で配る(multires_bindings.hlsli の MR_GRAPH_ENTRY_PLACE。T-1188)
-        static constexpr uint32_t GRAPH_ENTRY_PLACE = 0x80000000u;
 
         // バッファの並び(u0〜u3、u6〜u12。multires_bindings.hlsli)
         enum Buffer : uint8_t {
@@ -351,7 +348,9 @@ namespace bicameral::sim {
                                                     UINT32_MAX};  // 埋める・流れ・足す・小刻みの終わり
         std::unique_ptr<gpu::WorkGraph> m_graph;
         bool m_graphInitialized = false;
-        std::array<uint32_t, 4> m_entries{};              // 細かくする・粗くする要求・引き戻す・影を捨てる
+        std::array<uint32_t, 4> m_entries{};  // 細かくする・粗くする要求・引き戻す・影を捨てる
+        // 置かれ方で細かくする入口(RefinePlaceNode。溢れを使う変種には無い。T-1188)
+        uint32_t m_refinePlaceEntry = UINT32_MAX;
         std::unique_ptr<gpu::WorkGraph> m_activityGraph;  // 無ければ活性を使わない
         bool m_activityGraphInitialized = false;
         std::array<uint32_t, 3> m_activityEntries = {UINT32_MAX, UINT32_MAX,

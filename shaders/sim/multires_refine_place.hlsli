@@ -39,11 +39,13 @@ uint3 PlaceMaterialOf(uint32_t speciesId) {
 #define PR_PARENT_MASS(m) ((int64_t)g_cells[s_placeAddress].amounts[m] * 8)
 #include "sim/placement_refine.hlsli"
 
-// グループ共有 12 KiB(HW の Work Graph の 1 グループの重さを小さく保つ。詰まり・空きは 32bit に収まる: 詰まりは 0〜2^16・空きは子の器以下)
-groupshared int32_t gs_placeFullness[MR_BLOCK_CELLS];   // 親のブロックのセルの詰まり(Q16。器 = 子 8 つ)。無いセルは −1
-groupshared uint32_t gs_placeOpen[MR_BLOCK_CELLS];      // 子のセルの空きの体積(mm³)
-groupshared uint64_t gs_placeCapacity[MR_BLOCK_CELLS];  // 子のセルの熱容量(nJ/K)
-groupshared int64_t gs_placeEnergy[MR_BLOCK_CELLS];     // 子のセルのエネルギー(mJ。残りを取る子は 0)
+// グループ共有 6 KiB(HW の Work Graph の再帰のノードの 1 グループの重さを小さく保つ。12 KiB の 4 つの欄では RTX の
+// gpu_multires〔置かれ方を使わない木〕が DEVICE_HUNG になった。T-1188)。1 つの欄を段ごとに使い回し、入れ替わる所にバリアを置く:
+//   gs_placeNarrow = 親のブロックのセルの詰まり(Q16。器 = 子 8 つ。無いセルは −1 を符号無しで)→ 子のセルの空きの体積(mm³)
+//   gs_placeWide   = 子のセルの熱容量(nJ/K)→ 子のセルのエネルギー(mJ。残りを取る子は 0。符号付きを符号無しで)
+// 詰まり・空きは 32bit に収まる(詰まりは 0〜2^16・空きは子の器以下)
+groupshared uint32_t gs_placeNarrow[MR_BLOCK_CELLS];
+groupshared uint64_t gs_placeWide[MR_BLOCK_CELLS];
 
 // --- 隣の読み方(CPU の Present・FullnessAt・SurfaceAt・SlopeAt)---
 
@@ -62,11 +64,11 @@ bool PlacePresent(int32_t x, int32_t y, int32_t z) {
     if (x < 0 || y < 0 || z < 0 || x >= edge || y >= edge || z >= edge)
         return false;
 
-    return gs_placeFullness[MrCellIndex((uint32_t)x, (uint32_t)y, (uint32_t)z)] >= 0;
+    return (int32_t)gs_placeNarrow[MrCellIndex((uint32_t)x, (uint32_t)y, (uint32_t)z)] >= 0;
 }
 
 int64_t PlaceFullnessOf(int32_t x, int32_t y, int32_t z) {
-    return gs_placeFullness[MrCellIndex((uint32_t)x, (uint32_t)y, (uint32_t)z)];
+    return (int32_t)gs_placeNarrow[MrCellIndex((uint32_t)x, (uint32_t)y, (uint32_t)z)];
 }
 
 // 列 (x, z) の段 y の表面(下が無い = 詰まり切る・上が無い = 空)
@@ -98,7 +100,7 @@ int64_t PlaceChildMass(PrCell cell, PrColumn column, uint32_t m, uint32_t j, uin
     int64_t othersGiven = 0;
     if (openSum != 0 && j == 7) {
         [loop] for (uint32_t k = 0; k < 7; ++k)
-            othersGiven += FxMulDivS64(parentMass, gs_placeOpen[MrChildCell(local, k)], openSum);
+            othersGiven += FxMulDivS64(parentMass, gs_placeNarrow[MrChildCell(local, k)], openSum);
     }
 
     return PrGasShare(mass, parentMass, ownOpen, openSum, othersGiven, j);
@@ -136,22 +138,25 @@ int64_t PlaceChildEnergy(uint32_t parentAddress, uint32_t j, uint32_t local, uin
     }
 
     const int64_t heat = PrSubS64((int64_t)RX_MICROJOULES_PER_MILLIJOULE * parentEnergy, parentChemical) * 8;
+    const uint64_t ownCapacity = gs_placeWide[t];
     uint64_t capacitySum = 0;
     uint32_t last = 0;
     FX_UNROLL
     for (uint32_t k = 0; k < 8; ++k) {
-        const uint64_t capacity = gs_placeCapacity[MrChildCell(local, k)];
+        const uint64_t capacity = gs_placeWide[MrChildCell(local, k)];
         capacitySum += capacity;
         last = capacity > 0 ? k : last;
     }
 
     int64_t energy = parentEnergy;  // 熱容量が無い(SAME)
     if (capacitySum != 0 && j != last) {
-        const int64_t childHeat = FxMulDivS64(heat, gs_placeCapacity[t], capacitySum);
+        const int64_t childHeat = FxMulDivS64(heat, ownCapacity, capacitySum);
         energy = FxDivS64(chemical + childHeat, (int64_t)RX_MICROJOULES_PER_MILLIJOULE);
     }
 
-    gs_placeEnergy[t] = capacitySum != 0 && j == last ? 0 : energy;
+    // 熱容量を全部のスレッドが読み終えてから、同じ欄にエネルギーを書く
+    GroupMemoryBarrierWithGroupSync();
+    gs_placeWide[t] = (uint64_t)(capacitySum != 0 && j == last ? 0 : energy);
     GroupMemoryBarrierWithGroupSync();
     if (capacitySum == 0 || j != last)
         return energy;
@@ -159,7 +164,7 @@ int64_t PlaceChildEnergy(uint32_t parentAddress, uint32_t j, uint32_t local, uin
     int64_t given = 0;
     FX_UNROLL
     for (uint32_t k = 0; k < 8; ++k)
-        given += gs_placeEnergy[MrChildCell(local, k)];
+        given += (int64_t)gs_placeWide[MrChildCell(local, k)];
 
     return PrSubS64(parentEnergy * 8, given);
 }
@@ -171,7 +176,7 @@ void PlaceRefineChildren(MrBlock parent, uint32_t parentSlot, uint32_t octant, u
     if (g_blocks[parentSlot].children[MrOctantOfCell(t)] == MR_NO_BLOCK)
         fullness = (int32_t)PlaceFullnessAt(PageCellAddress(parent.page, t));
 
-    gs_placeFullness[t] = fullness;
+    gs_placeNarrow[t] = (uint32_t)fullness;
     GroupMemoryBarrierWithGroupSync();
 
     // --- 2. 子 t の配り方と空きの体積(気体の配り直しは同じ親の子 8 つの空きの和)---
@@ -182,13 +187,16 @@ void PlaceRefineChildren(MrBlock parent, uint32_t parentSlot, uint32_t octant, u
     const PrCell cell = PlaceCellOf(parent, MrOctantCell(octant, local));
     const PrColumn column = PrMakeColumn(cell, j & 1u, j >> 2);
     const uint64_t ownOpen = PrChildWeightsOf(cell, column, j).openMm3;
-    gs_placeOpen[t] = (uint32_t)ownOpen;
+
+    // 詰まりを全部のスレッドが読み終えてから、同じ欄に空きの体積を書く
+    GroupMemoryBarrierWithGroupSync();
+    gs_placeNarrow[t] = (uint32_t)ownOpen;
     GroupMemoryBarrierWithGroupSync();
 
     uint64_t openSum = 0;
     FX_UNROLL
     for (uint32_t k = 0; k < 8; ++k)
-        openSum += gs_placeOpen[MrChildCell(local, k)];
+        openSum += gs_placeNarrow[MrChildCell(local, k)];
 
     // --- 3. 子のセルの成分を書き(親の並びのまま、量 0 の成分を消して詰める = 同じ中身なら同じ並び)、熱容量と化学のエネルギーを数える ---
     const uint32_t address = PageCellAddress(childPage, t);
@@ -215,7 +223,7 @@ void PlaceRefineChildren(MrBlock parent, uint32_t parentSlot, uint32_t octant, u
         written += 1;
     }
 
-    gs_placeCapacity[t] = capacity;
+    gs_placeWide[t] = capacity;
     GroupMemoryBarrierWithGroupSync();
 
     // --- 4. エネルギー(寄せないセルは写したまま)---

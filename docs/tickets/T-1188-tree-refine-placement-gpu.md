@@ -1,6 +1,6 @@
 # T-1188 木を細かくする段のセルの中身の置かれ方を GPU で・既定 on(T-1176 の続き)
 
-- Status: Done(2026-10-27 本体の作業役 11 回目。隣のブロックの列・斜面の空気の速さの比べは T-1189 に分けた)
+- Status: Doing(2026-10-29 wt2: HW の gpu_multires が DEVICE_HUNG。マージしない。下の「引き継ぎ」。隣のブロックの列・斜面の空気の速さの比べは T-1189 に分けた)
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1〜2 回分
@@ -30,9 +30,10 @@ T-1176 の CPU リファレンス(PlaceTreeCell・PlaceRefineOctantCells)と同�
 - **GPU**: `shaders/sim/multires_refine_place.hlsli`(新)の `PlaceRefineChildren` を `multires_graph.hlsl` の RefineLevel が「セルと端数」の後に呼ぶ(溢れを使わない変種だけ。
   要求の本物の細かくする・一様でない親・印 `MR_GRAPH_ENTRY_PLACE`)。1 スレッド = 親のセル t の詰まり → グループ共有(子に覆われたセルは −1)→ 1 スレッド = 子のセル t の
   傾き・配り方・空きの体積 → 熱容量 → エネルギー(最後の重みのある子が残り)→ 子の頁へ直接書く(成分は量 0 を消して詰める)。物質は毎回 g_cells・g_species から読む(T-0397)。
-  グループ共有 4 × 4 KiB。
-- **印**: ルート署名に語が無いので `g_graphEntries` の bit 31(下位 15bit = RefineNode・16〜30 = CoarsenRequestNode)。`GpuMultires::RecordUpload` が
-  `nest.refineCells.species` が空でなく溢れを使わない世界なら立てる(= CPU の ProcessRequests と同じ条件)。
+  グループ共有 6 KiB(2 つの欄を段ごとに使い回す。2026-10-29 wt2 で 12 → 6 KiB)。
+- **入口**: 置かれ方の段は別の入口のノード `RefinePlaceNode`(RefineNode と同じ中身 `MR_REFINE_NODE_BODY(place)` で、place だけ true。溢れを使わない変種だけ)。
+  `GpuMultires::RecordUpload` が、`nest.refineCells.species` が空でなく溢れを使わない世界なら `g_graphEntries` の下位 16bit にこの入口を書く
+  (= CPU の ProcessRequests と同じ条件)。ほかの世界は今まで通り軽い RefineNode(2026-10-29 wt2。前の版の bit 31 の印は外した。下の作業ログ)。
 - **64bit の差**: `placement_refine.hlsli` の差(列の分け・縦の残り・気体の残り)と熱の差・エネルギーの残りを `PrSubS64`(32bit の 2 つに分けて借りを手で回す)に。
   子の量を 0 と比べるため(T-1078・T-1159 の形)。値は同じ。
 - **既定 on(D-664)**: 世界の箱 `MakeLabBoxNest` が `EnableRefineCellPlacement`。表の差し替え(`RemapLabBox`)は新しい表で持ち直す。`MakeMultiresNest` だけの木
@@ -49,3 +50,27 @@ T-1176 の CPU リファレンス(PlaceTreeCell・PlaceRefineOctantCells)と同�
 | (無し) | | | 既定 on は世界の箱(MakeLabBoxNest)だけ。箱を使う試験(gpu_lab_box・window_lab 系・time_step_lab)は CPU と GPU が同じに変わるか、凝縮相の混ざるセルを細かくしないので、期待値の書き換えは要らなかった(下の作業ログ)。lab_box は前から止めてある(T-1155 待ち) |
 
 ## 作業ログ
+- 2026-10-29 wt2(作業役): WIP(28e6611a)の release のビルドは通った(警告 0)。CPU の tree_refine_placement・placement_refine・reaction_package・multires 系 5 本、
+  GPU の gpu_tree_refine_placement(HW・WARP)・gpu_placement_refine・gpu_lab_box(HW・WARP)は合格。**ただし HW の gpu_multires(chains-real)が DEVICE_HUNG**(WARP は合格)。
+  main(同じ日の release)の gpu_multires は合格。置かれ方の段の呼び出しを `&& false` で外すと合格 → 置かれ方を使わない木でも、段が同じノードにあるだけで RTX の HW の Work Graph が止まる。
+  グループ共有を 12 → 6 KiB(欄の使い回し)にしても止まった = コードの重さ(512 スレッドのノードのレジスタ。T-0124・T-0397 と同じ種類と推定)。
+- 直し(1 回目・効かなかった): 置かれ方の段を別の入口 `RefinePlaceNode` に分け、CPU が世界ごとに入口を選ぶ(使わない世界は RefineNode)。
+  → **それでも HW の gpu_multires が止まった**(gpu_multires_stress・gpu_lab_box・gpu_tree_refine_placement の HW、WARP は合格)。
+  同じ Work Graph のプログラムに重いノードがあるだけで、ほかのノードも止まる(RTX はプログラム全体で 1 つの重さ〔レジスタ〕を取ると推定。未確認)。
+- **残る心配(司令塔へ)**: 置かれ方の世界(既定 on の世界の箱)は重いノードを通る。小さい場面(gpu_tree_refine_placement・gpu_lab_box)の HW は合格だが、
+  多くの要求の鎖が同時に走る大きい世界で止まらないかは未確認。止まるなら、細かくする段を Compute へ移す(D-546)か、置かれ方の段のレジスタを減らす(64bit の割り算の回しを 1 か所に)。
+- 既定 on の取り直し: 世界の箱を使う GPU の試験(gpu_lab_box HW・WARP)は期待値の書き換えなしで合格。window_lab は main でも同じ所(「隣の根の木が温まっていない(300004 mK)」)で落ちる(前からの不具合。この枝のせいではない)。
+- 前からの不具合(main でも落ちる。この枝のせいではない): radiation_reference(line 394 allZero。real_matter の物質が放射の吸い込みを書いている)・standard_packages(line 269 overrides)・window_lab。
+- 【wt5 T-1233 と reaction.hlsli が重なる】この枝は reaction.hlsli に RX_SPECIES_PACKING_SHIFT・RX_SPECIES_PACKING_MASK・RxSpeciesPackingPercent(物質の印の近く 8 行)を足しただけ。成分の読み方は触っていない。
+
+## 引き継ぎ(2026-10-29 wt2・作業役。2 時間で区切った)
+- 状態: ブランチ t-1188-refine-gpu。release のビルドは通る(警告 0)。CPU と GPU のビット一致は合格。**HW の gpu_multires(chains-real・置かれ方を使わない木)だけが DEVICE_HUNG**。マージしない。
+- 次の手(おすすめ順):
+  1. 置かれ方の段を**別の Work Graph のプログラム**にする: shaders/CMakeLists.txt で multires_graph.hlsl を `NAME multires_graph_place DEFINES MR_REFINE_PLACE=1` でもう 1 つ作り
+     (RefineNode が place = true。ほかのノードは同じ)、GpuMultires が置かれ方の世界だけそのプログラムで細かくする/粗くする(GPU の入力の見出しの入口の番号もそのプログラムの番号)。
+     置かれ方を使わない世界の木は main と同じプログラムだけを持つ = gpu_multires は main と同じになるはず。プログラムを選ぶのは RecordUpload(nest で決まる)なので、
+     2 つ目のプログラムは Create で作っておくか、要る時に作る(作り直しの時間に注意)。
+  2. それでも置かれ方の世界の大きい場面で止まるなら、細かくする段を Compute へ(D-546。Work Graph は測って速い所だけ)。研究: 打ち切りは「gpu_multires を置かれ方の世界で回して止まる」。
+- 確かめに使う組: `^(gpu_multires|gpu_multires_stress|gpu_multires_warp|gpu_lab_box|gpu_tree_refine_placement|gpu_tree_refine_placement_warp)$`(release で約 3 分 + 待ち)。
+  main の比べは runner/main-gpu-base.ps1(raw。GPU の順番を取って ..\..\out の main の release の gpu_multires_test と bicameral を流す)。
+- まだ: `git rebase main`(origin に push 済みの枝なので、載せ直すと force push が要る。次の作業役は main から新しい枝を作って cherry-pick するのが早い)。
