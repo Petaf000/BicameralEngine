@@ -241,13 +241,14 @@ FX_FN int64_t PlInnerFlow(PlParts parts, PlLayer layer) {
 // --- 反応: 凝縮相の項を持つ規則は層の温度で(接する面の反応。溶ける・沸く・露・炭が燃える)--------------------------
 // 見るセル = セルのすべての物質 + エネルギー Ec + V(気体の物質を層の温度にした時のエネルギー)。気体の量は濃さとして読む。
 // 反応の後、気体の項の出入りを気体の側へ: 生まれた気体は層の温度(後)で、消えた気体は気体の温度で持ち出す(PlGasEnergyAfter)。
-// 気体だけの規則(気体の燃焼)は気体だけのセル(E − Ec)で回す(規則の振り分けは T-1218。今は呼ぶ側が場面で分ける)
+// 気体だけの規則(気体の燃焼)は気体の部分(E − Ec)の温度で回す(規則の振り分け PlRulesOf と 2 回の反応 PlReactCell。T-1211)
+// 部分(gas = 1 なら気体の物質・0 なら凝縮相の物質)を temperatureMk にした時のエネルギー(µJ)
 template <typename Table, typename Cell>
-FX_FN int64_t PlGasEnergyAt(Table table, Cell cell, uint32_t temperatureMk) {
+FX_FN int64_t PlPartEnergyAt(Table table, Cell cell, uint32_t temperatureMk, uint32_t gas) {
     int64_t energy = 0;
     for (uint32_t i = 0; i < cell.speciesCount; ++i) {
         const RxSpecies entry = table.Species(RX_SPECIES_AT(cell, i));
-        if (!PlIsGas(entry))
+        if ((PlIsGas(entry) ? 1u : 0u) != gas)
             continue;
 
         const uint64_t amount = RX_AMOUNT_AT(cell, i);
@@ -257,6 +258,11 @@ FX_FN int64_t PlGasEnergyAt(Table table, Cell cell, uint32_t temperatureMk) {
     }
 
     return energy;  // µJ
+}
+
+template <typename Table, typename Cell>
+FX_FN int64_t PlGasEnergyAt(Table table, Cell cell, uint32_t temperatureMk) {
+    return PlPartEnergyAt(table, cell, temperatureMk, 1u);
 }
 
 // 見るセルのエネルギー(mJ)= Ec + floor(V ÷ 1000)
@@ -353,17 +359,22 @@ FX_FN PlReactViewOf<Cell> PlBeginReact(Table table, Cell cell, int64_t condensed
     return begin;
 }
 
-// Σ 凝縮相の量 × H0(µJ)
+// Σ 部分(gas = 1 なら気体・0 なら凝縮相)の量 × H0(µJ)
 template <typename Table, typename Cell>
-FX_FN int64_t PlCondensedChemical(Table table, Cell cell) {
+FX_FN int64_t PlPartChemical(Table table, Cell cell, uint32_t gas) {
     int64_t chemical = 0;
     for (uint32_t i = 0; i < cell.speciesCount; ++i) {
         const RxSpecies entry = table.Species(RX_SPECIES_AT(cell, i));
-        if (!PlIsGas(entry))
+        if ((PlIsGas(entry) ? 1u : 0u) == gas)
             chemical += RxMulS64Checked((int64_t)RX_AMOUNT_AT(cell, i), entry.h0);
     }
 
     return chemical;
+}
+
+template <typename Table, typename Cell>
+FX_FN int64_t PlCondensedChemical(Table table, Cell cell) {
+    return PlPartChemical(table, cell, 0u);
 }
 
 // value と lowest(mJ)の大きい方(差 < 2^63)。64bit の引き算と同じ値どうしの比べ・選ぶを並べない(CLAUDE.md §4)ので、
@@ -413,8 +424,140 @@ FX_FN int64_t PlRemixCondensedEnergy(Table table, Cell before, Cell after, int64
     return condensedEnergy;
 }
 
+// --- 規則の振り分けと 2 回の反応(ADR-0486 の 5。T-1211)-------------------------------------------------------------
+// 凝縮相の項(反応物か生成物に気体でない物質)を 1 つでも持つ規則 = 接する面の規則で、混ざったセルでは層の温度で回す。
+// ほかの規則(気体だけの規則。気体の燃焼など)は気体の部分の温度で回す。混ざらないセルはすべての規則を 1 回(今と同じ)。
+// 振り分けは表の Rate を包んで、回さない側の規則の速さを 0 にする(RxSplitRate が 0 = 進まない。反応の核 reaction.hlsli は触らない)。
+// 印は速さを読むたびに物質の相から出す(1 本目。ベイクの印にすれば読む数が減る = 後で。T-1211 の「後に回したもの」)
+FX_CONST uint32_t PL_RULES_ALL = 0;        // すべての規則(混ざらないセル)
+FX_CONST uint32_t PL_RULES_CONDENSED = 1;  // 凝縮相の項を持つ規則だけ
+FX_CONST uint32_t PL_RULES_GAS = 2;        // 気体だけの規則だけ
+
+template <typename Table>
+FX_FN bool PlRuleHasCondensed(Table table, uint32_t ruleId) {
+    const RxRule rule = table.Rule(ruleId);
+    bool condensed = false;
+    FX_UNROLL for (uint32_t i = 0; i < RX_MAX_REACTANTS; ++i) {
+        if (i < rule.reactantCount && !PlIsGas(table.Species(rule.reactants[i])))
+            condensed = true;
+    }
+
+    FX_UNROLL for (uint32_t j = 0; j < RX_MAX_PRODUCTS; ++j) {
+        if (j < rule.productCount && !PlIsGas(table.Species(rule.products[j])))
+            condensed = true;
+    }
+
+    return condensed;
+}
+
+// 表の約束(reaction.hlsli の Table)を包み、rules(PL_RULES_*)の側の規則だけを進める
+template <typename Table>
+struct PlRuleFilter {
+    Table inner;
+    uint32_t rules;
+
+    RxSpecies Species(uint32_t id) { return inner.Species(id); }
+
+    RxRule Rule(uint32_t id) { return inner.Rule(id); }
+    RxRule RateRule(uint32_t id) { return inner.RateRule(id); }
+
+    uint32_t RuleIndex(uint32_t position) { return inner.RuleIndex(position); }
+
+    uint64_t Rate(uint32_t rule, uint32_t kelvin) {
+        if (rules != PL_RULES_ALL && PlRuleHasCondensed(inner, rule) != (rules == PL_RULES_CONDENSED))
+            return 0;
+
+        return inner.Rate(rule, kelvin);
+    }
+};
+
+template <typename Table>
+FX_FN PlRuleFilter<Table> PlRulesOf(Table table, uint32_t rules) {
+    PlRuleFilter<Table> filter;
+    filter.inner = table;
+    filter.rules = rules;
+
+    return filter;
+}
+
+// 反応の段の結果(セルのエネルギーは和のまま。Ec は混ざり方を直す前 = 呼ぶ側が PlRemixCondensedEnergy)
+template <typename Cell>
+struct PlReactedOf {
+    Cell cell;
+    int64_t condensedEnergy;
+    uint64_t wakeTick;  // 次に進む刻み(2 回の小さい方)
+};
+
+// 気体の温度で回す見るセル: すべての物質 + 気体のエネルギー(E − Ec)+ 凝縮相の物質を気体の温度にしたエネルギー(PlBeginReact と対)
+template <typename Table, typename Cell>
+FX_FN Cell PlGasReactView(Table table, Cell cell, int64_t condensedEnergy) {
+    const PlParts parts = PlPartsOf(table, cell, condensedEnergy);
+    const int64_t condensedAtGas = PlPartEnergyAt(table, cell, HcCacheTemperature(parts.gas), 0u);
+    Cell view = cell;
+    view.energy = (cell.energy - condensedEnergy) + PlFloorDivS64(condensedAtGas, RX_MICROJOULES_PER_MILLIJOULE);
+
+    return view;
+}
+
+// 気体だけの規則の後の Ec: 変わるのは気体の物質だけで、出入りの熱は気体の部分に残る(Ec はそのまま)。
+// 気体の熱は負にしない(PlEndReact と対): 見るセルは凝縮相の熱容量の分まで吸熱の規則に熱を使わせるので、足りない分は層が出す
+// (気体のエネルギー = 気体の化学のエネルギーの切り上げ)。Ec = min(Ec, E − 下限) を PlAtLeastS64 の符号を返した形で
+template <typename Table, typename Cell>
+FX_FN int64_t PlEndGasReact(Table table, Cell reacted, int64_t cellEnergy, int64_t condensedEnergy) {
+    const int64_t gasLowest = -PlFloorDivS64(-PlPartChemical(table, reacted, 1u), RX_MICROJOULES_PER_MILLIJOULE);
+
+    return -PlAtLeastS64(-condensedEnergy, gasLowest - cellEnergy);
+}
+
+// 反応の段(1 刻み・1 セル): 混ざらないセルはすべての規則を 1 回。混ざったセルは
+//   1 回目 = 凝縮相の項を持つ規則を層の温度で(PlBeginReact → 反応の核 → PlEndReact)
+//   2 回目 = 気体だけの規則を気体の温度で(1 回目の後のセルと Ec から。PlGasReactView → 反応の核 → PlEndGasReact)。
+//   1 回目で混ざらなくなったら(露が乾き切った)、2 回目は 1 つのエネルギーのセルで回し、Ec は 0(PlRemixCondensedEnergy と同じ)。
+// 2 回とも同じ乱数の入力(規則ごとの待ちは規則の鍵で引くので、2 回の規則が重ならなければ同じ引きにならない)
+template <typename Table, typename Cell>
+FX_FN PlReactedOf<Cell> PlReactCell(Table table, Cell cell, int64_t condensedEnergy, uint64_t worldSeed, uint64_t tick,
+                                    uint64_t changedTick, uint64_t cellId) {
+    // --- 1 回目 ---
+    const PlReactViewOf<Cell> begin = PlBeginReact(table, cell, condensedEnergy);
+    // HLSL の ?: は型の決まらない値(テンプレートの欄)に使えないので if で
+    uint32_t firstRules = PL_RULES_ALL;
+    if (begin.mixed != 0)
+        firstRules = PL_RULES_CONDENSED;
+
+    const RxWaitStepOf<Cell> first = RxStepCellWait(PlRulesOf(table, firstRules), begin.view, worldSeed, tick,
+                                                    changedTick, cellId);
+
+    PlReactedOf<Cell> result;
+    result.cell = first.cell;
+    result.cell.energy = cell.energy;
+    result.condensedEnergy = PlEndReact(table, begin, first.cell, first.thermal, cell.energy);
+    result.wakeTick = first.wakeTick;
+    if (begin.mixed == 0)
+        return result;
+
+    // --- 2 回目 ---
+    const int64_t firstCondensedEnergy = result.condensedEnergy;
+    const bool stillMixed = PlLayerOf(table, result.cell).mixed != 0;
+    Cell gasView = result.cell;
+    if (stillMixed)
+        gasView = PlGasReactView(table, result.cell, result.condensedEnergy);
+
+    const RxWaitStepOf<Cell> second = RxStepCellWait(PlRulesOf(table, PL_RULES_GAS), gasView, worldSeed, tick,
+                                                     changedTick, cellId);
+    result.cell = second.cell;
+    result.cell.energy = cell.energy;
+    result.condensedEnergy = 0;
+    if (stillMixed)
+        result.condensedEnergy = PlEndGasReact(table, second.cell, cell.energy, firstCondensedEnergy);
+
+    if (second.wakeTick < result.wakeTick)
+        result.wakeTick = second.wakeTick;
+
+    return result;
+}
+
 // --- 1 セルだけの刻み(GPU と CPU のビット一致の試験。shaders/sim/phase_layer_cells.hlsl・tests/gpu_phase_layer_test.cpp)---
-// 層の上の面 → 反応(待ちの丸め。RxStepCellWait)→ 混ざり方、を 1 刻みずつ。面の流れは無い(セルの外と熱をやり取りしない)。
+// 層の上の面 → 反応(待ちの丸め。PlReactCell = 層の温度と気体の温度の 2 回)→ 混ざり方、を 1 刻みずつ。面の流れは無い(セルの外と熱をやり取りしない)。
 // セルか Ec が変わった刻みを changedTick にする(層の温度が変われば待ちを引き直す。世界ではブロックが変わったのと同じ)
 struct PlLoneCell {
     RxCell cell;
@@ -434,12 +577,10 @@ FX_FN PlLoneCell PlMakeLoneCell(RxCell cell, int64_t condensedEnergy, uint64_t c
 template <typename Table>
 FX_FN PlLoneCell PlStepLoneCell(Table table, PlLoneCell lone, uint64_t worldSeed, uint64_t tick, uint64_t cellId) {
     const int64_t condensedEnergy = lone.condensedEnergy - PlInnerFlowOf(table, lone.cell, lone.condensedEnergy);
-    const PlReactViewOf<RxCell> begin = PlBeginReact(table, lone.cell, condensedEnergy);
-    const RxWaitStep step = RxStepCellWait(table, begin.view, worldSeed, tick, lone.changedTick, cellId);
-    RxCell after = step.cell;
-    after.energy = lone.cell.energy;
-    const int64_t reacted = PlEndReact(table, begin, step.cell, step.thermal, lone.cell.energy);
-    const int64_t remixed = PlRemixCondensedEnergy(table, lone.cell, after, reacted);
+    const PlReactedOf<RxCell> reacted = PlReactCell(table, lone.cell, condensedEnergy, worldSeed, tick,
+                                                    lone.changedTick, cellId);
+    const RxCell after = reacted.cell;
+    const int64_t remixed = PlRemixCondensedEnergy(table, lone.cell, after, reacted.condensedEnergy);
 
     PlLoneCell next = lone;
     next.cell = after;

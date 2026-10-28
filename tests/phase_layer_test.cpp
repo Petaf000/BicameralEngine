@@ -124,20 +124,18 @@ namespace {
         return {.bottom = rx::PlBottomSide(parts, path), .top = rx::PlTopSide(parts, layer)};
     }
 
-    // 反応: 混ざったセルは層の温度で(凝縮相の項を持つ規則。この試験の表では気体だけの規則は進まない)
+    // 反応: 混ざったセルは凝縮相の項を持つ規則を層の温度で・気体だけの規則を気体の温度で(2 回)
     void React(const BakedReactionTable& table, ColumnCell& cell, uint64_t tick, uint64_t cellId) {
         if (!cell.mixed) {
             cell.cell = rx::RxStepCellWait(table.View(), cell.cell, WORLD_SEED, tick, tick - 1, cellId).cell;
             return;
         }
 
-        // セルの段の形(T-1211。世界の段と同じ関数): 見るセル → 反応の核 → 気体の項の出入りを気体の側へ
-        const auto begin = rx::PlBeginReact(table.View(), cell.cell, cell.condensedEnergy);
-        const auto step = rx::RxStepCellWait(table.View(), begin.view, WORLD_SEED, tick, tick - 1, cellId);
-        const int64_t energy = cell.cell.energy;
-        cell.condensedEnergy = rx::PlEndReact(table.View(), begin, step.cell, step.thermal, energy);
-        cell.cell = step.cell;
-        cell.cell.energy = energy;
+        // セルの段の形(T-1211。世界の段と同じ関数 PlReactCell)
+        const auto reacted = rx::PlReactCell(table.View(), cell.cell, cell.condensedEnergy, WORLD_SEED, tick, tick - 1,
+                                             cellId);
+        cell.cell = reacted.cell;
+        cell.condensedEnergy = reacted.condensedEnergy;
     }
 
     // 混ざり方が変わったセル: 混ざったら温度が揃う配り、混ざらなくなったら 1 つへ
