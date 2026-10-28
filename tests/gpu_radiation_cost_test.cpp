@@ -5,8 +5,9 @@
 // 光の当たる / 放つセルの数(放つ面・光線の本数)を変えた点を並べる(固定の費用と、数に比例する分を分ける)。
 // 確かめること(ctest の gpu_radiation_cost): 印を付けても世界の結果が同じ(刻みごとのハッシュが印なしと全部一致。D-428)・
 //   印を捨てていない・段の時間が取れた・放射の段の置き場が溢れない・シェーダーの assert が 0 件。
-//   負の側が空の刻みを GPU が飛ばしても(T-1229)、飛ばさない時と刻みごとのハッシュが全部同じ(ずっと空・時々要る・ずっと要るの 3 場面。
-//   飛ばした刻みの数も見込みどおり)。
+//   側が空の刻みを GPU が飛ばしても(負の側 T-1229・正の側 T-1235)、飛ばさない時と刻みごとのハッシュが全部同じ
+//   (側ごとにずっと空・時々要る・ずっと要るの場面。飛ばした刻みの数も見込みどおり)。段 1 からの間接の起動(T-1235)は
+//   どの場面でも入っていて、CPU リファレンスとの一致は gpu_play_metric・gpu_probe_sim が見る。
 // 引数: gpu_test_options.h(--warp・--no-gbv)と --ticks n(既定 48)・--measure(全部の場面を測ってログに。既定は火の場面だけ)
 #include <algorithm>
 #include <array>
@@ -36,20 +37,23 @@ namespace {
     constexpr uint32_t REFERENCE_300_K = 300000;  // mK
     constexpr uint32_t REFERENCE_ISA = 288150;    // mK(ISA の海面。T-1164 の測りの環境)
 
-    // 負の側を飛ばす刻みの見込み(T-1229)
-    enum class SkipExpect : uint8_t { All, Some, None };
+    // 側を飛ばす刻みの見込み(T-1229・T-1235。Any = 数は見ない〔ハッシュの一致だけ〕)
+    enum class SkipExpect : uint8_t { All, Some, None, Any };
 
     struct Scene {
         std::string_view name;
         ProbeCascadeOptions cascade;
         bool fire = false;
-        bool coldBlock = false;  // 刻み COLD_FROM_TICK に芯の冷たい木の球を置き、COLD_UNTIL_TICK に 300 K の球へ戻す
-        SkipExpect skip = SkipExpect::All;
+        // 刻み COLD_FROM_TICK に芯の温度が coreMk(0 = 置かない)の木の球を置き、COLD_UNTIL_TICK に 300 K の球へ戻す
+        uint32_t coreMk = 0;
+        SkipExpect skipPositive = SkipExpect::Any;
+        SkipExpect skipNegative = SkipExpect::All;
     };
 
     constexpr uint64_t COLD_FROM_TICK = 8;
     constexpr uint64_t COLD_UNTIL_TICK = 24;
     constexpr uint32_t COLD_BLOCK_MK = 250000;
+    constexpr uint32_t HOT_BLOCK_MK = 330000;  // 木が燃え始めない温度
 
     ProbeCascadeOptions FixedReference(uint32_t referenceMk) {
         ProbeCascadeOptions options{.environmentReference = false};
@@ -76,20 +80,31 @@ namespace {
         return scenes;
     }
 
-    // 飛ばす段の出入りを見る場面(T-1229): 負の側がずっと空(外 = 世界の温度)・火で時々要る・ずっと要る(外が世界より暖かい)
-    // (火・外 300 K は火の周りも参照より冷たくならないので、負の側はずっと空。芯の冷たい球を置いて戻す場面が「時々」。
+    // 飛ばす段の出入りを見る場面(T-1229・T-1235): 側ごとにずっと空(外 = 世界の温度)・時々要る・ずっと要る
+    // (火・外 300 K は火の周りも参照より冷たくならないので、負の側はずっと空。芯の冷たい / 熱い球を置いて戻す場面が「時々」。
     //  開けた所に冷たい塊を置くと、光が見える所を全部わずかに冷やすので、置き直しても負の側は空に戻らない)
     std::vector<Scene> SkipScenes() {
         return {
+            {.name = "何もしない・外 300 K(両側がずっと空)",
+             .cascade = FixedReference(REFERENCE_300_K),
+             .skipPositive = SkipExpect::All},
             {.name = "火・外 300 K(負の側がずっと空)", .cascade = FixedReference(REFERENCE_300_K), .fire = true},
             {.name = "芯の冷たい木の球を置いて戻す・外 300 K(負の側が時々)",
              .cascade = FixedReference(REFERENCE_300_K),
-             .coldBlock = true,
-             .skip = SkipExpect::Some},
+             .coreMk = COLD_BLOCK_MK,
+             .skipNegative = SkipExpect::Some},
+            {.name = "芯の熱い木の球を置いて戻す・外 300 K(正の側が時々)",
+             .cascade = FixedReference(REFERENCE_300_K),
+             .coreMk = HOT_BLOCK_MK,
+             .skipPositive = SkipExpect::Some,
+             .skipNegative = SkipExpect::Any},
             {.name = "火・外 301 K(負の側がずっと要る)",
              .cascade = FixedReference(REFERENCE_300_K + 1000),
              .fire = true,
-             .skip = SkipExpect::None},
+             .skipNegative = SkipExpect::None},
+            {.name = "何もしない・外 299 K(正の側がずっと要る)",
+             .cascade = FixedReference(REFERENCE_300_K - 1000),
+             .skipPositive = SkipExpect::None},
         };
     }
 
@@ -99,12 +114,12 @@ namespace {
         if (scene.fire)
             commands.push_back(MakePokeCommand(0, 0, 35, 32, 32));  // 木箱の壁に火
 
-        if (!scene.coldBlock)
+        if (scene.coreMk == 0)
             return commands;
 
-        // 木の壁と同じ中身の球(半径 4。300 K)の芯(半径 1)だけを冷たくして置き、後で球ごと 300 K で置き直す。
-        // 冷たい芯は木に囲まれて光が出ない(面の向こうが光を通さない)が、写しの段は向こうを見ないので負の側を流す。
-        // 置き直した後は全部が参照の温度なので、負の側は空に戻って飛ばす(流す → 飛ばすの出入りを両方通る)
+        // 木の壁と同じ中身の球(半径 4。300 K)の芯(半径 1)だけを冷たく(熱く)して置き、後で球ごと 300 K で置き直す。
+        // 芯は木に囲まれて光が出ない(面の向こうが光を通さない)が、写しの段は向こうを見ないのでその側を流す。
+        // 置き直した後は全部が参照の温度なので、その側は空に戻って飛ばす(流す → 飛ばすの出入りを両方通る)
         const std::array<SpeciesAmount, 3> wood = {
             SpeciesAmount{.species = table.SpeciesId("cellulose"), .amount = 38600000},
             SpeciesAmount{.species = table.SpeciesId("oxygen"), .amount = 983000},
@@ -112,7 +127,7 @@ namespace {
         const ProbePlaceShape shell{.x = 12, .y = 32, .z = 32, .radius = 4, .temperatureMilliKelvin = REFERENCE_300_K};
         ProbePlaceShape core = shell;
         core.radius = 1;
-        core.temperatureMilliKelvin = COLD_BLOCK_MK;
+        core.temperatureMilliKelvin = scene.coreMk;
         commands.push_back(MakePlaceCommand(COLD_FROM_TICK, 1, shell, wood));
         commands.push_back(MakePlaceCommand(COLD_FROM_TICK, 2, core, wood));
         commands.push_back(MakePlaceCommand(COLD_UNTIL_TICK, 3, shell, wood));
@@ -126,6 +141,7 @@ namespace {
             case SkipExpect::All: return skipped == ticks;
             case SkipExpect::None: return skipped == 0;
             case SkipExpect::Some: return skipped > COLD_FROM_TICK && skipped < ticks;
+            case SkipExpect::Any: return true;
         }
 
         return false;
@@ -140,7 +156,8 @@ namespace {
         uint64_t raySum = 0;
         uint64_t samples = 0;
         uint64_t dropped = 0;
-        uint64_t skipped = 0;  // 負の側が空で飛ばした刻みの数(T-1229)
+        uint64_t skippedPositive = 0;  // 側が空で飛ばした刻みの数(T-1229・T-1235)
+        uint64_t skippedNegative = 0;
         uint32_t overflow = 0;
         uint32_t asserts = 0;
         bool ok = false;
@@ -189,7 +206,8 @@ namespace {
 
             run.faceSum += readback.radiationFaces;
             run.raySum += readback.radiationRays;
-            run.skipped = readback.radiationSkippedTicks;
+            run.skippedPositive = readback.radiationSkippedPositive;
+            run.skippedNegative = readback.radiationSkippedNegative;
             ++run.samples;
             run.overflow |= readback.radiationOverflow;
             run.asserts += readback.debugAssertCount;
@@ -237,9 +255,9 @@ namespace {
 
         Log(Channel::Sim, Level::Info,
             "放射の費用 [{}]: 1 刻み {:.1f} µs(放射の段の印の和 {:.1f} µs)・放つ面 {}・光線 "
-            "{}(フレームの最後の刻みの平均)・負の側を飛ばした刻み {}/{}",
+            "{}(フレームの最後の刻みの平均)・飛ばした刻み 正 {}/{}・負 {}/{}",
             scene.name, perTick(run.unitTicks), perTick(radiation), run.faceSum / samples, run.raySum / samples,
-            run.skipped, ticks);
+            run.skippedPositive, ticks, run.skippedNegative, ticks);
         if (!stages.empty())
             Log(Channel::Sim, Level::Info, "  段ごとの µs/刻み:{}", stages);
     }
@@ -271,7 +289,7 @@ namespace {
         const std::optional<Run> plain = RunScene(device, *queue, table, scenes.front(), ticks, false);
         failures.Check(plain && plain->ok, "印なしで流せた");
 
-        // --- 負の側が空の刻みを飛ばしても結果が同じ(T-1229。飛ばさない時と刻みごとのハッシュが全部一致)---
+        // --- 側が空の刻みを飛ばしても結果が同じ(T-1229・T-1235。飛ばさない時と刻みごとのハッシュが全部一致)---
         for (const Scene& scene : SkipScenes()) {
             const std::optional<Run> skipping = RunScene(device, *queue, table, scene, ticks, false, true);
             const std::optional<Run> running = RunScene(device, *queue, table, scene, ticks, false, false);
@@ -279,11 +297,14 @@ namespace {
             if (!skipping || !running)
                 continue;
 
-            Log(Channel::Sim, Level::Info, "負の側を飛ばした刻み [{}]: {}/{}", scene.name, skipping->skipped, ticks);
+            Log(Channel::Sim, Level::Info, "飛ばした刻み [{}]: 正 {}/{}・負 {}/{}", scene.name,
+                skipping->skippedPositive, ticks, skipping->skippedNegative, ticks);
             failures.Check(skipping->hashes == running->hashes,
                            std::format("飛ばしても刻みごとの世界のハッシュが全部同じ: {}", scene.name));
-            failures.Check(running->skipped == 0, std::format("飛ばさない時は 0 刻み: {}", scene.name));
-            const bool expected = SkipsAsExpected(scene.skip, skipping->skipped, ticks);
+            failures.Check(running->skippedPositive == 0 && running->skippedNegative == 0,
+                           std::format("飛ばさない時は 0 刻み: {}", scene.name));
+            const bool expected = SkipsAsExpected(scene.skipPositive, skipping->skippedPositive, ticks) &&
+                                  SkipsAsExpected(scene.skipNegative, skipping->skippedNegative, ticks);
             failures.Check(expected, std::format("飛ばした刻みの数が見込みどおり: {}", scene.name));
             failures.Check(skipping->asserts == 0 && skipping->overflow == 0,
                            std::format("飛ばした時も assert・溢れが 0: {}", scene.name));

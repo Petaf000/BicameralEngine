@@ -7,7 +7,8 @@
 //   → RcCarryIn(前の刻みの持ち越し: 組の刻みの面は放つ面へ、そうでなければ次の刻みへ)→ RcLevel0Prepare(面ごとの升目の重みの和・余り)
 //   → RcLevel0Walk(段 0 の光線。残りを段 1 の袋の表へ)→ RcClearFaces(使った放つ面を 0 に)
 //   → 段ごとに RcLevelWalk(袋 × raysPerBag 本。残りを次の段の袋の表へ)・RcClearBags・RcResetBags(照り返しと組を待つ光は、歩く間に次の刻みの持ち越しの表へ足してある)
-// 仮の世界の負の側(sim/probe_sim。T-1229)は刻みの初めに RcPlanTick が「流す」の印を作り、空の刻みは GPU が起動の予告で全部の段を飛ばす。
+// 仮の世界の参照の温度の形(sim/probe_sim。T-1229・T-1235)は側ごとに刻みの初めに RcPlanTick が「流す」の印を作り、空の刻みは
+// GPU が起動の予告で全部の段を飛ばす。仮の世界の段 1 からは、前の段が書いた袋の数で要るだけ起動する(間接の起動。T-1235)。
 // 持ち越しは (セル・面・帯) の鍵で引く密な表を刻みの偶奇で 2 つ持つ(AddCarry が足し、次の刻みの RcCarryIn が全部の鍵を掃いて読み、0 に戻す)。
 // 鍵の数だけ置き場があるので溢れない(T-1164・ADR-0484。前の疎な表は溢れると取り合いの順で結果が変わった)。
 // 足し算と min はすべて 64bit の atomic で可換なので、光線の処理の順によらず CPU とビット一致する(R3・R4)。
@@ -459,9 +460,45 @@ uint32_t FaceCountOf(RcGpuParams params) {
     return count < params.faceCapacity ? count : params.faceCapacity;
 }
 
+// --- 段 1 からの間接の起動の引数(T-1235・ADR-0495)---
+
+// 置いたグループの数(CPU の Dispatch と同じ: 番号の数を 64 で割って切り上げ、1〜RC_GPU_MAX_GROUPS)。歩幅 g_external2 はこの数 × 64
+uint32_t PlacedGroups(uint32_t capacityItems) {
+    const uint32_t groups = (capacityItems + RC_GROUP_THREADS - 1) / RC_GROUP_THREADS;
+    if (groups < 1)
+        return 1;
+
+    return groups < RC_GPU_MAX_GROUPS ? groups : RC_GPU_MAX_GROUPS;
+}
+
+// 要るだけ(0 なら起動しない)。置いた数を超えないので、歩幅で回す番号はどれも 1 スレッドが 1 回だけ読む(起動の数で結果は変わらない)
+uint32_t NeededGroups(uint32_t items, uint32_t capacityItems) {
+    const uint32_t needed = (items + RC_GROUP_THREADS - 1) / RC_GROUP_THREADS;
+    const uint32_t placed = PlacedGroups(capacityItems);
+
+    return needed < placed ? needed : placed;
+}
+
+// 段 level(≥ 1)が読む袋の表 table の数から、その段の RcLevelWalk と RcClearBags の起動の引数を u3 の表へ
+void StoreLevelArgs(RcGpuParams params, uint32_t level, uint32_t table) {
+    const uint32_t bagCount = (uint32_t)LoadWord(HeaderOffset(RC_GPU_BAG_COUNT + table));
+    const uint32_t bags = bagCount < params.bagCapacity ? bagCount : params.bagCapacity;
+    const uint32_t at = (level - 1) * RC_GPU_LEVEL_ARGS_WORDS;
+    g_counters[at] = NeededGroups(bags * params.raysPerBag, params.bagCapacity * params.raysPerBag);
+    g_counters[at + 1] = 1;
+    g_counters[at + 2] = 1;
+    g_counters[at + 3] = NeededGroups(bags, params.bagCapacity);
+    g_counters[at + 4] = 1;
+    g_counters[at + 5] = 1;
+}
+
 // --- 段 0 の後: 列にした放つ面の量と印を 0 に戻す(次の刻みは冷たいセルの面を書かずに済む。T-1010)---
+// g_external3 に RC_GPU_LEVEL_ARGS の印があれば、段 1 の起動の引数も書く(袋の表 0 は RcLevel0Walk が書き終えている。T-1235)
 [numthreads(RC_GROUP_THREADS, 1, 1)] void RcClearFaces(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const RcGpuParams params = LoadParams();
+    if (dispatchThreadId.x == 0 && (g_external3 & RC_GPU_LEVEL_ARGS) != 0)
+        StoreLevelArgs(params, 1, 0);
+
     const uint32_t count = FaceCountOf(params);
     for (uint32_t item = dispatchThreadId.x; item < count; item += g_external2) {
         const uint32_t face = g_rcState.Load(params.stateFaces + (item * 4));
@@ -593,15 +630,19 @@ uint64_t Level0WeightOf(RcGpuParams params, RcStepConstants constants, uint32_t 
     }
 }
 
-// --- 袋の数を 0 に(RcClearBags の後。g_external3 = 表)---
+// --- 袋の数を 0 に(RcClearBags の後。g_external1 = 段・g_external3 の bit 0 = 表)---
+// g_external3 に RC_GPU_LEVEL_ARGS の印があれば、次の段の起動の引数も書く(次の段が読む表 1 − 表は、この段の RcLevelWalk が
+// 書き終えている。T-1235)
 [numthreads(RC_GROUP_THREADS, 1, 1)] void RcResetBags(uint3 dispatchThreadId : SV_DispatchThreadID) {
     if (dispatchThreadId.x != 0)
         return;
 
+    const uint32_t table = g_external3 & 1u;
     uint64_t before;
-    g_rcState.InterlockedMax64(HeaderOffset(RC_GPU_BAG_PEAK), LoadWord(HeaderOffset(RC_GPU_BAG_COUNT + g_external3)),
-                               before);
-    StoreWord(HeaderOffset(RC_GPU_BAG_COUNT + g_external3), 0);
+    g_rcState.InterlockedMax64(HeaderOffset(RC_GPU_BAG_PEAK), LoadWord(HeaderOffset(RC_GPU_BAG_COUNT + table)), before);
+    StoreWord(HeaderOffset(RC_GPU_BAG_COUNT + table), 0);
+    if ((g_external3 & RC_GPU_LEVEL_ARGS) != 0)
+        StoreLevelArgs(LoadParams(), g_external1 + 1, 1 - table);
 }
 
     // --- 作るときに 1 回: 状態を 0 に(語ごと)---

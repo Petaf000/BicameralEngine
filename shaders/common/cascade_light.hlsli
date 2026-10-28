@@ -1148,6 +1148,12 @@ FX_CONST uint32_t RC_GPU_HEADER_WORDS = 32;
 // 作業のバッファの頭(RcGpuParams の 256 バイト)の終わりの語(バイトの位置): 呼ぶ側の写しの段が「この刻みに放つセルがある」なら
 // 0 でない値を書き、RcPlanTick が読んで 0 に戻す(T-1229。sim/probe_sim の負の側の段)
 FX_CONST uint32_t RC_GPU_WORK_EMITTERS = 248;
+// 段 1 からの間接の起動(T-1235・ADR-0495。仮の世界の自分のルート署名の時だけ): RcClearFaces・RcResetBags が次の段の袋の数から
+// RcLevelWalk と RcClearBags のグループの数を u3 の引数の表(段ごとに D3D12_DISPATCH_ARGUMENTS 2 つ = 6 語)へ書く。
+// 書くのは g_external3 に RC_GPU_LEVEL_ARGS の印がある起動だけ(木のルート署名の u3 は木の数のバッファなので書かない)
+FX_CONST uint32_t RC_GPU_LEVEL_ARGS = 4;
+FX_CONST uint32_t RC_GPU_LEVEL_ARGS_WORDS = 6;
+FX_CONST uint32_t RC_GPU_MAX_GROUPS = 2048;  // 1 回の起動のグループの上限(sim/gpu_cascade_light.cpp の Dispatch と同じ)
 FX_CONST uint32_t RC_GPU_LEDGER_KINDS = 5;
 FX_CONST uint32_t RC_GPU_BAG_WORDS = 10;                                   // 鍵・量 2・軸の割合 6・溜め
 FX_CONST uint32_t RC_GPU_FACE_INFO_WORDS = 4;                              // 重みの和・余りの升目・余り 2

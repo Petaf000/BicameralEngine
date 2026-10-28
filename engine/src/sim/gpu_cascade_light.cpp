@@ -1,5 +1,7 @@
 // gpu_cascade_light.cpp — 距離ごとの段の GPU 側(gpu_cascade_light.h)。CPU リファレンスは sim/cascade_light.cpp の StepCascadeLight。
 // 置き場の並びは shaders/common/cascade_light.hlsli の RcGpuParams。1 刻み = 6 + 3 × (段 − 1) 回の起動(間に UAV のバリア)。
+// 自分のルート署名(仮の世界)では、段 1 からの歩く・袋を空にするを、前の段が GPU の上で書いた袋の数で要るだけ起動する
+// (間接の起動。T-1235・ADR-0495。袋が無い段はグループ 0 で、置いた数を超えないので結果は直の起動と同じ)。
 // 世界の全部を掃くのは RcSources の読みと、RcCarryIn の持ち越しの表(鍵で引く密な表。溢れない。T-1164・ADR-0484)の読み。
 #include "sim/gpu_cascade_light.h"
 
@@ -18,7 +20,7 @@ namespace bicameral::sim {
 
         constexpr uint32_t RC_GROUP_THREADS = 64;  // shaders/sim/cascade_light.hlsl の RC_GROUP_THREADS
         // 1 回の起動のグループの上限(どのカーネルも歩幅で回すので、GPU を埋めるだけあればよい。3070 Ti は 48 SM × 1536 スレッド)
-        constexpr uint64_t MAX_GROUPS = 2048;
+        constexpr uint64_t MAX_GROUPS = rx::RC_GPU_MAX_GROUPS;
         constexpr uint64_t WORK_PARAMS_BYTES = 256;
         constexpr uint64_t LIGHT_BYTES = 24;
         constexpr uint64_t WORD_BYTES = 8;
@@ -34,6 +36,9 @@ namespace bicameral::sim {
         static_assert(sizeof(rx::RcGpuParams) <= rx::RC_GPU_WORK_EMITTERS &&
                       rx::RC_GPU_WORK_EMITTERS + 4 <= WORK_PARAMS_BYTES);
         static_assert(sizeof(rx::RcCellLight) == LIGHT_BYTES);
+        // 段 1 つの引数 = 歩く・袋を空にするの 2 回分(cascade_light.hlsl の StoreLevelArgs)
+        constexpr uint64_t LEVEL_ARGS_BYTES = uint64_t{rx::RC_GPU_LEVEL_ARGS_WORDS} * 4;
+        static_assert(LEVEL_ARGS_BYTES == 2 * sizeof(D3D12_DISPATCH_ARGUMENTS));
 
         // パイプラインの番号(shaders/CMakeLists.txt の cascade_light_*)
         enum Pipeline : uint8_t {
@@ -158,10 +163,27 @@ namespace bicameral::sim {
             return std::unexpected("距離ごとの段のルート署名を作れない");
 
         auto result = CreateWith(device, root.Get(), grid, params, capacity);
-        if (result)
-            result->m_ownRoot = std::move(root);
+        if (!result)
+            return result;
+
+        result->m_ownRoot = std::move(root);
+        if (!result->CreateLevelArgs(device))
+            return std::unexpected("距離ごとの段の間接の起動の置き場を作れない");
 
         return result;
+    }
+
+    // 段 1 からの起動の引数の表(段ごとに 2 回分)と、起動 1 回だけのコマンドの形(T-1235)
+    bool GpuCascadeLight::CreateLevelArgs(ID3D12Device5* device) {
+        const uint64_t levels = std::max<uint64_t>(m_params.levels, 2) - 1;
+        m_levelArgs = gpu::CreateBuffer(device, levels * LEVEL_ARGS_BYTES, gpu::BufferKind::UnorderedAccess);
+        const D3D12_INDIRECT_ARGUMENT_DESC argument{.Type = D3D12_INDIRECT_ARGUMENT_TYPE_DISPATCH};
+        const D3D12_COMMAND_SIGNATURE_DESC signature{
+            .ByteStride = sizeof(D3D12_DISPATCH_ARGUMENTS), .NumArgumentDescs = 1, .pArgumentDescs = &argument};
+        // ルートの引数を変えないので、ルート署名は渡さない
+        const HRESULT created = device->CreateCommandSignature(&signature, nullptr, IID_PPV_ARGS(&m_dispatchSignature));
+
+        return m_levelArgs && SUCCEEDED(created);
     }
 
     std::expected<GpuCascadeLight, std::string> GpuCascadeLight::CreateWith(ID3D12Device5* device,
@@ -252,23 +274,44 @@ namespace bicameral::sim {
             return;
         }
 
-        // --- 自分のルート署名(u0〜u3 は読まないので作業のバッファを仮に結ぶ)---
+        list->Dispatch(static_cast<uint32_t>(BindOwn(list, debugRing, pipeline, items, external)), 1, 1);
+        const D3D12_RESOURCE_BARRIER barrier = gpu::UavBarrier(nullptr);
+        list->ResourceBarrier(1, &barrier);
+    }
+
+    // 自分のルート署名: u0〜u2 は読まないので作業のバッファを仮に結ぶ。u3 も同じだが、g_external3 に RC_GPU_LEVEL_ARGS の印がある
+    // 起動(段 1 からの引数を書く RcClearFaces・RcResetBags)だけ引数の表を結ぶ(T-1235)
+    uint64_t GpuCascadeLight::BindOwn(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                      size_t pipeline, uint64_t items, std::array<uint32_t, 4> external) const {
+        const uint64_t groups = std::clamp<uint64_t>((items + RC_GROUP_THREADS - 1) / RC_GROUP_THREADS, 1, MAX_GROUPS);
+        external[2] = static_cast<uint32_t>(groups * RC_GROUP_THREADS);
         std::array<uint32_t, OWN_ROOT_CONSTANTS> constants{};
         std::copy(external.begin(), external.end(), constants.begin() + OWN_EXTERNAL_FIRST);
+
         const D3D12_GPU_VIRTUAL_ADDRESS work = m_work->GetGPUVirtualAddress();
+        const bool writesArgs = (external[3] & rx::RC_GPU_LEVEL_ARGS) != 0;
         list->SetComputeRootSignature(m_ownRoot.Get());
         list->SetPipelineState(m_pipelines[pipeline].Get());
-        for (uint32_t view = 0; view < 4; ++view)
+        for (uint32_t view = 0; view < 3; ++view)
             list->SetComputeRootUnorderedAccessView(view, work);
 
+        list->SetComputeRootUnorderedAccessView(3, writesArgs ? m_levelArgs->GetGPUVirtualAddress() : work);
         list->SetComputeRootUnorderedAccessView(4, work);
         list->SetComputeRootUnorderedAccessView(5, m_state->GetGPUVirtualAddress());
         list->SetComputeRoot32BitConstants(OWN_ROOT_LAYOUT.RootConstantIndex(), OWN_ROOT_CONSTANTS, constants.data(),
                                            0);
         list->SetComputeRootUnorderedAccessView(OWN_ROOT_LAYOUT.DebugRingIndex(), debugRing);
-        list->Dispatch(static_cast<uint32_t>(groups), 1, 1);
-        const D3D12_RESOURCE_BARRIER barrier = gpu::UavBarrier(nullptr);
-        list->ResourceBarrier(1, &barrier);
+
+        return groups;
+    }
+
+    // 歩幅は置いた数(BindOwn)で渡し、起動するのは引数の表の要る数だけ(置いた数を超えないので、番号はどれも 1 回だけ読まれる)。
+    // バリアは呼ぶ側が置く(引数の表の状態の遷移と 1 回にまとめる)
+    void GpuCascadeLight::DispatchIndirect(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                           size_t pipeline, uint64_t items, std::array<uint32_t, 4> external,
+                                           uint64_t argsOffset) const {
+        BindOwn(list, debugRing, pipeline, items, external);
+        list->ExecuteIndirect(m_dispatchSignature.Get(), 1, m_levelArgs.Get(), argsOffset, nullptr, 0);
     }
 
     bool GpuCascadeLight::RecordUpload(ID3D12GraphicsCommandList10* list, GpuMultires& nest,
@@ -350,6 +393,14 @@ namespace bicameral::sim {
         if (nest != nullptr)
             nest->SetExternalViews(m_work->GetGPUVirtualAddress(), m_state->GetGPUVirtualAddress());
 
+        // 段 1 からを間接の起動にするか(自分のルート署名だけ。引数の表は段 0 の RcClearFaces から書くので、ここで UAV に)
+        const bool indirect = nest == nullptr && m_levelArgs && m_params.levels > 1;
+        if (indirect) {
+            const D3D12_RESOURCE_BARRIER toWrite = gpu::Transition(m_levelArgs.Get(), D3D12_RESOURCE_STATE_COMMON,
+                                                                   D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            list->ResourceBarrier(1, &toWrite);
+        }
+
         // 起動の後ろ(Dispatch がバリアを置いた後)に段の印(測りの時だけ。結果には入らない)
         const auto run = [&](Pipeline pipeline, uint64_t items, std::array<uint32_t, 4> external) {
             Dispatch(list, nest, debugRing, pipeline, items, external);
@@ -364,10 +415,13 @@ namespace bicameral::sim {
         run(CarryIn, m_params.carryKeys, {tickLow, in, 0, 0});
         run(Level0Prepare, m_params.faceCapacity, {tickLow, in, 0, 0});
         run(Level0Walk, uint64_t{m_params.faceCapacity} * m_params.texelsPerFace, {tickLow, in, 0, out << 1});
-        run(ClearFaces, m_params.faceCapacity, {tickLow, in, 0, 0});
+        run(ClearFaces, m_params.faceCapacity, {tickLow, in, 0, indirect ? rx::RC_GPU_LEVEL_ARGS : 0u});
 
         // --- 段 1 から: 袋の表を交互に ---
-        for (uint32_t level = 1; level < m_params.levels; ++level) {
+        if (indirect)
+            RecordLevelsIndirect(list, debugRing, tickLow, out, stamps, firstStage);
+
+        for (uint32_t level = 1; level < m_params.levels && !indirect; ++level) {
             const uint32_t table = (level - 1) & 1u;
             run(LevelWalk, uint64_t{m_params.bagCapacity} * m_params.raysPerBag,
                 {tickLow, level, 0, table | (out << 1)});
@@ -380,6 +434,53 @@ namespace bicameral::sim {
             nest->SetExternalViews(0, 0);
 
         m_parity = 1 - in;
+    }
+
+    // 段 1 から(自分のルート署名・T-1235・ADR-0495): 歩く・袋を空にするを、引数の表の要る数だけ起動する。段 level の引数は
+    // 前の段の RcResetBags(段 1 は RcClearFaces)が書く。引数の表は書く間 UAV・読む間 INDIRECT_ARGUMENT で、終わりに COMMON へ戻す
+    void GpuCascadeLight::RecordLevelsIndirect(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                               uint32_t tickLow, uint32_t out, gpu::StageStamps* stamps,
+                                               uint8_t firstStage) const {
+        const auto mark = [&](Pipeline pipeline) {
+            if (stamps != nullptr)
+                stamps->Mark(list, static_cast<uint8_t>(firstStage + pipeline));
+        };
+        const D3D12_RESOURCE_BARRIER allUavs = gpu::UavBarrier(nullptr);
+        const D3D12_RESOURCE_BARRIER toRead = gpu::Transition(m_levelArgs.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
+                                                              D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT);
+        const D3D12_RESOURCE_BARRIER toWrite = gpu::Transition(
+            m_levelArgs.Get(), D3D12_RESOURCE_STATE_INDIRECT_ARGUMENT, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+        const uint64_t walkItems = uint64_t{m_params.bagCapacity} * m_params.raysPerBag;
+
+        // 段 1 の引数は RcClearFaces が書いた(その後の UAV のバリアは Dispatch が置いた)
+        list->ResourceBarrier(1, &toRead);
+        for (uint32_t level = 1; level < m_params.levels; ++level) {
+            const uint32_t table = (level - 1) & 1u;
+            const uint64_t argsOffset = (level - 1) * LEVEL_ARGS_BYTES;
+            DispatchIndirect(list, debugRing, LevelWalk, walkItems, {tickLow, level, 0, table | (out << 1)},
+                             argsOffset);
+            list->ResourceBarrier(1, &allUavs);
+            mark(LevelWalk);
+
+            DispatchIndirect(list, debugRing, ClearBags, m_params.bagCapacity, {tickLow, level, 0, table},
+                             argsOffset + sizeof(D3D12_DISPATCH_ARGUMENTS));
+            const std::array<D3D12_RESOURCE_BARRIER, 2> afterClear = {allUavs, toWrite};
+            list->ResourceBarrier(static_cast<uint32_t>(afterClear.size()), afterClear.data());
+            mark(ClearBags);
+
+            // 袋の数を 0 に・次の段の引数を書く(最後の段は書かない)
+            const bool next = level + 1 < m_params.levels;
+            Dispatch(list, nullptr, debugRing, ResetBags, 1,
+                     {tickLow, level, 0, table | (next ? rx::RC_GPU_LEVEL_ARGS : 0u)});
+            if (next)
+                list->ResourceBarrier(1, &toRead);
+
+            mark(ResetBags);
+        }
+
+        const D3D12_RESOURCE_BARRIER toCommon = gpu::Transition(
+            m_levelArgs.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COMMON);
+        list->ResourceBarrier(1, &toCommon);
     }
 
     // --- 起動の予告(T-1229)---

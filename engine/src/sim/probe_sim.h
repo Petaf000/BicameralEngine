@@ -174,7 +174,9 @@ namespace bicameral::sim {
         uint32_t radiationFaces = 0;     // 最後の刻みの放つ面の数(側の大きい方)
         uint32_t radiationBagPeak = 0;   // 段 1 つの袋の数の最大(作ってから。側の大きい方)
         uint64_t radiationRays = 0;      // 最後の刻みの光線の本数(側と段の和。測り用・T-1161)
-        uint64_t radiationSkippedTicks = 0;  // 負の側が空で飛ばした刻みの数(作ってから。T-1229)
+        // 側が空で飛ばした刻みの数(作ってから。参照の温度の形だけ。正の側 T-1235・負の側 T-1229)
+        uint64_t radiationSkippedPositive = 0;
+        uint64_t radiationSkippedNegative = 0;
 
         // 伝導のグラフのノードごとのカウンタ(このフレームの全部の刻みの合計。T-0008)
         gpu::GraphStatsSnapshot graphStats;
@@ -325,7 +327,8 @@ namespace bicameral::sim {
         ProbeCascadeOptions cascadeRadiation;
         // 放射の段の段ごとの GPU 時間を測る(T-1161。RadiationStageStamps で読む)。結果は変わらない(印とハッシュの段の間のバリアだけ)
         bool radiationStageTiming = false;
-        // 負の側が空の刻みに負の側の段とハッシュを GPU が起動の予告で飛ばす(T-1229)。結果は変わらない(切るのは比べる試験だけ)
+        // 参照の温度の形で、側が空の刻みにその側の段とハッシュを GPU が起動の予告で飛ばす(負の側 T-1229・正の側 T-1235)。
+        // 結果は変わらない(切るのは比べる試験だけ)
         bool radiationSkipIdle = true;
     };
 
@@ -555,7 +558,9 @@ namespace bicameral::sim {
         void RecordRadiation(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick);
         void RecordRadiationHash(ID3D12GraphicsCommandList10* list, ID3D12Resource* input, uint64_t tick);
         void MarkRadiation(ID3D12GraphicsCommandList10* list, ProbeRadiationStage stage);
-        void RecordRadiationNegative(ID3D12GraphicsCommandList10* list, uint64_t tick, gpu::StageStamps* stamps);
+        void RecordRadiationSide(ID3D12GraphicsCommandList10* list, GpuCascadeLight& side, uint64_t tick,
+                                 gpu::StageStamps* stamps, ProbeRadiationStage first);
+        [[nodiscard]] bool RadiationSkips() const;
         [[nodiscard]] std::expected<void, std::string> CheckLiquidTableSwap(const BakedReactionTable& table) const;
         // 表の差し替えで区画の作業場を作り直す(T-0670。sim/probe_sim_gas.cpp・probe_sim_liquid.cpp)。差し替えは持ち越す欄を写し、
         // 表の違う保存点へ戻す時は作り直すだけ(中身は保存点が写す)。どれも m_tableCopy が今の表のうちに呼ぶ

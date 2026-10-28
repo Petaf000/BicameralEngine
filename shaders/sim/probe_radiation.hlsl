@@ -5,7 +5,7 @@
 // engine/src/sim/probe_sim_radiation.cpp の RecordRadiation が次の順に投げる(段の間は全部の UAV の書き込みを待つ):
 //   RadiationGrid   刻みの初めのセル(成分)+ 熱のキャッシュ(温度)→ 距離ごとの段の作業のバッファの光の値と温度(CPU の CascadeGrid と同じ並び)。
 //                   参照の温度の形(世界の外 = 環境の温度の物。D-671)では負の側の作業へも同じ値を書く
-//                   (負の側に放つセルがあれば負の側の作業の印 RC_GPU_WORK_EMITTERS も。T-1229: 負の側が空の刻みは負の側の段とハッシュを
+//                   (側ごとに放つセルがあればその側の作業の印 RC_GPU_WORK_EMITTERS も。T-1229・T-1235: 側が空の刻みはその側の段とハッシュを
 //                   GPU が起動の予告で飛ばす。GpuCascadeLight::RecordPlan)
 //   (距離ごとの段の 1 刻み: shaders/sim/cascade_light.hlsl。sim/gpu_cascade_light の自分のルート署名で。参照の温度の形では側ごとに 1 回)
 //   RadiationApply  セルごとの 正(吸った − 放った)− 負(吸った − 放った)(2^−16 mJ)を最も近い mJ に丸めてエネルギーへ足し、
@@ -41,6 +41,30 @@ RcGpuParams LoadRcParams() {
     return rcWork.Load<RcGpuParams>(0);
 }
 
+// 参照の温度の形でセルが側ごとに放つか(T-1229・T-1235): 各側の RcSources と同じ値(RcCellEmissionRelative。温度 0 のセルは
+// 放たない)が 0 でないか。正の側 = 自分の黒体 > 参照の黒体、負の側 = 参照 > 自分(帯ごと)。黒体の量は両側で 1 回ずつ求め、
+// 64bit は引かずに比べるだけ(T-1078)。面の向こうの飽和は見ない(多めに流すだけで、結果は変わらない)
+struct RadiationEmitSides {
+    bool positive;
+    bool negative;
+};
+
+RadiationEmitSides EmitSidesOf(uint32_t temperatureMk, uint32_t referenceWord, RcCellLight light) {
+    const uint32_t referenceMk = referenceWord & ~RC_REFERENCE_NEGATIVE;
+    RadiationEmitSides sides;
+    sides.positive = false;
+    sides.negative = false;
+    if (temperatureMk == 0 || temperatureMk == referenceMk)
+        return sides;
+
+    const RcBands own = RcCellEmission(temperatureMk, light);
+    const RcBands reference = RcCellEmission(referenceMk, light);
+    sides.positive = own.shortBand > reference.shortBand || own.longBand > reference.longBand;
+    sides.negative = reference.shortBand > own.shortBand || reference.longBand > own.longBand;
+
+    return sides;
+}
+
 // --- 刻みの初めの写し(1 スレッド = 1 セル)---
 [numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void RadiationGrid(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const uint32_t cell = dispatchThreadId.x;
@@ -71,12 +95,12 @@ RcGpuParams LoadRcParams() {
     rcSecond.Store<RcCellLight>(params.workLights + (cell * RC_CELL_LIGHT_BYTES), light);
     rcSecond.Store(params.workTemperatures + (cell * 4), temperatureMk);
 
-    // 負の側に放つセルがあるか(T-1229): 負の側の RcSources と同じ式(温度 0 のセルは放たない)。あれば負の側の作業の印へ(波に 1 回)。
-    // 面の向こうの飽和は見ない(多めに流すだけで、結果は変わらない)。印は負の側の RcPlanTick が読んで 0 に戻す
-    const RcBands negativeBands = RcCellEmissionRelative(temperatureMk, params.referenceWord | RC_REFERENCE_NEGATIVE,
-                                                         light);
-    const bool emits = temperatureMk != 0 && (negativeBands.shortBand | negativeBands.longBand) != 0;
-    if (WaveActiveAnyTrue(emits) && WaveIsFirstLane())
+    // 側ごとに放つセルがあれば、その側の作業の印へ(波に 1 回。T-1229・T-1235)。印はその側の RcPlanTick が読んで 0 に戻す
+    const RadiationEmitSides sides = EmitSidesOf(temperatureMk, params.referenceWord, light);
+    if (WaveActiveAnyTrue(sides.positive) && WaveIsFirstLane())
+        rcWork.Store(RC_GPU_WORK_EMITTERS, 1u);
+
+    if (WaveActiveAnyTrue(sides.negative) && WaveIsFirstLane())
         rcSecond.Store(RC_GPU_WORK_EMITTERS, 1u);
 }
 
