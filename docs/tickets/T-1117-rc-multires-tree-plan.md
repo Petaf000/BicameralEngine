@@ -1,10 +1,36 @@
 # T-1117 世界の中の光(RC): 多重解像度の木を読む形(T-0973)の段取りと費用の見込み
 
-- Status: Todo(段取りと見込みだけ。2026-10-24 wt6 が書いた。作るのは T-0973)
-- 種類: 工学(段取り)
+- Status: Doing(2026-10-29 wt6: 段取り 1・3 の GPU = 木を読む写しを GPU で。下の「見直し」。段取り 2・4 は次・5 は土台待ち)
+- 種類: 工学(段取り → 2026-10-29 から作る方も)
 - PC: 必須
 - マイルストーン: 列 4(R-R1)
 - 設計: docs/design/23-radiation.md §3.3(段の場所 = 世界の木の段の見込み)・§4 / 決定: ADR-0413・ADR-0432・ADR-0444・ADR-0461 / 測り: T-1101
+
+## 見直し(2026-10-29 wt6。今の main〔T-1155 の 1 本目・T-1161 の 1 段目・T-1229〕と t-1235 に合わせた)
+- 前提 T-1010 は満たされている: 放つ面の組(ADR-0444)は既定 15 組・熱も待つ(D-658・T-1146)で main にある。T-1010 の 2 本目の揺れの測りは残り(このチケットの前提ではない)。
+- 「作るのは T-0973」は古い: T-0973 は T-1113 にまとめられ、多重解像度の世界への組み込みは T-1155 が持つ。T-1155 の 1 本目で
+  **段取り 1・3 の CPU**(MakeCascadeTreeGrid・FoldCascadeToLeaves・cascade_tree_grid)は main に入った。
+- 当たる所(土台。司令塔が設計として預かる。回り道は作らない):
+  - **葉ごとの結果を木へ当てる**(FoldCascadeToLeaves の GPU・多重解像度の刻みへの組み込み = T-1155 の残り 1)は ADR-0469 の芯 4-1(T-1228: 当てる段の源の項)。
+  - **段取り 5(受けを葉の頁ごとの疎な置き場へ)** は T-1227(持ち越しを登録の欄に・偶奇の 2 枚の欄・GPU の頁への atomic の足し込み)と同じ置き場の形。T-1227 の形が決まってから。
+- だから目的を次に直す: **RC が多重解像度の木を GPU の上で直に読む**(段取り 1・3 の GPU)→ 段取り 4(127 の限りを外す)→ 段取り 2(粗い葉を葉の大きさで歩く。結果が変わるので CPU リファレンスを先に)。
+  5 と木へ当てるのは T-1227・T-1228 の後(T-1155 の残りと一緒)。
+
+## 目的(2026-10-29 から)
+RC の写し(段 0 の CascadeGrid)を CPU で作って写すのではなく、GPU が刻みごとに世界の木の葉(粗い葉を含む)から作る。CPU の MakeCascadeTreeGrid とビット単位で同じ。
+
+## 完了条件(1 本目 = 2026-10-29)
+- [x] GpuCascadeLight::CreateFromTree(箱は世界の箱 = MakeCascadeTreeBox・物質の光の値を作業へ)・RecordTreeGrid(RcTreeGrid。1 スレッド = 葉のセル 1 つ・2^−L 角へ広げる)
+- [x] gpu_cascade_tree_grid(HW・WARP): 0.5 m / 1 m / 2 m の根・粗い葉と 0.5 m の葉が混ざった木で、16 刻み GPU が木から写しを作って流した結果が
+      CPU の MakeCascadeTreeGrid の写しの StepCascadeLight と全部の刻みでビット一致。0.5 m より細かい葉は GPU が溢れの印 4(CPU は誤り)
+- [x] 費用を docs/perf.md へ(木を読む写しの段の µs/刻み)
+- [ ] 段取り 4(出どころ・袋の鍵の相対化。127 の限りを外す)・段取り 2(粗い葉を葉の大きさで歩く)= 2 本目から
+
+## 重なり(並走)
+- wt2(T-1188)が multires_tree・gpu_multires・multires_graph.hlsl を直している。このチケットはそれらを**変えない**。
+  読むのは multires_bindings.hlsli の g_blocks・LoadCell・MakeTable と multires.hlsli の MrIsCoveredCell・MrCellX/Y/Z だけ
+  (RcTreeGrid は cascade_light.hlsl の中。木のルート署名は GpuMultires::RootSignature・SetExternalViews・RecordExternalDispatch を借りるだけ)。
+- 土台の共通部分(登録の欄・当てる段・頁への atomic)には触っていない。
 
 ## 今の形の限り
 - MakeCascadeGrid はレベル 0(0.5 m)の根だけの密な箱を写す。世界の箱は 1 辺 127 セルまで(溜めの出どころ 15bit × 3。ADR-0432)。袋の表の鍵はブロック 14bit × 3。
@@ -40,3 +66,5 @@
 - 1〜2 は 1 チャット、3〜5 は 1〜2 チャット、6・7 は T-1102 の続き(既定に入れる時)。合わせて 3〜4 チャットの見込み(全体の期間は見積もらない: D-411)。
 
 ## 作業ログ
+- 2026-10-29(wt6): 見直し(上)。1 本目 = 木を読む写しの GPU(RcTreeGrid・CreateFromTree・RecordTreeGrid・MakeCascadeTreeBox)と
+  gpu_cascade_tree_grid(4 つの木 × 16 刻みのビット一致・細かい葉の印)。ブランチ t-1117-rc-multires-tree(t-1235-radiation-skip-positive の上)。
