@@ -519,6 +519,8 @@ namespace bicameral::sim {
         if (std::ranges::contains(m_entries, UINT32_MAX))
             return std::unexpected("multires_graph.cso に入口のノードが足りない");
 
+        m_refinePlaceEntry = m_graph->EntrypointIndex(L"RefinePlaceNode");  // 溢れを使う変種には無い(UINT32_MAX)
+
         m_constants.graphEntries = m_entries[EntryRefine] | (m_entries[EntryCoarsenRequest] << 16);
         if (options.conductionGraph) {
             if (auto created = CreateConductionGraph(device, options.pipelineCache); !created)
@@ -976,8 +978,10 @@ namespace bicameral::sim {
         }
 
         // --- 細かくする段の置かれ方(T-1188): CPU の木が物質の表を持つ世界(EnableRefineCellPlacement)だけ。溢れを使う世界は SAME ---
-        const bool place = !nest.refineCells.species.empty() && !nest.wideCells;
-        m_constants.graphEntries = (m_constants.graphEntries & ~GRAPH_ENTRY_PLACE) | (place ? GRAPH_ENTRY_PLACE : 0u);
+        //     置かれ方の段は別の入口(RefinePlaceNode)にある。使わない世界は軽い RefineNode を通す(1 つのノードに入れると HW で止まった)
+        const bool place = !nest.refineCells.species.empty() && !nest.wideCells && m_refinePlaceEntry != UINT32_MAX;
+        const uint32_t refineEntry = place ? m_refinePlaceEntry : m_entries[EntryRefine];
+        m_constants.graphEntries = refineEntry | (m_entries[EntryCoarsenRequest] << 16);
 
         // --- 世界の端(表の語。前のリストは GPU で終わっている約束なので、前に外した表の語はもう読まれない)---
         m_retiredTables.clear();
