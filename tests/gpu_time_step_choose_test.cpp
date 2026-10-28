@@ -2,10 +2,12 @@
 // CPU リファレンス(WindowCaps・ChooseExponents)とビット一致で確かめ、1 出来事の GPU の時間を測る(T-1112)。
 // 入力は time_step_tree_test の choose-dump が火事の出来事から書いたファイル(tests/time_step_choose_file.h): 木の形の表と、
 //   出来事ごとの選ぶ前の詰めた歩の記録(2 B/単位)・CPU の窓の上限・選んだ e・出来事の後の詰めた記録。
-// 1. ビット一致: 出来事ごとに GPU の窓の上限・選んだ e・後の詰めた記録が CPU と同じか。掃く回が不動点に着いたか(MAX_SWEEPS の内)。
+// 1. ビット一致: 出来事ごとに GPU の窓の上限・選んだ e・後の詰めた記録が CPU と同じか。掃く回が不動点に着いたか(区画の中の回の
+//    上限・仕上げの区画の数の上限の内)。
 // 2. 費用(--measure): 出来事ごとに 1 本のリストへ続けて積んだ時間(GPU の時計が高いまま = 早送りの形)の平均・最大と、
 //    1 出来事を 4 回続けて積んだ最小。--events-total n で火事全体(n 出来事)の待ちへ伸ばす。
-// 引数: --choices <ファイル> [--measure] [--events-total n] [--no-predicate(残りの掃く回も全部積む)] と GPU の試験の共通の引数(--warp・--queue・--no-gbv)。
+// 3. 内訳(--breakdown。T-1213): 段のまとまりの間に時刻印を打った 1 出来事の固定費の内訳(GpuTimeTreeChoose::PhaseNames)。
+// 引数: --choices <ファイル> [--measure] [--breakdown] [--events-total n] と GPU の試験の共通の引数(--warp・--queue・--no-gbv)。
 #include <algorithm>
 #include <cstdint>
 #include <expected>
@@ -70,6 +72,8 @@ namespace {
     std::expected<void, std::string> Compare(Context& context, const sim::GpuTimeTreeChoose& gpu,
                                              const test::TimeStepChooseFile& file) {
         uint32_t widestSweeps = 0;
+        uint32_t widestInner = 0;
+        uint32_t widestFixup = 0;
         uint64_t started = 0;
         uint64_t truncated = 0;
         for (uint32_t event = 0; event < file.events.size(); ++event) {
@@ -93,8 +97,9 @@ namespace {
                 return std::unexpected("読み戻せない");
 
             if (!choice.settled)
-                return std::unexpected(std::format("出来事 {}(刻み {}): 掃く回が {} 回で不動点に着かない", event,
-                                                   cpu.tick, sim::GpuTimeTreeChoose::MAX_SWEEPS));
+                return std::unexpected(
+                    std::format("出来事 {}(刻み {}): 掃く回が {} 回(区画の中 {} 回)で不動点に着かない", event, cpu.tick,
+                                sim::GpuTimeTreeChoose::PASSES, choice.innerSweeps));
 
             const std::string difference = FirstDifference(cpu, choice);
             if (!difference.empty())
@@ -102,6 +107,8 @@ namespace {
                     std::format("出来事 {}(刻み {}・cap {}): {}", event, cpu.tick, cpu.cap, difference));
 
             widestSweeps = std::max(widestSweeps, choice.sweeps);
+            widestInner = std::max(widestInner, choice.innerSweeps);
+            widestFixup = std::max(widestFixup, choice.fixupTiles);
             for (size_t u = 0; u < cpu.next.size(); ++u) {
                 started += cpu.next[u] >= 0 ? 1 : 0;
                 truncated += cpu.next[u] >= 0 && (cpu.before[u] & sim::TIME_TREE_RECORD_OPEN) != 0 ? 1 : 0;
@@ -110,8 +117,10 @@ namespace {
 
         Log(Channel::Gpu, Level::Info,
             "刻みを選ぶ段: {} 出来事・単位 {} で CPU とビット一致(窓の上限・選んだ e・後の詰めた記録)。始めた単位 {}・"
-            "打ち切り {}・変わった掃く回の最大 {}",
-            file.events.size(), file.tables.units, started, truncated, widestSweeps);
+            "打ち切り {}・区画 {}・変わった掃く回の最大 {}・区画の中の回の最大 {}・仕上げの区画の最大 {}",
+            file.events.size(), file.tables.units, started, truncated,
+            (file.tables.units + sim::GpuTimeTreeChoose::TILE_UNITS - 1) / sim::GpuTimeTreeChoose::TILE_UNITS,
+            widestSweeps, widestInner, widestFixup);
 
         return {};
     }
@@ -203,11 +212,67 @@ namespace {
         return {};
     }
 
+    // 固定費の内訳(--breakdown。T-1213): 出来事ごとに段のまとまりの間へ時刻印を打ち、まとまりごとの平均を出す
+    std::expected<void, std::string> Breakdown(Context& context, const sim::GpuTimeTreeChoose& gpu,
+                                               const test::TimeStepChooseFile& file) {
+        const std::span<const char* const> names = sim::GpuTimeTreeChoose::PhaseNames();
+        const auto phases = static_cast<uint32_t>(names.size());
+        const uint32_t perList = sim::GpuTimeTreeChoose::MAX_TIMESTAMPS / (phases + 1);
+        const auto events = static_cast<uint32_t>(file.events.size());
+        std::vector<double> sums(phases, 0.0);
+        std::vector<double> peaks(phases, 0.0);
+        for (uint32_t pass = 0; pass < 2; ++pass) {  // 1 回目は暖機
+            std::ranges::fill(sums, 0.0);
+            for (uint32_t first = 0; first < events; first += perList) {
+                const uint32_t count = std::min(perList, events - first);
+                ID3D12GraphicsCommandList10* list = context.queue->Begin();
+                if (list == nullptr)
+                    return std::unexpected("コマンドリストを始められない");
+
+                context.ring->RecordBegin(list);
+                uint32_t stamp = 0;
+                for (uint32_t i = 0; i < count; ++i)
+                    gpu.RecordChoose(list, context.ring->GpuAddress(), first + i, file.events[first + i].cap, &stamp);
+
+                gpu.RecordTimestampReadback(list, stamp);
+                const auto executed = Execute(context, list);
+                if (!executed)
+                    return executed;
+
+                const std::vector<uint64_t> ticks = gpu.ReadTimestamps(stamp);
+                if (ticks.size() != stamp || stamp != count * (phases + 1))
+                    return std::unexpected("時刻印を読めない");
+
+                for (uint32_t i = 0; i < count; ++i) {
+                    for (uint32_t phase = 0; phase < phases; ++phase) {
+                        const uint32_t at = (i * (phases + 1)) + phase;
+                        const double ms = ToMs(context, ticks[at], ticks[at + 1]);
+                        sums[phase] += ms;
+                        peaks[phase] = std::max(peaks[phase], ms);
+                    }
+                }
+            }
+        }
+
+        double total = 0.0;
+        for (const double sum : sums)
+            total += sum;
+
+        for (uint32_t phase = 0; phase < phases; ++phase)
+            Log(Channel::Gpu, Level::Info, "内訳 {}: 平均 {:.4f} ms・最大 {:.4f} ms({:.0f} %)", names[phase],
+                sums[phase] / events, peaks[phase], 100.0 * sums[phase] / total);
+
+        Log(Channel::Gpu, Level::Info, "内訳の和: 1 出来事 平均 {:.4f} ms(単位 {}・{} 出来事)", total / events,
+            file.tables.units, events);
+
+        return {};
+    }
+
     int Run(std::span<char*> arguments) {
         std::string path;
         bool measure = false;
+        bool breakdown = false;
         uint64_t eventsTotal = 0;
-        bool predicate = true;
         std::vector<char*> rest = {arguments[0]};
         for (size_t index = 1; index < arguments.size(); ++index) {
             const std::string_view argument = arguments[index];
@@ -215,8 +280,8 @@ namespace {
                 path = arguments[++index];
             else if (argument == "--measure")
                 measure = true;
-            else if (argument == "--no-predicate")
-                predicate = false;
+            else if (argument == "--breakdown")
+                breakdown = true;
             else if (argument == "--events-total" && index + 1 < arguments.size())
                 eventsTotal = std::stoull(arguments[++index]);
             else
@@ -227,7 +292,7 @@ namespace {
         if (!options || path.empty()) {
             Log(Channel::Gpu, Level::Error,
                 "使い方: gpu_time_step_choose_test --choices <ファイル> [--warp] [--queue direct|compute] [--no-gbv] "
-                "[--measure] [--events-total n]");
+                "[--measure] [--breakdown] [--events-total n]");
             return 2;
         }
 
@@ -255,7 +320,7 @@ namespace {
             return 1;
         }
 
-        auto gpu = sim::GpuTimeTreeChoose::Create(device->Get(), file->tables, befores, predicate);
+        auto gpu = sim::GpuTimeTreeChoose::Create(device->Get(), file->tables, befores);
         if (!gpu) {
             Log(Channel::Gpu, Level::Error, "gpu_time_step_choose_test: FAILED({})", gpu.error());
             return 1;
@@ -265,6 +330,9 @@ namespace {
         auto ran = Compare(context, *gpu, *file);
         if (ran && measure)
             ran = Measure(context, *gpu, *file, eventsTotal);
+
+        if (ran && breakdown)
+            ran = Breakdown(context, *gpu, *file);
 
         if (!ran) {
             Log(Channel::Gpu, Level::Error, "gpu_time_step_choose_test: FAILED({})", ran.error());

@@ -1231,10 +1231,10 @@ namespace {
                 Log(Channel::Sim, Level::Info,
                     "早送りの見積もり(着火の {} 刻み後から {} 刻み): 見積もり 出来事 {}・解くセル {}・V × セル {}・GPU "
                     "の待ち "
-                    "{:.3f} 秒 / 実際 出来事 {}・解いたセル {}(見積もり ÷ 実際 {:.2f})",
+                    "{:.3f} 秒(うち刻みを選ぶ段 {:.3f} 秒)/ 実際 出来事 {}・解いたセル {}(見積もり ÷ 実際 {:.2f})",
                     at, horizon, estimate.events, estimate.cellSolves, estimate.cellCycles,
-                    (double)estimate.waitMicroseconds * 1.0e-6, events, cells,
-                    cells != 0 ? (double)estimate.cellSolves / (double)cells : 0.0);
+                    (double)estimate.waitMicroseconds * 1.0e-6, (double)estimate.chooseMicroseconds * 1.0e-6, events,
+                    cells, cells != 0 ? (double)estimate.cellSolves / (double)cells : 0.0);
             }
         }
     }
