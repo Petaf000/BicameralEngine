@@ -310,7 +310,7 @@ void WalkAndPass(RcGpuParams params, RcStepConstants constants, RcLevelRay level
         StoreWord(HeaderOffset(word), 0);
 }
 
-    // --- この刻みを流すか(T-1229。起動の予告の元。g_external1 = 入る持ち越しの表。1 スレッド)---
+    // --- この刻みを流すか(T-1229。起動の予告の元。g_external1 = 入る持ち越しの表・g_external3 の RC_GPU_U3_OUTPUT = 予告のバッファ〔u3〕へも書く。1 スレッド)---
     // 飛ばしてよい = 放つセルが無い(作業の RC_GPU_WORK_EMITTERS が 0)・入る持ち越しの表が空(0 でない鍵の数が 0。数は多めにしかずれない)・
     // 前に流した刻みが何も放たず何も受けなかった(帳簿の放った・持ち越しを放った・そのまま送ったが 0 = 放った・吸ったの欄と出る表が 0)。
     // その時に流した刻みの結果は「頭の帳簿が 0・欄が 0・表が 0」で今の置き場と同じなので、飛ばしても結果は変わらない(D-428)
@@ -329,6 +329,12 @@ void WalkAndPass(RcGpuParams params, RcStepConstants constants, RcLevelRay level
     const bool emitters = g_rcWork.Load(RC_GPU_WORK_EMITTERS) != 0u;
     const bool run = emitters || pending != 0;
     StoreWord(HeaderOffset(RC_GPU_RUN), run ? 1 : 0);
+    // 起動の予告のバッファへ直に(T-1235。状態のバッファから写すと大きいバッファの状態の遷移が要る)
+    if ((g_external3 & RC_GPU_U3_OUTPUT) != 0) {
+        g_counters[0] = run ? 1u : 0u;
+        g_counters[1] = 0u;
+    }
+
     if (!run)
         StoreWord(HeaderOffset(RC_GPU_SKIPPED), LoadWord(HeaderOffset(RC_GPU_SKIPPED)) + 1);
 
@@ -493,10 +499,10 @@ void StoreLevelArgs(RcGpuParams params, uint32_t level, uint32_t table) {
 }
 
 // --- 段 0 の後: 列にした放つ面の量と印を 0 に戻す(次の刻みは冷たいセルの面を書かずに済む。T-1010)---
-// g_external3 に RC_GPU_LEVEL_ARGS の印があれば、段 1 の起動の引数も書く(袋の表 0 は RcLevel0Walk が書き終えている。T-1235)
+// g_external3 に RC_GPU_U3_OUTPUT の印があれば、段 1 の起動の引数も書く(袋の表 0 は RcLevel0Walk が書き終えている。T-1235)
 [numthreads(RC_GROUP_THREADS, 1, 1)] void RcClearFaces(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const RcGpuParams params = LoadParams();
-    if (dispatchThreadId.x == 0 && (g_external3 & RC_GPU_LEVEL_ARGS) != 0)
+    if (dispatchThreadId.x == 0 && (g_external3 & RC_GPU_U3_OUTPUT) != 0)
         StoreLevelArgs(params, 1, 0);
 
     const uint32_t count = FaceCountOf(params);
@@ -631,7 +637,7 @@ uint64_t Level0WeightOf(RcGpuParams params, RcStepConstants constants, uint32_t 
 }
 
 // --- 袋の数を 0 に(RcClearBags の後。g_external1 = 段・g_external3 の bit 0 = 表)---
-// g_external3 に RC_GPU_LEVEL_ARGS の印があれば、次の段の起動の引数も書く(次の段が読む表 1 − 表は、この段の RcLevelWalk が
+// g_external3 に RC_GPU_U3_OUTPUT の印があれば、次の段の起動の引数も書く(次の段が読む表 1 − 表は、この段の RcLevelWalk が
 // 書き終えている。T-1235)
 [numthreads(RC_GROUP_THREADS, 1, 1)] void RcResetBags(uint3 dispatchThreadId : SV_DispatchThreadID) {
     if (dispatchThreadId.x != 0)
@@ -641,7 +647,7 @@ uint64_t Level0WeightOf(RcGpuParams params, RcStepConstants constants, uint32_t 
     uint64_t before;
     g_rcState.InterlockedMax64(HeaderOffset(RC_GPU_BAG_PEAK), LoadWord(HeaderOffset(RC_GPU_BAG_COUNT + table)), before);
     StoreWord(HeaderOffset(RC_GPU_BAG_COUNT + table), 0);
-    if ((g_external3 & RC_GPU_LEVEL_ARGS) != 0)
+    if ((g_external3 & RC_GPU_U3_OUTPUT) != 0)
         StoreLevelArgs(LoadParams(), g_external1 + 1, 1 - table);
 }
 

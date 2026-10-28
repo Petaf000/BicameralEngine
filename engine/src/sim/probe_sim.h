@@ -330,6 +330,8 @@ namespace bicameral::sim {
         // 参照の温度の形で、側が空の刻みにその側の段とハッシュを GPU が起動の予告で飛ばす(負の側 T-1229・正の側 T-1235)。
         // 結果は変わらない(切るのは比べる試験だけ)
         bool radiationSkipIdle = true;
+        // 放射の段の段 1 からを袋の数で間接に起動する(T-1235)。結果は変わらない(切るのは比べる試験と測りだけ)
+        bool radiationIndirectLevels = true;
     };
 
     // --- GPU で走らせる ---

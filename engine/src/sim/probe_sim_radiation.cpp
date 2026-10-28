@@ -52,6 +52,7 @@ namespace bicameral::sim {
             return std::unexpected("熱の放射の段を作れない: " + cascade.error());
 
         m_cascade.emplace(std::move(*cascade));
+        m_cascade->SetIndirectLevels(m_options.radiationIndirectLevels);
         if (params.referenceMk != 0) {
             CascadeParams negativeParams = params;
             negativeParams.negativePart = true;
@@ -69,6 +70,7 @@ namespace bicameral::sim {
                 return std::unexpected("熱の放射の段: 正の側と負の側の作業・状態の並びが違う");
 
             m_cascadeNegative.emplace(std::move(*negative));
+            m_cascadeNegative->SetIndirectLevels(m_options.radiationIndirectLevels);
         }
         if (!MakeRadiationLights(device, table))
             return std::unexpected("熱の放射の段の光の値のバッファを作れない");

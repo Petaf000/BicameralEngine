@@ -323,6 +323,12 @@ views:
       - { id: probesimliquid, group: simlib, label: "ProbeSim::RecordLiquid<br/>仮の世界の GPU の刻みに液体の区画(T-0613)<br/>適用の単位の中・気体の後: 10 段で面とセルごとに集める",
           code: "engine/src/sim/probe_sim_liquid.cpp::ProbeSim::RecordLiquid", ticket: T-0613, doc: docs/design/07-transport.md,
           note: "CPU の ProbeLiquidField::Step の段(圧力 → 面の力 → 質量 → 移流 → 熱)を、面から配る所をセル・面ごとに集める形に直した 10 段の compute(shaders/sim/probe_liquid_tick.hlsl)。上流の成分は刻みの初めの写しから読む。帳簿は波の和 + 64bit の原子的な足し算。置き場所はバッファ 1 つ(u19)。CPU と毎刻みビット一致(gpu_probe_liquid_test)。表の差し替え・保存点・写しの早送りはまだ断る(T-0620)。ADR-0266" }
+      - { id: probesimradiation, group: simlib, label: "ProbeSim::RecordRadiation<br/>仮の世界の GPU の刻みに熱の放射(T-1154)<br/>写し → 側ごとの距離の段 → 当てる(正 − 負)",
+          code: "engine/src/sim/probe_sim.cpp::ProbeSim::RecordRadiation", ticket: T-1154, doc: docs/design/23-radiation.md,
+          note: "適用の単位の中・液体の後(CPU の (1d))。参照の温度の形(D-671)は正と負の 2 側。側が空の刻み(放つセルが無い・入る持ち越しが空・前に流した刻みが何も放たず受けず)は、その側の段とハッシュを GPU が起動の予告で飛ばす(RecordRadiationSide。T-1229・T-1235・ADR-0495。CPU は読み戻さない・結果は同じ)" }
+      - { id: gpucascadelight, group: simlib, label: "GpuCascadeLight::RecordTickWith<br/>距離ごとの段の GPU の 1 刻み(T-0959)<br/>段 1 からは袋の数で間接の起動",
+          code: "engine/src/sim/gpu_cascade_light.cpp::GpuCascadeLight::RecordTickWith", ticket: T-0959, doc: docs/decisions/ADR-0495-radiation-skip-both-sides-indirect-levels.md,
+          note: "shaders/sim/cascade_light.hlsl。持ち越しは鍵で引く密な表を刻みの偶奇で 2 つ(ADR-0484)。仮の世界の自分のルート署名では段 1 からの歩く・袋を空にするを、前の段が書いた袋の数で ExecuteIndirect(RecordLevelsIndirect。T-1235)。CPU の StepCascadeLight とビット一致" }
       - { id: cellvolume, group: simlib, label: "ShareCellVolume<br/>1 セルの体積を相で分け合う(T-0593・T-0612)<br/>固体 + 液体 + 残り = 気体の空き",
           code: "engine/src/sim/cell_volume.cpp::ShareCellVolume", ticket: T-0593, doc: docs/design/07-transport.md,
           note: "占める体積は物質の密度から(モル体積。書かなければ 0)。液体の空き = セル − 固体、気体の空き = セル − 固体 − 液体。面の開き = 両側の空きの小さい方。気体は空きの体積で圧力を読み(GasBox::openQ16)、液体は空きで満ち具合と圧力を数える。ADR-0268" }
@@ -683,6 +689,8 @@ views:
       - [probegas, gasprojection, "投影"]
       - [probegas, gasfastestcheck, "最速の時の警告"]
       - [probesimgas, probegas, "毎刻みビット一致"]
+      - [probesimradiation, gpucascadelight, "側ごとの 1 刻み(自分のルート署名)"]
+      - [gpucascadelight, cascadelight, "CPU とビット一致(同じ関数)"]
       - [probesimliquid, probeliquid, "毎刻みビット一致"]
       - [probereference, probeliquid, "気体の後"]
       - [probegas, cellvolume, "気体の空き"]

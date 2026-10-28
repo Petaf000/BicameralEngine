@@ -1142,16 +1142,18 @@ FX_CONST uint32_t RC_GPU_OVERFLOW = 24;     // 溢れの印(1 = 放つ面・2 = 
 FX_CONST uint32_t RC_GPU_BAG_PEAK = 25;     // 段 1 つの袋の数の最大(置き場の大きさを決める目安。作ってからの最大)
 FX_CONST uint32_t RC_GPU_HELD = 26;         // 帯ごとの、熱で放って組の刻みまで待たせた量(2。T-1010)
 FX_CONST uint32_t RC_GPU_KEPT = 28;         // 帯ごとの、持ち越しの表で次の刻みへそのまま送った量(2)
-FX_CONST uint32_t RC_GPU_RUN = 30;          // この刻みを流す印(RcPlanTick が書き、起動の予告が読む。0 = 飛ばす。T-1229)
-FX_CONST uint32_t RC_GPU_SKIPPED = 31;      // 飛ばした刻みの数(作ってから。測りの目安)
+FX_CONST uint32_t
+    RC_GPU_RUN = 30;  // この刻みを流す印(RcPlanTick が書く。起動の予告のバッファにも同じ値。0 = 飛ばす。T-1229・T-1235)
+FX_CONST uint32_t RC_GPU_SKIPPED = 31;  // 飛ばした刻みの数(作ってから。測りの目安)
 FX_CONST uint32_t RC_GPU_HEADER_WORDS = 32;
 // 作業のバッファの頭(RcGpuParams の 256 バイト)の終わりの語(バイトの位置): 呼ぶ側の写しの段が「この刻みに放つセルがある」なら
 // 0 でない値を書き、RcPlanTick が読んで 0 に戻す(T-1229。sim/probe_sim の負の側の段)
 FX_CONST uint32_t RC_GPU_WORK_EMITTERS = 248;
-// 段 1 からの間接の起動(T-1235・ADR-0495。仮の世界の自分のルート署名の時だけ): RcClearFaces・RcResetBags が次の段の袋の数から
-// RcLevelWalk と RcClearBags のグループの数を u3 の引数の表(段ごとに D3D12_DISPATCH_ARGUMENTS 2 つ = 6 語)へ書く。
-// 書くのは g_external3 に RC_GPU_LEVEL_ARGS の印がある起動だけ(木のルート署名の u3 は木の数のバッファなので書かない)
-FX_CONST uint32_t RC_GPU_LEVEL_ARGS = 4;
+// 仮の世界の自分のルート署名の時だけ u3 へ書く(T-1235・ADR-0495)。書くのは g_external3 に RC_GPU_U3_OUTPUT の印がある起動だけ
+// (木のルート署名の u3 は木の数のバッファなので書かない): RcPlanTick は起動の予告のバッファ(uint64 1 語)へ「流す」の印を、
+// RcClearFaces・RcResetBags は段 1 からの間接の起動の引数の表(段ごとに D3D12_DISPATCH_ARGUMENTS 2 つ = 6 語)へ、
+// 次の段の袋の数から RcLevelWalk と RcClearBags のグループの数を
+FX_CONST uint32_t RC_GPU_U3_OUTPUT = 4;
 FX_CONST uint32_t RC_GPU_LEVEL_ARGS_WORDS = 6;
 FX_CONST uint32_t RC_GPU_MAX_GROUPS = 2048;  // 1 回の起動のグループの上限(sim/gpu_cascade_light.cpp の Dispatch と同じ)
 FX_CONST uint32_t RC_GPU_LEDGER_KINDS = 5;

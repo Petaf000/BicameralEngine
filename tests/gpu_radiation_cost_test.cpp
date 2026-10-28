@@ -17,6 +17,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <tuple>
 #include <vector>
 
 #include "core/aliases.h"
@@ -37,8 +38,8 @@ namespace {
     constexpr uint32_t REFERENCE_300_K = 300000;  // mK
     constexpr uint32_t REFERENCE_ISA = 288150;    // mK(ISA の海面。T-1164 の測りの環境)
 
-    // 側を飛ばす刻みの見込み(T-1229・T-1235。Any = 数は見ない〔ハッシュの一致だけ〕)
-    enum class SkipExpect : uint8_t { All, Some, None, Any };
+    // 側を飛ばす刻みの見込み(T-1229・T-1235)
+    enum class SkipExpect : uint8_t { All, Some, None };
 
     struct Scene {
         std::string_view name;
@@ -46,7 +47,7 @@ namespace {
         bool fire = false;
         // 刻み COLD_FROM_TICK に芯の温度が coreMk(0 = 置かない)の木の球を置き、COLD_UNTIL_TICK に 300 K の球へ戻す
         uint32_t coreMk = 0;
-        SkipExpect skipPositive = SkipExpect::Any;
+        SkipExpect skipPositive = SkipExpect::All;
         SkipExpect skipNegative = SkipExpect::All;
     };
 
@@ -85,10 +86,11 @@ namespace {
     //  開けた所に冷たい塊を置くと、光が見える所を全部わずかに冷やすので、置き直しても負の側は空に戻らない)
     std::vector<Scene> SkipScenes() {
         return {
-            {.name = "何もしない・外 300 K(両側がずっと空)",
+            {.name = "何もしない・外 300 K(両側がずっと空)", .cascade = FixedReference(REFERENCE_300_K)},
+            {.name = "火・外 300 K(負の側がずっと空・正の側がずっと要る)",
              .cascade = FixedReference(REFERENCE_300_K),
-             .skipPositive = SkipExpect::All},
-            {.name = "火・外 300 K(負の側がずっと空)", .cascade = FixedReference(REFERENCE_300_K), .fire = true},
+             .fire = true,
+             .skipPositive = SkipExpect::None},
             {.name = "芯の冷たい木の球を置いて戻す・外 300 K(負の側が時々)",
              .cascade = FixedReference(REFERENCE_300_K),
              .coreMk = COLD_BLOCK_MK,
@@ -96,11 +98,11 @@ namespace {
             {.name = "芯の熱い木の球を置いて戻す・外 300 K(正の側が時々)",
              .cascade = FixedReference(REFERENCE_300_K),
              .coreMk = HOT_BLOCK_MK,
-             .skipPositive = SkipExpect::Some,
-             .skipNegative = SkipExpect::Any},
-            {.name = "火・外 301 K(負の側がずっと要る)",
+             .skipPositive = SkipExpect::Some},
+            {.name = "火・外 301 K(両側がずっと要る)",
              .cascade = FixedReference(REFERENCE_300_K + 1000),
              .fire = true,
+             .skipPositive = SkipExpect::None,
              .skipNegative = SkipExpect::None},
             {.name = "何もしない・外 299 K(正の側がずっと要る)",
              .cascade = FixedReference(REFERENCE_300_K - 1000),
@@ -141,7 +143,6 @@ namespace {
             case SkipExpect::All: return skipped == ticks;
             case SkipExpect::None: return skipped == 0;
             case SkipExpect::Some: return skipped > COLD_FROM_TICK && skipped < ticks;
-            case SkipExpect::Any: return true;
         }
 
         return false;
@@ -164,10 +165,13 @@ namespace {
     };
 
     std::optional<Run> RunScene(ID3D12Device5* device, gpu::Queue& queue, const BakedReactionTable& table,
-                                const Scene& scene, uint64_t ticks, bool timing, bool skipIdle = true) {
-        auto created = ProbeSim::Create(
-            device, D3D12_COMMAND_LIST_TYPE_COMPUTE, table,
-            {.cascadeRadiation = scene.cascade, .radiationStageTiming = timing, .radiationSkipIdle = skipIdle});
+                                const Scene& scene, uint64_t ticks, bool timing, bool skipIdle = true,
+                                bool indirect = true) {
+        auto created = ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, table,
+                                        {.cascadeRadiation = scene.cascade,
+                                         .radiationStageTiming = timing,
+                                         .radiationSkipIdle = skipIdle,
+                                         .radiationIndirectLevels = indirect});
         if (!created) {
             Log(Channel::Sim, Level::Error, "{}", created.error());
             return std::nullopt;
@@ -293,9 +297,15 @@ namespace {
         for (const Scene& scene : SkipScenes()) {
             const std::optional<Run> skipping = RunScene(device, *queue, table, scene, ticks, false, true);
             const std::optional<Run> running = RunScene(device, *queue, table, scene, ticks, false, false);
-            failures.Check(skipping && skipping->ok && running && running->ok, std::format("流せた: {}", scene.name));
-            if (!skipping || !running)
+            const std::optional<Run> direct = RunScene(device, *queue, table, scene, ticks, false, true, false);
+            failures.Check(skipping && skipping->ok && running && running->ok && direct && direct->ok,
+                           std::format("流せた: {}", scene.name));
+            if (!skipping || !running || !direct)
                 continue;
+
+            // 段 1 からの間接の起動(T-1235)を切っても同じ
+            failures.Check(skipping->hashes == direct->hashes,
+                           std::format("間接の起動でも直の起動と刻みごとの世界のハッシュが全部同じ: {}", scene.name));
 
             Log(Channel::Sim, Level::Info, "飛ばした刻み [{}]: 正 {}/{}・負 {}/{}", scene.name,
                 skipping->skippedPositive, ticks, skipping->skippedNegative, ticks);
@@ -317,6 +327,20 @@ namespace {
                 continue;
 
             LogRun(scene, *run, ticks, frequency);
+            // 測りの時は同じ場面を前の形でも(段 1 からを直の起動・側を飛ばさない。T-1235 の前後を同じ回の中で比べる)
+            for (const auto& [skipIdle, indirect, label] :
+                 {std::tuple{true, false, "直の起動"}, std::tuple{false, false, "飛ばさない・直の起動"}}) {
+                if (!measureAll || !scene.cascade.enabled)
+                    break;
+
+                const std::optional<Run> before = RunScene(device, *queue, table, scene, ticks, true, skipIdle,
+                                                           indirect);
+                const std::string name = std::format("{}・{}", scene.name, label);
+                Scene labeled = scene;
+                labeled.name = name;
+                if (before)
+                    LogRun(labeled, *before, ticks, frequency);
+            }
             failures.Check(run->overflow == 0, std::format("放射の段の置き場が溢れない: {}", scene.name));
             failures.Check(run->asserts == 0, std::format("シェーダーの assert が 0 件: {}", scene.name));
             failures.Check(run->dropped == 0, std::format("印を捨てていない: {}", scene.name));
