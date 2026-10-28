@@ -58,29 +58,6 @@ namespace bicameral::sim {
         constexpr uint32_t SPLIT_CELL = UINT32_MAX - 1;  // m_index: 2 × 2 の細かいセルに分けたセル(T-1120)
         constexpr uint32_t MIXED_GROUP_TERMS = 3;        // 違う大きさの面 1 つの項(伸び・ずれ・曲げ)
 
-        // セルの座標の外接の箱(閉じた領域の「変わった所の大きさ」。T-1171)。空なら長い辺は 1 セル
-        struct CellBox {
-            uint32_t lowX = UINT32_MAX;
-            uint32_t highX = 0;
-            uint32_t lowUp = UINT32_MAX;
-            uint32_t highUp = 0;
-
-            void Add(uint32_t x, uint32_t up) {
-                lowX = std::min(lowX, x);
-                highX = std::max(highX, x);
-                lowUp = std::min(lowUp, up);
-                highUp = std::max(highUp, up);
-            }
-
-            bool Empty() const { return lowX > highX; }
-
-            uint64_t LongSide() const {
-                if (Empty())
-                    return 1;
-
-                return (uint64_t)std::max(highX - lowX, highUp - lowUp) + 1;
-            }
-        };
         constexpr uint32_t
             BLOCK_COEFFICIENT_SHIFT = 32;           // Coupled の右辺の単位 2^-16 mN(係数 2^-32 × 変位 2^-16 ÷ 2^32)
         constexpr uint32_t BLOCK_FORCE_SHIFT = 16;  // mN → 2^-16 mN
@@ -181,15 +158,6 @@ namespace bicameral::sim {
         Build();
         if (Coupled())
             BuildBlocks();
-
-        // 閉じた領域(T-1171): 変わった所を知らない始まりはセル 1 つを変わった所の大きさにする(最初の刻みは種の控えが無いので全部を解く)
-        if (Coupled() && !m_mixed && m_options.closeMultiplier != 0) {
-            m_options.blocks.closeLengthMm = (uint64_t)m_options.closeMultiplier * m_scene.cellMm;
-            const uint32_t divisor = m_options.closeResidualDivisor;
-            m_closeResidual = divisor == 0 ? 0 : ((uint64_t)m_weight << BLOCK_FORCE_SHIFT) / divisor;
-            const bool grow = m_options.closeGrowth == SupportCloseGrowth::Grow;
-            m_options.blocks.residualSeed = grow ? m_closeResidual : 0;
-        }
     }
 
     bool SupportLaw::Coupled() const {
@@ -869,9 +837,6 @@ namespace bicameral::sim {
                     m_blockState.values[cell * SUPPORT_COMPONENTS + c] = CarriedValue(before, cell, c);
             }
 
-            if (m_options.blocks.closeLengthMm != 0)
-                CarryCloseState(before);
-
             return;
         }
 
@@ -882,74 +847,12 @@ namespace bicameral::sim {
         }
     }
 
-    // --- 閉じた領域の種(T-1171): 変わったセルと変わった所の大きさ。種の控え(右辺・対角・残差)は今の系と前の答えから座標で ---
-    void SupportLaw::CarryCloseState(const SupportLaw& before) {
-        const bool same = !m_mixed && !before.m_mixed && before.Coupled() && before.m_scene.width == m_scene.width &&
-                          before.m_scene.height == m_scene.height && before.m_scene.cellMm == m_scene.cellMm;
-        if (!same)
-            return;  // 種の控えが無い = 次の刻みは全部を解く
-
-        const uint32_t k = SUPPORT_COMPONENTS;
-        const EquilibriumBlockLevel& cells = m_blockGrid.levels[0];
-        const EquilibriumBlockLevel& old = before.m_blockGrid.levels[0];
-
-        // 右辺 = 右辺の項の和(C-0 の BlockRhs と同じ値。支えの固定した面の値は 0 なので足す項は無い)・対角 = 今の段 0
-        // = 変わったことは C-0 の比べではなく下の種で渡す
-        m_blockState.rhs.assign(m_cells.size() * k, 0);
-        for (const EquilibriumBlockSource& source : m_blockSystem.sources)
-            m_blockState.rhs[(size_t)source.node * k + source.component] += source.value;
-
-        m_blockState.diagonals = cells.diagonals;
-        m_blockState.residuals.assign(m_cells.size(), 0);
-        const bool residualsKnown = before.m_blockState.residuals.size() == before.m_cells.size();
-
-        // 変わったセル(前に無かった・対角のブロック〔つながりと固定した面〕か荷が違う)と無くなったセルの外接の箱
-        // 変わった所の大きさ = 無くなった・足されたセルの外接の箱(形が変わらない時〔荷・割れ〕は変わったセルの箱)。
-        // 変わったセルの箱は周りの 1 セルを含むので細かさで変わる(T-1171 の 1 回目の測りで 0.25 m の領域が 3/4 になった)
-        CellBox shape;
-        CellBox touched;
-        m_closeSeeds.clear();
-        for (uint32_t cell = 0; cell < m_cells.size(); ++cell) {
-            const auto [x, up] = m_cells[cell];
-            const uint32_t was = before.m_index[x + (size_t)m_scene.width * up];
-            const bool changed = was >= SPLIT_CELL || old.diagonals[was] != cells.diagonals[cell] ||
-                                 before.m_loads[was] != m_loads[cell];
-            if (was >= SPLIT_CELL)
-                shape.Add(x, up);
-
-            if (changed) {
-                m_closeSeeds.push_back(cell);
-                touched.Add(x, up);
-            } else if (residualsKnown) {
-                m_blockState.residuals[cell] = before.m_blockState.residuals[was];
-            }
-        }
-
-        for (const auto& [x, up] : before.m_cells) {
-            if (m_index[x + (size_t)m_scene.width * up] >= SPLIT_CELL)
-                shape.Add(x, up);
-        }
-
-        const uint64_t sizeCells = shape.Empty() ? touched.LongSide() : shape.LongSide();
-        m_options.blocks.closeLengthMm = (uint64_t)m_options.closeMultiplier * sizeCells * m_scene.cellMm;
-        if (m_options.closeGrowth == SupportCloseGrowth::Fixed)
-            m_changedSeeds = m_closeSeeds;
-    }
-
     // --- 1 刻み(Coupled): 成分を持つ節で 1 つの系を決まった回数の V で ---
     void SupportLaw::StepCoupled() {
-        // Fixed は変わったセルを、領域の残差が閾値以下になるまで毎刻み種にする(閉じた領域。T-1171)
-        const bool fixed = !m_changedSeeds.empty();
-        m_options.blocks.extraSeeds = fixed ? m_changedSeeds : m_closeSeeds;
         const EquilibriumBlockResult result = SolveEquilibriumBlocks(m_blockSystem, m_blockGrid, m_options.blocks,
                                                                      m_blockState);
-        m_options.blocks.extraSeeds = {};
-        m_closeSeeds.clear();
-        if (fixed && result.worstResidual <= m_closeResidual)
-            m_changedSeeds.clear();
         m_lastNodeUpdates = result.nodeUpdates;
         m_lastUnknowns = result.unknowns;
-        m_lastSeeds = result.seeds;
     }
 
     // --- 1 刻み(Lagged): x → 上 → 回り の順に、ほかの成分の今の値を右辺の項へ入れて C-0 で解く ---
