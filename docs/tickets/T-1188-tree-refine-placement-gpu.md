@@ -1,6 +1,6 @@
 # T-1188 木を細かくする段のセルの中身の置かれ方を GPU で・既定 on(T-1176 の続き)
 
-- Status: Doing(2026-10-29 wt2: HW の gpu_multires が DEVICE_HUNG。マージしない。下の「引き継ぎ」。隣のブロックの列・斜面の空気の速さの比べは T-1189 に分けた)
+- Status: Done(2026-10-29 wt2・t-1188-refine-gpu-2: 置かれ方の段を別の Work Graph のプログラムにして HW の止まりが消えた〔ADR-0499〕。隣のブロックの列・斜面の空気の速さの比べは T-1189 に分けた)
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1〜2 回分
@@ -31,9 +31,11 @@ T-1176 の CPU リファレンス(PlaceTreeCell・PlaceRefineOctantCells)と同�
   要求の本物の細かくする・一様でない親・印 `MR_GRAPH_ENTRY_PLACE`)。1 スレッド = 親のセル t の詰まり → グループ共有(子に覆われたセルは −1)→ 1 スレッド = 子のセル t の
   傾き・配り方・空きの体積 → 熱容量 → エネルギー(最後の重みのある子が残り)→ 子の頁へ直接書く(成分は量 0 を消して詰める)。物質は毎回 g_cells・g_species から読む(T-0397)。
   グループ共有 6 KiB(2 つの欄を段ごとに使い回す。2026-10-29 wt2 で 12 → 6 KiB)。
-- **入口**: 置かれ方の段は別の入口のノード `RefinePlaceNode`(RefineNode と同じ中身 `MR_REFINE_NODE_BODY(place)` で、place だけ true。溢れを使わない変種だけ)。
-  `GpuMultires::RecordUpload` が、`nest.refineCells.species` が空でなく溢れを使わない世界なら `g_graphEntries` の下位 16bit にこの入口を書く
-  (= CPU の ProcessRequests と同じ条件)。ほかの世界は今まで通り軽い RefineNode(2026-10-29 wt2。前の版の bit 31 の印は外した。下の作業ログ)。
+- **プログラム(ADR-0499)**: 置かれ方の段は `#ifdef MR_REFINE_PLACE` の中だけ。multires_graph.hlsl を `MR_REFINE_PLACE=1` でもう 1 つ
+  コンパイルし(shaders/CMakeLists.txt の multires_graph_place)、`GpuMultires` が溢れを使わない世界で 2 つ目のプログラムも作る(`GraphProgram`・`m_graphs`)。
+  `RecordUpload` が、`nest.refineCells.species` が空でなく溢れを使わない世界なら置かれ方のプログラムを選び(= CPU の ProcessRequests と同じ条件)、
+  `g_graphEntries` もそのプログラムの入口の番号にする。ほかの世界は main と同じプログラム(置かれ方の段を持たない)。
+  前の版の別の入口 RefinePlaceNode(同じプログラム)は止まったので無くした。
 - **64bit の差**: `placement_refine.hlsli` の差(列の分け・縦の残り・気体の残り)と熱の差・エネルギーの残りを `PrSubS64`(32bit の 2 つに分けて借りを手で回す)に。
   子の量を 0 と比べるため(T-1078・T-1159 の形)。値は同じ。
 - **既定 on(D-664)**: 世界の箱 `MakeLabBoxNest` が `EnableRefineCellPlacement`。表の差し替え(`RemapLabBox`)は新しい表で持ち直す。`MakeMultiresNest` だけの木
@@ -57,20 +59,29 @@ T-1176 の CPU リファレンス(PlaceTreeCell・PlaceRefineOctantCells)と同�
 - 直し(1 回目・効かなかった): 置かれ方の段を別の入口 `RefinePlaceNode` に分け、CPU が世界ごとに入口を選ぶ(使わない世界は RefineNode)。
   → **それでも HW の gpu_multires が止まった**(gpu_multires_stress・gpu_lab_box・gpu_tree_refine_placement の HW、WARP は合格)。
   同じ Work Graph のプログラムに重いノードがあるだけで、ほかのノードも止まる(RTX はプログラム全体で 1 つの重さ〔レジスタ〕を取ると推定。未確認)。
-- **残る心配(司令塔へ)**: 置かれ方の世界(既定 on の世界の箱)は重いノードを通る。小さい場面(gpu_tree_refine_placement・gpu_lab_box)の HW は合格だが、
+- **残る心配(司令塔へ。下の 2026-10-29 2 回目で一部閉じた)**: 置かれ方の世界(既定 on の世界の箱)は重いノードを通る。小さい場面(gpu_tree_refine_placement・gpu_lab_box)の HW は合格だが、
   多くの要求の鎖が同時に走る大きい世界で止まらないかは未確認。止まるなら、細かくする段を Compute へ移す(D-546)か、置かれ方の段のレジスタを減らす(64bit の割り算の回しを 1 か所に)。
 - 既定 on の取り直し: 世界の箱を使う GPU の試験(gpu_lab_box HW・WARP)は期待値の書き換えなしで合格。window_lab は main でも同じ所(「隣の根の木が温まっていない(300004 mK)」)で落ちる(前からの不具合。この枝のせいではない)。
 - 前からの不具合(main でも落ちる。この枝のせいではない): radiation_reference(line 394 allZero。real_matter の物質が放射の吸い込みを書いている)・standard_packages(line 269 overrides)・window_lab。
 - 【wt5 T-1233 と reaction.hlsli が重なる】この枝は reaction.hlsli に RX_SPECIES_PACKING_SHIFT・RX_SPECIES_PACKING_MASK・RxSpeciesPackingPercent(物質の印の近く 8 行)を足しただけ。成分の読み方は触っていない。
 
-## 引き継ぎ(2026-10-29 wt2・作業役。2 時間で区切った)
-- 状態: ブランチ t-1188-refine-gpu。release のビルドは通る(警告 0)。CPU と GPU のビット一致は合格。**HW の gpu_multires(chains-real・置かれ方を使わない木)だけが DEVICE_HUNG**。マージしない。
-- 次の手(おすすめ順):
-  1. 置かれ方の段を**別の Work Graph のプログラム**にする: shaders/CMakeLists.txt で multires_graph.hlsl を `NAME multires_graph_place DEFINES MR_REFINE_PLACE=1` でもう 1 つ作り
-     (RefineNode が place = true。ほかのノードは同じ)、GpuMultires が置かれ方の世界だけそのプログラムで細かくする/粗くする(GPU の入力の見出しの入口の番号もそのプログラムの番号)。
-     置かれ方を使わない世界の木は main と同じプログラムだけを持つ = gpu_multires は main と同じになるはず。プログラムを選ぶのは RecordUpload(nest で決まる)なので、
-     2 つ目のプログラムは Create で作っておくか、要る時に作る(作り直しの時間に注意)。
-  2. それでも置かれ方の世界の大きい場面で止まるなら、細かくする段を Compute へ(D-546。Work Graph は測って速い所だけ)。研究: 打ち切りは「gpu_multires を置かれ方の世界で回して止まる」。
-- 確かめに使う組: `^(gpu_multires|gpu_multires_stress|gpu_multires_warp|gpu_lab_box|gpu_tree_refine_placement|gpu_tree_refine_placement_warp)$`(release で約 3 分 + 待ち)。
-  main の比べは runner/main-gpu-base.ps1(raw。GPU の順番を取って ..\..\out の main の release の gpu_multires_test と bicameral を流す)。
-- まだ: `git rebase main`(origin に push 済みの枝なので、載せ直すと force push が要る。次の作業役は main から新しい枝を作って cherry-pick するのが早い)。
+- 2026-10-29 wt2(作業役 2 回目・t-1188-refine-gpu-2。main から作り直して 3 コミットを cherry-pick): 置かれ方の段を別の Work Graph のプログラム
+  multires_graph_place(MR_REFINE_PLACE)へ(ADR-0499 の案 1)。**HW の gpu_multires(chains-real)・stress・activity・quiet・layers・uniform・wide_many と
+  WARP、gpu_lab_box・gpu_tree_refine_placement・gpu_placement_refine(HW・WARP)が合格**。gpu_multires の組で落ちるのは前からの不具合
+  (implicit・implicit_tree・implicit_build・implicit_conduction_blocks / levels の 6 本・near_fold。main の release でも同じ所で落ちるのを確かめた)だけ。
+- 根の切り分け(司令塔の勧め): 前の形(同じプログラムに RefinePlaceNode)に wt5 の t-1233(動的な添字の配列を消す)を一時的に merge すると、
+  HW の gpu_multires・stress・activity・quiet・gpu_lab_box・gpu_tree_refine_placement が合格(2 回)= 根は T-0397 と同じ種類(alloca の重さ)。
+  案 1 は t-1233 に依らずに通るので残した(t-1233 の後に 1 つのプログラムへ戻すかは測って決める。ADR-0499)。一時の枝 t-1188-exp-1233 は push していない。
+- 既定 on で変わる試験: 無し(前の表のまま。gpu_lab_box は期待値の書き換えなしで合格)。
+- 測り: gpu_tree_refine_placement に要求を処理する段の GPU の時間(8 回の最小)を足した(docs/perf.md)。
+- 層(T-1220・T-1221・T-1236)を持つセルの置かれ方の GPU は無い(CPU は層を分けて配る)。層を持つ世界で置かれ方を GPU で使うと食い違う → T-1240(GPU の木の段の層)で。
+
+## 引き継ぎ(2026-10-29 wt2・作業役 2 回目)
+- 状態: ブランチ t-1188-refine-gpu-2(main 20799ae7 の上に rebase 済み)。**rebase の後の試験はまだ**(会話の入れ物の再起動で止めた)。
+  rebase 前(main 140f2f0c の上)の release は警告 0 で、上の作業ログの試験が合格。rebase で tests/CMakeLists.txt が gpu_phase_layer_test(T-1211)と重なり、
+  1 回目の解き方を誤って configure が落ちた → 直した(この WIP に入っている)。直した後の build(20261028-231601)は止める時に走っていた。
+- 次の一手: (1) release のビルド(警告 0)を確かめる (2) `^(tree_refine_placement|placement_refine|reaction_package|lab_box|gpu_multires|gpu_multires_stress|gpu_multires_warp|gpu_multires_activity|gpu_multires_quiet|gpu_multires_layers|gpu_multires_uniform|gpu_multires_wide_many|gpu_lab_box|gpu_lab_box_warp|gpu_tree_refine_placement|gpu_tree_refine_placement_warp|gpu_placement_refine|gpu_placement_refine_warp|gpu_phase_layer)$`
+  を流す(main に T-1211 の相の層・T-1236 の層の置き口が入ったので、gpu_lab_box・gpu_tree_refine_placement が変わらないかを見る)
+  (3) gpu_tree_refine_placement のログの「要求を処理する段 x ms」(SAME と置かれ方の 1 段・2 段)を docs/perf.md と ADR-0499 の「結果」へ (4) Status は Done にしてあるが、(2) が通るまではマージしない。
+- 前の枝 t-1188-refine-gpu は使わない(この枝に cherry-pick 済み)。
+- 残り: 隣のブロックの列・斜面の空気の速さの比べは T-1189。層を持つセルの GPU の置かれ方は T-1240。
