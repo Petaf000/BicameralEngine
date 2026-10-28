@@ -5,6 +5,8 @@
 // engine/src/sim/probe_sim_radiation.cpp の RecordRadiation が次の順に投げる(段の間は全部の UAV の書き込みを待つ):
 //   RadiationGrid   刻みの初めのセル(成分)+ 熱のキャッシュ(温度)→ 距離ごとの段の作業のバッファの光の値と温度(CPU の CascadeGrid と同じ並び)。
 //                   参照の温度の形(世界の外 = 環境の温度の物。D-671)では負の側の作業へも同じ値を書く
+//                   (負の側に放つセルがあれば負の側の作業の印 RC_GPU_WORK_EMITTERS も。T-1229: 負の側が空の刻みは負の側の段とハッシュを
+//                   GPU が起動の予告で飛ばす。GpuCascadeLight::RecordPlan)
 //   (距離ごとの段の 1 刻み: shaders/sim/cascade_light.hlsl。sim/gpu_cascade_light の自分のルート署名で。参照の温度の形では側ごとに 1 回)
 //   RadiationApply  セルごとの 正(吸った − 放った)− 負(吸った − 放った)(2^−16 mJ)を最も近い mJ に丸めてエネルギーへ足し、
 //                   変わったセルの熱のキャッシュを作り直し、ブロックを「刻みの直前に変わった」にして起こす刻みを今にする(気体の GasScatter と同じ)
@@ -68,6 +70,14 @@ RcGpuParams LoadRcParams() {
 
     rcSecond.Store<RcCellLight>(params.workLights + (cell * RC_CELL_LIGHT_BYTES), light);
     rcSecond.Store(params.workTemperatures + (cell * 4), temperatureMk);
+
+    // 負の側に放つセルがあるか(T-1229): 負の側の RcSources と同じ式(温度 0 のセルは放たない)。あれば負の側の作業の印へ(波に 1 回)。
+    // 面の向こうの飽和は見ない(多めに流すだけで、結果は変わらない)。印は負の側の RcPlanTick が読んで 0 に戻す
+    const RcBands negativeBands = RcCellEmissionRelative(temperatureMk, params.referenceWord | RC_REFERENCE_NEGATIVE,
+                                                         light);
+    const bool emits = temperatureMk != 0 && (negativeBands.shortBand | negativeBands.longBand) != 0;
+    if (WaveActiveAnyTrue(emits) && WaveIsFirstLane())
+        rcSecond.Store(RC_GPU_WORK_EMITTERS, 1u);
 }
 
 // 側 1 つのセルの 吸った(短い帯 + 長い帯)と 放った を 32bit の上下に分けて返す(足し算だけ)

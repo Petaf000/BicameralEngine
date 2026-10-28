@@ -31,6 +31,8 @@ namespace bicameral::sim {
             .uavCount = 6, .rootConstantCount = OWN_ROOT_CONSTANTS, .debugRing = true};
 
         static_assert(sizeof(rx::RcGpuParams) <= WORK_PARAMS_BYTES);
+        static_assert(sizeof(rx::RcGpuParams) <= rx::RC_GPU_WORK_EMITTERS &&
+                      rx::RC_GPU_WORK_EMITTERS + 4 <= WORK_PARAMS_BYTES);
         static_assert(sizeof(rx::RcCellLight) == LIGHT_BYTES);
 
         // パイプラインの番号(shaders/CMakeLists.txt の cascade_light_*)
@@ -46,8 +48,10 @@ namespace bicameral::sim {
             LevelWalk,
             ClearBags,
             ResetBags,
+            PlanTick,
             PipelineCount,
         };
+        static_assert(PipelineCount == GpuCascadeLight::STAGE_COUNT);
 
         constexpr std::array<const char*, PipelineCount> SHADER_NAMES = {
             "sim/cascade_light_init_state.cso",     "sim/cascade_light_init_bags.cso",
@@ -55,7 +59,7 @@ namespace bicameral::sim {
             "sim/cascade_light_carry_in.cso",       "sim/cascade_light_clear_faces.cso",
             "sim/cascade_light_level0_prepare.cso", "sim/cascade_light_level0_walk.cso",
             "sim/cascade_light_level_walk.cso",     "sim/cascade_light_clear_bags.cso",
-            "sim/cascade_light_reset_bags.cso",
+            "sim/cascade_light_reset_bags.cso",     "sim/cascade_light_plan_tick.cso",
         };
 
         uint64_t AlignUp(uint64_t value) {
@@ -230,7 +234,8 @@ namespace bicameral::sim {
         result.m_workUpload = gpu::CreateBuffer(device, result.m_workBytes, gpu::BufferKind::Upload);
         result.m_state = gpu::CreateBuffer(device, result.m_stateBytes, gpu::BufferKind::UnorderedAccess);
         result.m_readback = gpu::CreateBuffer(device, result.m_readbackBytes, gpu::BufferKind::Readback);
-        if (!result.m_work || !result.m_workUpload || !result.m_state || !result.m_readback)
+        result.m_predicate = gpu::CreateBuffer(device, WORD_BYTES, gpu::BufferKind::UnorderedAccess);
+        if (!result.m_work || !result.m_workUpload || !result.m_state || !result.m_readback || !result.m_predicate)
             return std::unexpected("距離ごとの段のバッファを作れない");
 
         return result;
@@ -325,35 +330,49 @@ namespace bicameral::sim {
     }
 
     void GpuCascadeLight::RecordTick(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
-                                     uint64_t tick) {
+                                     uint64_t tick, gpu::StageStamps* stamps, uint8_t firstStage) {
         if (m_ownRoot)
-            RecordTickWith(list, nullptr, debugRing, tick, static_cast<uint32_t>(tick & 1));
+            RecordTickWith(list, nullptr, debugRing, tick, static_cast<uint32_t>(tick & 1), stamps, firstStage);
+    }
+
+    std::string_view GpuCascadeLight::StageName(uint32_t stage) {
+        constexpr std::array<std::string_view, PipelineCount> NAMES = {
+            "InitState",     "InitBags",   "BeginTick", "Sources",   "CarryIn",   "ClearFaces",
+            "Level0Prepare", "Level0Walk", "LevelWalk", "ClearBags", "ResetBags", "PlanTick"};
+        return stage < NAMES.size() ? NAMES[stage] : std::string_view("?");
     }
 
     void GpuCascadeLight::RecordTickWith(ID3D12GraphicsCommandList10* list, GpuMultires* nest,
-                                         D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick, uint32_t in) {
+                                         D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick, uint32_t in,
+                                         gpu::StageStamps* stamps, uint8_t firstStage) {
         const auto tickLow = static_cast<uint32_t>(tick);  // 刻みは 2^32 未満(試験と測りの範囲)
         const uint64_t cells = m_cellCount;
         if (nest != nullptr)
             nest->SetExternalViews(m_work->GetGPUVirtualAddress(), m_state->GetGPUVirtualAddress());
 
+        // 起動の後ろ(Dispatch がバリアを置いた後)に段の印(測りの時だけ。結果には入らない)
+        const auto run = [&](Pipeline pipeline, uint64_t items, std::array<uint32_t, 4> external) {
+            Dispatch(list, nest, debugRing, pipeline, items, external);
+            if (stamps != nullptr)
+                stamps->Mark(list, static_cast<uint8_t>(firstStage + pipeline));
+        };
+
         // --- 段 0: 放つ面 ---
-        Dispatch(list, nest, debugRing, BeginTick, rx::RC_GPU_HEADER_WORDS, {tickLow, in, 0, 0});
-        Dispatch(list, nest, debugRing, Sources, cells, {tickLow, in, 0, 0});
+        run(BeginTick, rx::RC_GPU_HEADER_WORDS, {tickLow, in, 0, 0});
+        run(Sources, cells, {tickLow, in, 0, 0});
         const uint32_t out = 1 - in;
-        Dispatch(list, nest, debugRing, CarryIn, m_params.carryKeys, {tickLow, in, 0, 0});
-        Dispatch(list, nest, debugRing, Level0Prepare, m_params.faceCapacity, {tickLow, in, 0, 0});
-        Dispatch(list, nest, debugRing, Level0Walk, uint64_t{m_params.faceCapacity} * m_params.texelsPerFace,
-                 {tickLow, in, 0, out << 1});
-        Dispatch(list, nest, debugRing, ClearFaces, m_params.faceCapacity, {tickLow, in, 0, 0});
+        run(CarryIn, m_params.carryKeys, {tickLow, in, 0, 0});
+        run(Level0Prepare, m_params.faceCapacity, {tickLow, in, 0, 0});
+        run(Level0Walk, uint64_t{m_params.faceCapacity} * m_params.texelsPerFace, {tickLow, in, 0, out << 1});
+        run(ClearFaces, m_params.faceCapacity, {tickLow, in, 0, 0});
 
         // --- 段 1 から: 袋の表を交互に ---
         for (uint32_t level = 1; level < m_params.levels; ++level) {
             const uint32_t table = (level - 1) & 1u;
-            Dispatch(list, nest, debugRing, LevelWalk, uint64_t{m_params.bagCapacity} * m_params.raysPerBag,
-                     {tickLow, level, 0, table | (out << 1)});
-            Dispatch(list, nest, debugRing, ClearBags, m_params.bagCapacity, {tickLow, level, 0, table});
-            Dispatch(list, nest, debugRing, ResetBags, 1, {tickLow, level, 0, table});
+            run(LevelWalk, uint64_t{m_params.bagCapacity} * m_params.raysPerBag,
+                {tickLow, level, 0, table | (out << 1)});
+            run(ClearBags, m_params.bagCapacity, {tickLow, level, 0, table});
+            run(ResetBags, 1, {tickLow, level, 0, table});
         }
 
         // 照り返しと組を待つ光は、歩く間に表 out へ足してある(次の刻みが読む)
@@ -361,6 +380,46 @@ namespace bicameral::sim {
             nest->SetExternalViews(0, 0);
 
         m_parity = 1 - in;
+    }
+
+    // --- 起動の予告(T-1229)---
+
+    // RcPlanTick の印(状態の頭の RC_GPU_RUN)を予告のバッファへ写す。予告のバッファは COMMON に戻して終える
+    // (リストをまたいでも同じ状態。バッファはリストの終わりに COMMON へ戻るので、置いておく状態を決めて追わなくて済む)
+    void GpuCascadeLight::RecordPlan(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                     uint64_t tick, gpu::StageStamps* stamps, uint8_t firstStage) {
+        if (!m_ownRoot)
+            return;
+
+        const auto tickLow = static_cast<uint32_t>(tick);
+        Dispatch(list, nullptr, debugRing, PlanTick, 1, {tickLow, static_cast<uint32_t>(tick & 1), 0, 0});
+
+        const std::array<D3D12_RESOURCE_BARRIER, 2> toCopy = {
+            gpu::Transition(m_state.Get(), D3D12_RESOURCE_STATE_UNORDERED_ACCESS, D3D12_RESOURCE_STATE_COPY_SOURCE),
+            gpu::Transition(m_predicate.Get(), D3D12_RESOURCE_STATE_COMMON, D3D12_RESOURCE_STATE_COPY_DEST)};
+        list->ResourceBarrier(static_cast<uint32_t>(toCopy.size()), toCopy.data());
+        list->CopyBufferRegion(m_predicate.Get(), 0, m_state.Get(), uint64_t{rx::RC_GPU_RUN} * WORD_BYTES, WORD_BYTES);
+        const std::array<D3D12_RESOURCE_BARRIER, 2> back = {
+            gpu::Transition(m_state.Get(), D3D12_RESOURCE_STATE_COPY_SOURCE, D3D12_RESOURCE_STATE_UNORDERED_ACCESS),
+            gpu::Transition(m_predicate.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_COMMON)};
+        list->ResourceBarrier(static_cast<uint32_t>(back.size()), back.data());
+        if (stamps != nullptr)
+            stamps->Mark(list, static_cast<uint8_t>(firstStage + PlanTick));
+    }
+
+    // 印が 0(EQUAL_ZERO)なら、この後の起動を GPU が流さない(バリア・ルートの結び・タイムスタンプは予告に依らない)
+    void GpuCascadeLight::BeginSkipIfIdle(ID3D12GraphicsCommandList10* list) const {
+        const D3D12_RESOURCE_BARRIER toPredication = gpu::Transition(m_predicate.Get(), D3D12_RESOURCE_STATE_COMMON,
+                                                                     D3D12_RESOURCE_STATE_PREDICATION);
+        list->ResourceBarrier(1, &toPredication);
+        list->SetPredication(m_predicate.Get(), 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+    }
+
+    void GpuCascadeLight::EndSkipIfIdle(ID3D12GraphicsCommandList10* list) const {
+        list->SetPredication(nullptr, 0, D3D12_PREDICATION_OP_EQUAL_ZERO);
+        const D3D12_RESOURCE_BARRIER toCommon = gpu::Transition(m_predicate.Get(), D3D12_RESOURCE_STATE_PREDICATION,
+                                                                D3D12_RESOURCE_STATE_COMMON);
+        list->ResourceBarrier(1, &toCommon);
     }
 
     void GpuCascadeLight::RecordReadback(ID3D12GraphicsCommandList10* list) {

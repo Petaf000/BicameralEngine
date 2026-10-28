@@ -91,9 +91,9 @@ FX_FN uint64_t RcAbsorptanceQ16(uint64_t depthQ32) {
 
 // 面 1 つが熱で放つ量(帯ごと。σT⁴ × 帯の割合 × その帯の α (1 − 照り返し)。Kirchhoff: 当たった光を吸う割合 = 放つ割合。
 // 光線は当たったセルに α (1 − ρ) を吸わせるので、同じ温度の物どうしは差し引き 0。23 §3.3「坂を下る」)。
-// 面の向こうのセルがその帯を通さない(τ が飽和)なら、その帯はその面から放たない(触れている物どうしは伝導の仕事。
-// 向こうからもこの面へは届かないので、釣り合いは崩れない)
-FX_FN RcBands RcFaceEmission(uint32_t temperatureMk, RcCellLight light, RcCellLight across) {
+// RcCellEmission はそのうち面の向こうに依らない分(セルの温度と自分の光の値だけで決まり、6 面で同じ。T-1161)。
+// 面の量は RcMaskAcross で向こうが通さない帯を 0 にしたもの(= RcFaceEmission。セルごとに 1 回求めて 6 面で使う)
+FX_FN RcBands RcCellEmission(uint32_t temperatureMk, RcCellLight light) {
     const uint64_t black = RcFaceBlackEmission(temperatureMk);
     const uint64_t blackShort = FxShiftRightU128(FxMulU64Full(black, RcShortFractionQ32(temperatureMk)), 32);
     const uint64_t blackLong = black - blackShort;
@@ -105,14 +105,24 @@ FX_FN RcBands RcFaceEmission(uint32_t temperatureMk, RcCellLight light, RcCellLi
                                     16;
 
     RcBands bands;
-    bands.shortBand = across.depthShortQ32 >= RD_DEPTH_SATURATED_Q32
-                          ? 0
-                          : FxShiftRightU128(FxMulU64Full(blackShort, emissivityShort), 16);
-    bands.longBand = across.depthLongQ32 >= RD_DEPTH_SATURATED_Q32
-                         ? 0
-                         : FxShiftRightU128(FxMulU64Full(blackLong, emissivityLong), 16);
+    bands.shortBand = FxShiftRightU128(FxMulU64Full(blackShort, emissivityShort), 16);
+    bands.longBand = FxShiftRightU128(FxMulU64Full(blackLong, emissivityLong), 16);
 
     return bands;
+}
+
+// 面の向こうのセルがその帯を通さない(τ が飽和)なら、その帯はその面から放たない(触れている物どうしは伝導の仕事。
+// 向こうからもこの面へは届かないので、釣り合いは崩れない)
+FX_FN RcBands RcMaskAcross(RcBands bands, RcCellLight across) {
+    RcBands masked;
+    masked.shortBand = across.depthShortQ32 >= RD_DEPTH_SATURATED_Q32 ? 0 : bands.shortBand;
+    masked.longBand = across.depthLongQ32 >= RD_DEPTH_SATURATED_Q32 ? 0 : bands.longBand;
+
+    return masked;
+}
+
+FX_FN RcBands RcFaceEmission(uint32_t temperatureMk, RcCellLight light, RcCellLight across) {
+    return RcMaskAcross(RcCellEmission(temperatureMk, light), across);
 }
 
 // 参照の温度との差の放つ量(T-1102・ADR-0461)。referenceWord の下 31bit = 参照の温度(mK。0 なら今のまま)・bit 31 = 負の側。
@@ -129,8 +139,8 @@ FX_FN uint64_t RcPositivePart(uint64_t a, uint64_t b) {
     return (uint64_t)difference;
 }
 
-FX_FN RcBands RcFaceEmissionRelative(uint32_t temperatureMk, uint32_t referenceWord, RcCellLight light,
-                                     RcCellLight across) {
+// 面の向こうに依らない分(RcCellEmission の差。0 で止めるのは帯ごとなので、向こうの飽和で 0 にする前後どちらでも同じ値。T-1161)
+FX_FN RcBands RcCellEmissionRelative(uint32_t temperatureMk, uint32_t referenceWord, RcCellLight light) {
     const uint32_t referenceMk = referenceWord & ~RC_REFERENCE_NEGATIVE;
     const bool negative = (referenceWord & RC_REFERENCE_NEGATIVE) != 0;
     RcBands bands;
@@ -140,17 +150,22 @@ FX_FN RcBands RcFaceEmissionRelative(uint32_t temperatureMk, uint32_t referenceW
     if ((referenceMk != 0 || negative) && temperatureMk == referenceMk)
         return bands;
 
-    const RcBands own = RcFaceEmission(temperatureMk, light, across);
+    const RcBands own = RcCellEmission(temperatureMk, light);
     if (referenceMk == 0 && !negative)
         return own;
 
-    const RcBands reference = RcFaceEmission(referenceMk, light, across);
+    const RcBands reference = RcCellEmission(referenceMk, light);
     bands.shortBand = negative ? RcPositivePart(reference.shortBand, own.shortBand)
                                : RcPositivePart(own.shortBand, reference.shortBand);
     bands.longBand = negative ? RcPositivePart(reference.longBand, own.longBand)
                               : RcPositivePart(own.longBand, reference.longBand);
 
     return bands;
+}
+
+FX_FN RcBands RcFaceEmissionRelative(uint32_t temperatureMk, uint32_t referenceWord, RcCellLight light,
+                                     RcCellLight across) {
+    return RcMaskAcross(RcCellEmissionRelative(temperatureMk, referenceWord, light), across);
 }
 
 // 黒体が水平な面へ放つ強さ(帯ごとの mW/m²)。RcFaceBlackEmission(0.25 m²・1/60 s・2^−16 mJ)を W/m² に直す: × 240 ÷ 2^16。
@@ -1127,7 +1142,12 @@ FX_CONST uint32_t RC_GPU_OVERFLOW = 24;     // 溢れの印(1 = 放つ面・2 = 
 FX_CONST uint32_t RC_GPU_BAG_PEAK = 25;     // 段 1 つの袋の数の最大(置き場の大きさを決める目安。作ってからの最大)
 FX_CONST uint32_t RC_GPU_HELD = 26;         // 帯ごとの、熱で放って組の刻みまで待たせた量(2。T-1010)
 FX_CONST uint32_t RC_GPU_KEPT = 28;         // 帯ごとの、持ち越しの表で次の刻みへそのまま送った量(2)
+FX_CONST uint32_t RC_GPU_RUN = 30;          // この刻みを流す印(RcPlanTick が書き、起動の予告が読む。0 = 飛ばす。T-1229)
+FX_CONST uint32_t RC_GPU_SKIPPED = 31;      // 飛ばした刻みの数(作ってから。測りの目安)
 FX_CONST uint32_t RC_GPU_HEADER_WORDS = 32;
+// 作業のバッファの頭(RcGpuParams の 256 バイト)の終わりの語(バイトの位置): 呼ぶ側の写しの段が「この刻みに放つセルがある」なら
+// 0 でない値を書き、RcPlanTick が読んで 0 に戻す(T-1229。sim/probe_sim の負の側の段)
+FX_CONST uint32_t RC_GPU_WORK_EMITTERS = 248;
 FX_CONST uint32_t RC_GPU_LEDGER_KINDS = 5;
 FX_CONST uint32_t RC_GPU_BAG_WORDS = 10;                                   // 鍵・量 2・軸の割合 6・溜め
 FX_CONST uint32_t RC_GPU_FACE_INFO_WORDS = 4;                              // 重みの和・余りの升目・余り 2

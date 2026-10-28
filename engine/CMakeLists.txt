@@ -25,6 +25,7 @@ add_library(bicameral_gpu STATIC
   src/gpu/queue.cpp
   src/gpu/readback_ring.cpp
   src/gpu/resources.cpp
+  src/gpu/stage_stamps.cpp
   src/gpu/swap_chain.cpp
   src/gpu/work_graph.cpp
   src/gpu/work_graph_stats.cpp

@@ -7,6 +7,7 @@
 //   → RcCarryIn(前の刻みの持ち越し: 組の刻みの面は放つ面へ、そうでなければ次の刻みへ)→ RcLevel0Prepare(面ごとの升目の重みの和・余り)
 //   → RcLevel0Walk(段 0 の光線。残りを段 1 の袋の表へ)→ RcClearFaces(使った放つ面を 0 に)
 //   → 段ごとに RcLevelWalk(袋 × raysPerBag 本。残りを次の段の袋の表へ)・RcClearBags・RcResetBags(照り返しと組を待つ光は、歩く間に次の刻みの持ち越しの表へ足してある)
+// 仮の世界の負の側(sim/probe_sim。T-1229)は刻みの初めに RcPlanTick が「流す」の印を作り、空の刻みは GPU が起動の予告で全部の段を飛ばす。
 // 持ち越しは (セル・面・帯) の鍵で引く密な表を刻みの偶奇で 2 つ持つ(AddCarry が足し、次の刻みの RcCarryIn が全部の鍵を掃いて読み、0 に戻す)。
 // 鍵の数だけ置き場があるので溢れない(T-1164・ADR-0484。前の疎な表は溢れると取り合いの順で結果が変わった)。
 // 足し算と min はすべて 64bit の atomic で可換なので、光線の処理の順によらず CPU とビット一致する(R3・R4)。
@@ -303,13 +304,38 @@ void WalkAndPass(RcGpuParams params, RcStepConstants constants, RcLevelRay level
 [numthreads(RC_GROUP_THREADS, 1, 1)] void RcBeginTick(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const uint32_t word = dispatchThreadId.x;
     const bool keep = word == RC_GPU_CARRY_COUNT + g_external1 || word == RC_GPU_OVERFLOW || word == RC_GPU_BAG_COUNT ||
-                      word == RC_GPU_BAG_COUNT + 1 || word == RC_GPU_BAG_PEAK;
+                      word == RC_GPU_BAG_COUNT + 1 || word == RC_GPU_BAG_PEAK || word == RC_GPU_SKIPPED;
     if (word < RC_GPU_HEADER_WORDS && !keep)
         StoreWord(HeaderOffset(word), 0);
 }
 
-    // --- セルごとに 6 面の熱の放つ量(RcFaceEmission。CPU の CollectSources の前半)---
-    [numthreads(RC_GROUP_THREADS, 1, 1)] void RcSources(uint3 dispatchThreadId : SV_DispatchThreadID) {
+    // --- この刻みを流すか(T-1229。起動の予告の元。g_external1 = 入る持ち越しの表。1 スレッド)---
+    // 飛ばしてよい = 放つセルが無い(作業の RC_GPU_WORK_EMITTERS が 0)・入る持ち越しの表が空(0 でない鍵の数が 0。数は多めにしかずれない)・
+    // 前に流した刻みが何も放たず何も受けなかった(帳簿の放った・持ち越しを放った・そのまま送ったが 0 = 放った・吸ったの欄と出る表が 0)。
+    // その時に流した刻みの結果は「頭の帳簿が 0・欄が 0・表が 0」で今の置き場と同じなので、飛ばしても結果は変わらない(D-428)
+    [numthreads(RC_GROUP_THREADS, 1, 1)] void RcPlanTick(uint3 dispatchThreadId : SV_DispatchThreadID) {
+    if (dispatchThreadId.x != 0)
+        return;
+
+    uint64_t pending = LoadWord(HeaderOffset(RC_GPU_CARRY_COUNT + g_external1));
+    FX_UNROLL
+    for (uint32_t band = 0; band < LT_BANDS; ++band) {
+        pending |= LoadWord(HeaderOffset(RC_GPU_LEDGER + (band * RC_GPU_LEDGER_KINDS)));
+        pending |= LoadWord(HeaderOffset(RC_GPU_LEDGER + (band * RC_GPU_LEDGER_KINDS) + 1));
+        pending |= LoadWord(HeaderOffset(RC_GPU_KEPT + band));
+    }
+
+    const bool emitters = g_rcWork.Load(RC_GPU_WORK_EMITTERS) != 0u;
+    const bool run = emitters || pending != 0;
+    StoreWord(HeaderOffset(RC_GPU_RUN), run ? 1 : 0);
+    if (!run)
+        StoreWord(HeaderOffset(RC_GPU_SKIPPED), LoadWord(HeaderOffset(RC_GPU_SKIPPED)) + 1);
+
+    g_rcWork.Store(RC_GPU_WORK_EMITTERS, 0u);
+}
+
+// --- セルごとに 6 面の熱の放つ量(RcFaceEmission。CPU の CollectSources の前半)---
+[numthreads(RC_GROUP_THREADS, 1, 1)] void RcSources(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const RcGpuParams params = LoadParams();
     const GpuRcGrid grid = GridOf(params);
     for (uint32_t cell = dispatchThreadId.x; cell < params.cellCount; cell += g_external2) {
@@ -342,28 +368,27 @@ void WalkAndPass(RcGpuParams params, RcStepConstants constants, RcLevelRay level
         uint64_t heldShort = 0;
         uint64_t heldLong = 0;
         const RcCellLight light = g_rcWork.Load<RcCellLight>(params.workLights + (cell * 24));
+        // 面の向こうに依らない分はセルごとに 1 回(6 面で同じ。面の量 = RcFaceEmissionRelative。T-1161)。
+        // 0 なら(参照と同じ温度・負の側で参照より暖かい物など)向こうのセルも読まない(どの面も 0)
+        const RcBands cellBands = RcCellEmissionRelative(temperature, params.referenceWord, light);
+        const bool emits = (cellBands.shortBand | cellBands.longBand) != 0;
         uint64_t emittedShort = 0;
         uint64_t emittedLong = 0;
-        for (uint32_t face = 0; face < RC_FACES; ++face) {
-            RcBands bands;
-            bands.shortBand = 0;
-            bands.longBand = 0;
-            if (hot) {
-                const int64_t step = (face & 1u) == 0 ? 1 : -1;
-                const uint32_t axis = face >> 1;
-                const int64_t acrossX = x + (axis == 0 ? step : 0);
-                const int64_t acrossY = y + (axis == 1 ? step : 0);
-                const int64_t acrossZ = z + (axis == 2 ? step : 0);
-                RcCellLight across;
-                across.depthShortQ32 = 0;
-                across.depthLongQ32 = 0;
-                across.reflectanceShortQ16 = 0;
-                across.reflectanceLongQ16 = 0;
-                if (grid.Contains(acrossX, acrossY, acrossZ))
-                    across = grid.Light(acrossX, acrossY, acrossZ);
+        for (uint32_t face = 0; face < RC_FACES && emits; ++face) {
+            const int64_t step = (face & 1u) == 0 ? 1 : -1;
+            const uint32_t axis = face >> 1;
+            const int64_t acrossX = x + (axis == 0 ? step : 0);
+            const int64_t acrossY = y + (axis == 1 ? step : 0);
+            const int64_t acrossZ = z + (axis == 2 ? step : 0);
+            RcCellLight across;
+            across.depthShortQ32 = 0;
+            across.depthLongQ32 = 0;
+            across.reflectanceShortQ16 = 0;
+            across.reflectanceLongQ16 = 0;
+            if (grid.Contains(acrossX, acrossY, acrossZ))
+                across = grid.Light(acrossX, acrossY, acrossZ);
 
-                bands = RcFaceEmissionRelative(temperature, params.referenceWord, light, across);
-            }
+            const RcBands bands = RcMaskAcross(cellBands, across);
 
             // 放つ面の量は使った後に RcClearFaces が 0 に戻すので、量のある面だけ書いて列に足す
             const uint32_t sourceFace = (cell * RC_FACES) + face;
@@ -394,8 +419,8 @@ void WalkAndPass(RcGpuParams params, RcStepConstants constants, RcLevelRay level
     }
 }
 
-// --- 前の刻みの持ち越し(g_external1 の表)を放つ面へ足し、表を 0 に戻す(鍵ごとに 1 スレッド。表の全部の鍵を掃く)---
-[numthreads(RC_GROUP_THREADS, 1, 1)] void RcCarryIn(uint3 dispatchThreadId : SV_DispatchThreadID) {
+    // --- 前の刻みの持ち越し(g_external1 の表)を放つ面へ足し、表を 0 に戻す(鍵ごとに 1 スレッド。表の全部の鍵を掃く)---
+    [numthreads(RC_GROUP_THREADS, 1, 1)] void RcCarryIn(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const RcGpuParams params = LoadParams();
     const uint32_t table = CarryTableOf(params, g_external1);
     for (uint32_t keyIndex = dispatchThreadId.x; keyIndex < params.carryKeys; keyIndex += g_external2) {

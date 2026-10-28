@@ -20,9 +20,11 @@
 #include <cstdint>
 #include <expected>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "gpu/com_ptr.h"
+#include "gpu/stage_stamps.h"
 #include "sim/cascade_light.h"
 #include "sim/gpu_multires.h"
 
@@ -68,8 +70,23 @@ namespace bicameral::sim {
         // 初めの持ち越しは表 0(刻み 0 から始める世界)。作業のバッファは既定のヒープへ写し、UAV の状態で返す
         [[nodiscard]] bool RecordUpload(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                                         const CascadeCarry& carry);
-        // 刻み tick: 表 tick & 1 を読み、表 1 − (tick & 1) へ書く
-        void RecordTick(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick);
+        // 刻み tick: 表 tick & 1 を読み、表 1 − (tick & 1) へ書く。
+        // stamps があれば起動ごとの後ろに段の印(firstStage + パイプラインの番号。StageName。測り用・T-1161)
+        void RecordTick(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick,
+                        gpu::StageStamps* stamps = nullptr, uint8_t firstStage = 0);
+
+        // 起動の予告(仮の世界用・T-1229): この刻みに流す物が無ければ、RecordTick と呼ぶ側の段を GPU が飛ばす(CPU は読み戻さない)。
+        // RecordPlan は RcPlanTick で「流す」の印を作って予告のバッファへ写す(刻みごとに RecordTick の前に 1 回。放つセルの印は
+        // 呼ぶ側の写しの段が作業の RC_GPU_WORK_EMITTERS へ書く)。BeginSkipIfIdle〜EndSkipIfIdle の間の起動は、印が 0 なら流れない。
+        // 飛ばすのは「前に流した刻みが何も放たず受けず・入る持ち越しが空・放つセルが無い」時だけなので、結果は流した時と同じ(D-428)
+        void RecordPlan(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick,
+                        gpu::StageStamps* stamps = nullptr, uint8_t firstStage = 0);
+        void BeginSkipIfIdle(ID3D12GraphicsCommandList10* list) const;
+        void EndSkipIfIdle(ID3D12GraphicsCommandList10* list) const;
+
+        // 段の印の番号の数(パイプラインの数)と名前(測りのログ用)
+        static constexpr uint32_t STAGE_COUNT = 12;
+        [[nodiscard]] static std::string_view StageName(uint32_t stage);
 
         [[nodiscard]] ID3D12Resource* Work() const { return m_work.Get(); }
         [[nodiscard]] ID3D12Resource* State() const { return m_state.Get(); }
@@ -94,7 +111,7 @@ namespace bicameral::sim {
         bool RecordUploadWith(ID3D12GraphicsCommandList10* list, GpuMultires* nest, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                               const CascadeCarry& carry);
         void RecordTickWith(ID3D12GraphicsCommandList10* list, GpuMultires* nest, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
-                            uint64_t tick, uint32_t in);
+                            uint64_t tick, uint32_t in, gpu::StageStamps* stamps = nullptr, uint8_t firstStage = 0);
         static std::expected<GpuCascadeLight, std::string> CreateWith(ID3D12Device5* device,
                                                                       ID3D12RootSignature* rootSignature,
                                                                       const CascadeGrid& grid,
@@ -107,6 +124,8 @@ namespace bicameral::sim {
         ComPtr<ID3D12Resource> m_workUpload;  // その写しの元
         ComPtr<ID3D12Resource> m_state;       // u5
         ComPtr<ID3D12Resource> m_readback;
+        ComPtr<ID3D12Resource>
+            m_predicate;  // 起動の予告(uint64 1 語。COMMON で置き、使う間だけ写し先・予告にする。T-1229)
         std::vector<std::byte> m_workBytesImage;  // 作業の中身(初めの持ち越しの前まで)
         reaction::RcGpuParams m_params{};
         uint64_t m_workBytes = 0;

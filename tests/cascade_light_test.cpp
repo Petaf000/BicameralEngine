@@ -9,6 +9,7 @@
 //   8. 費用(記録): 1 スレッドの CPU で、焚き火 1 つ・熱い床 16 × 16・48 × 48(熱いセル 2304)の光線の本数・歩いたセル・ms/刻み
 //   9. 照り返しの持ち越しの大きさ(セーブの形の案のバイト/セル)
 //  10. 誤り: 段の形が範囲の外
+//  11. 放つ面の量をセルごとに 1 回求める形(RcCellEmissionRelative + RcMaskAcross。T-1161)が、前の面ごとの式と全部の組でビット単位で同じ
 // 場面は CascadeGrid(段 0 の写し)を直接作る(1 の写しの道具は木から作る)。double を使うのは試験の参照値と表示だけ。
 #include <algorithm>
 #include <array>
@@ -717,6 +718,102 @@ namespace {
         EXPECT(!CheckCascadeParams({.baseTexels = 4, .levels = 5, .intervalBlocks = 0}).has_value());
     }
 
+    // --- 11. セルごとに 1 回の放つ量(T-1161)---
+
+    // 前の形(面ごとに黒体の量・割合・放射率を求め、向こうの飽和で帯を選ぶ)をそのまま写した定義
+    rx::RcBands FaceEmissionBefore(uint32_t temperatureMk, rx::RcCellLight light, rx::RcCellLight across) {
+        using namespace bicameral::fx;
+        const uint64_t black = rx::RcFaceBlackEmission(temperatureMk);
+        const uint64_t blackShort = FxShiftRightU128(FxMulU64Full(black, rx::RcShortFractionQ32(temperatureMk)), 32);
+        const uint64_t blackLong = black - blackShort;
+        const uint64_t emissivityShort = (rx::RcAbsorptanceQ16(light.depthShortQ32) *
+                                          (uint64_t{rx::LT_ONE_Q16} - uint64_t{light.reflectanceShortQ16})) >>
+                                         16;
+        const uint64_t emissivityLong = (rx::RcAbsorptanceQ16(light.depthLongQ32) *
+                                         (uint64_t{rx::LT_ONE_Q16} - uint64_t{light.reflectanceLongQ16})) >>
+                                        16;
+
+        rx::RcBands bands{};
+        bands.shortBand = across.depthShortQ32 >= rx::RD_DEPTH_SATURATED_Q32
+                              ? 0
+                              : FxShiftRightU128(FxMulU64Full(blackShort, emissivityShort), 16);
+        bands.longBand = across.depthLongQ32 >= rx::RD_DEPTH_SATURATED_Q32
+                             ? 0
+                             : FxShiftRightU128(FxMulU64Full(blackLong, emissivityLong), 16);
+
+        return bands;
+    }
+
+    rx::RcBands FaceRelativeBefore(uint32_t temperatureMk, uint32_t referenceWord, rx::RcCellLight light,
+                                   rx::RcCellLight across) {
+        const uint32_t referenceMk = referenceWord & ~rx::RC_REFERENCE_NEGATIVE;
+        const bool negative = (referenceWord & rx::RC_REFERENCE_NEGATIVE) != 0;
+        if ((referenceMk != 0 || negative) && temperatureMk == referenceMk)
+            return {};
+
+        const rx::RcBands own = FaceEmissionBefore(temperatureMk, light, across);
+        if (referenceMk == 0 && !negative)
+            return own;
+
+        const rx::RcBands reference = FaceEmissionBefore(referenceMk, light, across);
+        rx::RcBands bands{};
+        bands.shortBand = negative ? rx::RcPositivePart(reference.shortBand, own.shortBand)
+                                   : rx::RcPositivePart(own.shortBand, reference.shortBand);
+        bands.longBand = negative ? rx::RcPositivePart(reference.longBand, own.longBand)
+                                  : rx::RcPositivePart(own.longBand, reference.longBand);
+
+        return bands;
+    }
+
+    void TestCellEmission() {
+        constexpr std::array<uint32_t, 12> TEMPERATURES = {0,      1,      15,     250000,  288150,  299999,
+                                                           300000, 300001, 600000, 1200000, 4095000, 5000000};
+        constexpr std::array<uint32_t, 3> REFERENCES = {0, 288150, 300000};
+        constexpr std::array<uint64_t, 5> DEPTHS = {0, 1, uint64_t{1} << 30, uint64_t{3} << 32,
+                                                    rx::RD_DEPTH_SATURATED_Q32};
+        constexpr std::array<uint32_t, 3> REFLECTANCES = {0, 32768, 65535};
+        uint64_t cases = 0;
+        uint64_t mismatches = 0;
+        uint64_t nonzero = 0;
+        for (const uint32_t temperature : TEMPERATURES) {
+            for (const uint32_t reference : REFERENCES) {
+                for (const uint32_t negativeBit : {0u, rx::RC_REFERENCE_NEGATIVE}) {
+                    const uint32_t word = reference | negativeBit;
+                    for (const uint64_t depth : DEPTHS) {
+                        for (const uint32_t reflectance : REFLECTANCES) {
+                            const rx::RcCellLight light{.depthShortQ32 = depth,
+                                                        .depthLongQ32 = DEPTHS[(cases + 1) % DEPTHS.size()],
+                                                        .reflectanceShortQ16 = reflectance,
+                                                        .reflectanceLongQ16 = 65535 - reflectance};
+                            const rx::RcBands cell = rx::RcCellEmissionRelative(temperature, word, light);
+                            for (const uint64_t acrossShort : {uint64_t{0}, rx::RD_DEPTH_SATURATED_Q32}) {
+                                for (const uint64_t acrossLong : {uint64_t{1} << 31, rx::RD_DEPTH_SATURATED_Q32}) {
+                                    const rx::RcCellLight across{.depthShortQ32 = acrossShort,
+                                                                 .depthLongQ32 = acrossLong};
+                                    const rx::RcBands before = FaceRelativeBefore(temperature, word, light, across);
+                                    const rx::RcBands after = rx::RcMaskAcross(cell, across);
+                                    const rx::RcBands face = rx::RcFaceEmissionRelative(temperature, word, light,
+                                                                                        across);
+                                    ++cases;
+                                    nonzero += (before.shortBand | before.longBand) != 0 ? 1 : 0;
+                                    if (before.shortBand != after.shortBand || before.longBand != after.longBand ||
+                                        face.shortBand != after.shortBand || face.longBand != after.longBand)
+                                        ++mismatches;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        std::printf("11. セルごとに 1 回の放つ量: %llu 組(0 でない %llu)・違い %llu\n",
+                    static_cast<unsigned long long>(cases), static_cast<unsigned long long>(nonzero),
+                    static_cast<unsigned long long>(mismatches));
+        EXPECT(mismatches == 0);
+        EXPECT(nonzero > cases / 10);  // 向こうの飽和・同じ温度・0 K で 0 の組が多い(2026-10-27: 4320 組のうち 584)
+    }
+
 }  // namespace
 
 int main() {
@@ -731,6 +828,7 @@ int main() {
     TestParallelPlates();
     RecordCost();
     TestRejects();
+    TestCellEmission();
     if (failureCount != 0) {
         std::printf("%d 件失敗\n", failureCount);
 
