@@ -16,6 +16,7 @@
 #include <utility>
 
 #include "common/multires_activity.hlsli"
+#include "common/multires_layers.hlsli"
 #include "common/multires_table_words.hlsli"
 #include "common/multires_wide.hlsli"
 
@@ -24,6 +25,7 @@
 #include "gpu/resources.h"
 #include "sim/cell_view.h"
 #include "sim/gpu_multires_implicit.h"
+#include "sim/gpu_multires_layers.h"
 
 using namespace bicameral::multires;
 using namespace bicameral::reaction;
@@ -344,6 +346,7 @@ namespace bicameral::sim {
         result.m_constants.indexEntries = capacity.indexEntries;
         result.m_constants.ledgerColumns = capacity.ledgerColumns;
         result.m_wideCells = options.wideCells;
+        result.m_layerCapacity = options.layerPages;
         result.m_constants.overflowBase = result.OverflowBaseWord();
         if (options.wideCells) {
             const auto doubled = static_cast<uint32_t>(result.PageCount() * 2);
@@ -489,6 +492,16 @@ namespace bicameral::sim {
             m_conductWidePipelines[pass] = std::move(*pipeline);
         }
 
+        // 層を合わせる段(層の頁を持つ世界だけ。T-1221)
+        if (options.layerPages > 0) {
+            auto layers = LoadComputePipeline(device, m_rootSignature.Get(), options.pipelineCache,
+                                              "sim/multires_layers.cso");
+            if (!layers)
+                return std::unexpected(layers.error());
+
+            m_layerPipeline = std::move(*layers);
+        }
+
         const gpu::CreationCost computeCost = computeTimer.Elapsed();
         Log(Channel::Gpu, Level::Info, "多重解像度: Compute のパイプラインの作成 {} ms(プロセスの CPU {} ms)",
             computeCost.wallMs, computeCost.processCpuMs);
@@ -581,6 +594,16 @@ namespace bicameral::sim {
         if (!m_activityUpload || !m_activityReadback)
             return std::unexpected("活性の一覧の写しを作れない");
 
+        // --- 層の置き場(層の頁を持つ世界だけ。T-1221)---
+        if (m_layerCapacity > 0) {
+            const uint64_t layerBytes = LayerBytes();
+            m_layerBuffer = gpu::CreateBuffer(device, layerBytes, gpu::BufferKind::UnorderedAccess);
+            m_layerUpload = gpu::CreateBuffer(device, layerBytes, gpu::BufferKind::Upload);
+            m_layerReadback = gpu::CreateBuffer(device, layerBytes, gpu::BufferKind::Readback);
+            if (!m_layerBuffer || !m_layerUpload || !m_layerReadback)
+                return std::unexpected("層の置き場のバッファを作れない");
+        }
+
         const D3D12_GPU_VIRTUAL_ADDRESS graphInput = m_buffers[BufferGraphInput]->GetGPUVirtualAddress();
         m_constants.graphInputLow = static_cast<uint32_t>(graphInput);
         m_constants.graphInputHigh = static_cast<uint32_t>(graphInput >> 32);
@@ -642,6 +665,10 @@ namespace bicameral::sim {
                                 m_capacity.fractions) +
                 MrWideSpaceWords(m_spaceSpecies, m_spaceGroups)) *
                sizeof(uint32_t);
+    }
+
+    uint64_t GpuMultires::LayerBytes() const {
+        return uint64_t{MrLayerStoreWords(m_layerCapacity)} * sizeof(uint32_t);
     }
 
     uint64_t GpuMultires::PageCount() const {
@@ -935,6 +962,19 @@ namespace bicameral::sim {
             return false;
         }
 
+        // --- 層の置き場の像(層の頁を持つ世界だけ。写せなければ何も写さない。T-1221)---
+        std::vector<uint32_t> layerWords;
+        if (m_layerCapacity > 0) {
+            auto image = MakeGpuLayerImage(nest, m_layerCapacity);
+            if (!image) {
+                Log(Channel::Gpu, Level::Error, "層を GPU に写せない: {}", image.error());
+                return false;
+            }
+
+            m_layerUsed = image->used;
+            layerWords = std::move(image->words);
+        }
+
         // --- 世界の端(表の語。前のリストは GPU で終わっている約束なので、前に外した表の語はもう読まれない)---
         m_retiredTables.clear();
         if (!UpdateTableWords(nest.edges))
@@ -970,6 +1010,15 @@ namespace bicameral::sim {
         }
 
         list->ResourceBarrier(BufferCount, barriers.data());
+        if (m_layerCapacity > 0) {
+            if (!WriteUpload(m_layerUpload.Get(), std::as_bytes(std::span(layerWords))))
+                return false;
+
+            list->CopyResource(m_layerBuffer.Get(), m_layerUpload.Get());
+            const D3D12_RESOURCE_BARRIER layerToUav = gpu::Transition(
+                m_layerBuffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST, D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            list->ResourceBarrier(1, &layerToUav);
+        }
 
         // --- 活性の一覧: この刻みの種 = CPU の種、もう 1 本は空 ---
         const std::vector<uint32_t> seeds = SeedSlots(nest);
@@ -1279,6 +1328,7 @@ namespace bicameral::sim {
         }
 
         m_activityCurrent = next;
+        RecordLayerReconcile(list, debugRing);  // 刻みの段がセルを書いた後(T-1221)
 
         return true;
     }
@@ -1293,10 +1343,31 @@ namespace bicameral::sim {
         if (options.conduction) {
             RecordWake(list, debugRing, 0);                              // つつかれたブロックの印を直す
             RecordConduction(list, debugRing, options, ACTIVITY_LISTS);  // 全部を刻むので起こさない
-            return;
+        } else {
+            RecordStepWait(list, debugRing);
         }
 
-        RecordStepWait(list, debugRing);
+        RecordLayerReconcile(list, debugRing);  // 刻みの段がセルを書いた後(T-1221)
+    }
+
+    // 層を合わせる段(T-1221): CPU は刻みの段(反応)の中で 1 セルを 1 回書き、書くたびに層を付け替える(T-1220 の洗い出し)。GPU の刻みも
+    // 1 セル 1 回の書き込みなので、刻みの段の後に 1 回合わせればビット一致する。u4 に層の置き場を結び(外のバッファの口。T-0096)、
+    // 終わったら前の結び先に戻す
+    void GpuMultires::RecordLayerReconcile(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
+        if (m_layerCapacity == 0 || m_layerUsed == 0)
+            return;
+
+        const std::array<D3D12_GPU_VIRTUAL_ADDRESS, 2> savedViews = m_externalViews;
+        const std::array<uint32_t, 4> savedConstants = m_constants.external;
+        m_externalViews[0] = m_layerBuffer->GetGPUVirtualAddress();
+        m_constants.external = {m_layerCapacity, 0, 0, 0};
+        list->SetComputeRootSignature(m_rootSignature.Get());
+        list->SetPipelineState(m_layerPipeline.Get());
+        BindRoot(list, debugRing);
+        list->Dispatch(m_layerUsed * MR_LAYER_GROUPS_PER_PAGE, 1, 1);
+        UavBarrier(list);
+        m_externalViews = savedViews;
+        m_constants.external = savedConstants;
     }
 
     void GpuMultires::RecordWake(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
@@ -1640,6 +1711,8 @@ namespace bicameral::sim {
             gpu::RecordCopyToReadback(list, m_buffers[i].Get(), m_readbacks[i].Get());
 
         gpu::RecordCopyToReadback(list, m_activity[m_activityCurrent].Get(), m_activityReadback.Get());
+        if (m_layerCapacity > 0)
+            gpu::RecordCopyToReadback(list, m_layerBuffer.Get(), m_layerReadback.Get());
 
         if (m_timestampCount > 0) {
             list->ResolveQueryData(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, m_timestampCount,
@@ -1674,6 +1747,15 @@ namespace bicameral::sim {
         std::ranges::copy(freePages, nest.freeBlocks.begin() + worldBlocks);
         std::ranges::copy(index, nest.index.begin());
         ReadOverflow(words, nest);
+
+        // --- 層(層の頁を持つ世界は GPU の層が真実。T-1221)---
+        if (m_layerCapacity > 0) {
+            std::vector<uint32_t> layerWords(MrLayerStoreWords(m_layerCapacity));
+            if (!gpu::ReadBuffer(m_layerReadback.Get(), std::as_writable_bytes(std::span(layerWords))))
+                return false;
+
+            ApplyGpuLayerImage(nest, layerWords, m_layerCapacity);
+        }
 
         return true;
     }
