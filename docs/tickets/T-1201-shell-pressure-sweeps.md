@@ -82,3 +82,4 @@ T-1200 で 1 物の 1 刻みの 3/4 を占めた圧力の赤黒の反復(24 回 
   道 A は回数を減らさない。決まった 24 回は収まっておらず結果を変えていた → 既定を「0 から収まるまで」(仮)。多重格子の粗い試作は効かなかった(次の道 2)。object_shell --quick・gpu_object_shell_flow(--measure も)は通った。
 - 2026-10-26 wt5(2 回目・マージの確かめ): main(c97d803f。T-1164 のマージ)の上に rebase(衝突なし)。release のビルド警告 0・object_shell(--quick)・gpu_object_shell_flow(GPU とのビット一致)が通った。float_check・clang-format 23・archmap --check も通った。
 - 2026-10-26 本体: main へマージ(--no-ff・tests/CMakeLists.txt・shaders/CMakeLists.txt・docs/perf.md は自動で両方残った)・release のビルド(警告 0)・object_shell(--quick)・gpu_object_shell_flow・float_check を main で通した。判断待ちを D-677 で閉じ Done。道 B は T-1202。
+- 2026-10-26 wt5(3 回目・T-1202 から): 次の道 2(多重格子)は T-1202 で CPU リファレンスの形ができた(三線形の戻し + 幅の真ん中へ寄せる V 字。費用 1/3〜1/9・燃え広がりは同じ)。粗い試作 `pressureMultigridCycles` は `pressureMultigrid` に置き換えた。
