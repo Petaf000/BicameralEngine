@@ -198,8 +198,8 @@ namespace bicameral::sim {
             refinePlacement;
 
         // --- 細かくする時のセルの中身(成分・エネルギー)を置かれ方で(T-1176。D-664・D-674。状態に入らない)。物質の表(相の印と
-        //     モル体積)を持てば、寄せるセルの子は置かれ方で配る(EnableRefineCellPlacement)。空なら今と同じ SAME。
-        //     GPU の RefineLevel はまだ SAME なので、GPU と比べる世界では空のまま(T-1188)---
+        //     モル体積・粒の詰まり)を持てば、寄せるセルの子は置かれ方で配る(EnableRefineCellPlacement)。空なら SAME。
+        //     GPU の RefineLevel も同じ(RecordUpload がこれを見て決める。T-1188)。世界の箱(MakeLabBoxNest)は既定で持つ(D-664)---
         struct RefineCells {
             std::vector<reaction::RxSpecies> species;
         } refineCells;
