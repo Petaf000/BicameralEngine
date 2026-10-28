@@ -98,7 +98,8 @@ namespace bicameral::sim {
 
         // CPU の木(状態・索引・取り合いの印)を GPU へ写す。大きさは Create と同じでなければならない。世界の端(nest.edges)が前に写したものと
         // 違えば表の語(t2)を作り直す(前の表の語は次の RecordUpload まで持つ。写しの元を毎回書き換えるのと同じく、前のリストが GPU で
-        // 終わってから呼ぶ約束)
+        // 終わってから呼ぶ約束)。nest.refineCells が物質の表を持てば(EnableRefineCellPlacement)、細かくする段は寄せるセルの中身を
+        // 置かれ方で配る(CPU の ProcessRequests と同じ。T-1188。GPU は自分の表 t0 の相の印を読む)
         [[nodiscard]] bool RecordUpload(ID3D12GraphicsCommandList10* list, const MultiresNest& nest);
 
         // --- 世界の木(multires_nest.h の SubmitRequests・ProcessRequests と同じ結果)---
@@ -229,7 +230,7 @@ namespace bicameral::sim {
             uint32_t ledgerColumns = 0;
             uint32_t graphInputLow = 0;
             uint32_t graphInputHigh = 0;
-            uint32_t graphEntries = 0;  // 下位 16bit = RefineNode、上位 16bit = CoarsenRequestNode
+            uint32_t graphEntries = 0;  // 下位 16bit = RefineNode、16〜30 = CoarsenRequestNode、31 = GRAPH_ENTRY_PLACE
 
             // --- 刻み(T-0107)---
             uint32_t stepFlags = 0;  // STEP_FLAG_*(multires_bindings.hlsli の MR_STEP_*)
@@ -240,6 +241,9 @@ namespace bicameral::sim {
             // --- 成分の二段(T-0176。溢れを使う変種だけが読む)---
             uint32_t overflowBase = 0;  // u6 の溢れの領域の始まり(語)
         };
+
+        // graphEntries の一番上のビット: 細かくする段が置かれ方で配る(multires_bindings.hlsli の MR_GRAPH_ENTRY_PLACE。T-1188)
+        static constexpr uint32_t GRAPH_ENTRY_PLACE = 0x80000000u;
 
         // バッファの並び(u0〜u3、u6〜u12。multires_bindings.hlsli)
         enum Buffer : uint8_t {

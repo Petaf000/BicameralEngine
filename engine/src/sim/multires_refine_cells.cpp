@@ -7,7 +7,8 @@
 // エネルギーは子の温度が親と揃うように熱(µJ)を子の熱容量の重みで配る(D-674)。
 // 傾きは同じ親のブロックの中の隣の列から(SfSurfaceSlopeQ16)。ブロックの外・子に覆われたセルは無いと読む(1 本目の仮。チケットの設計の詰め 6):
 //   横が無い → 傾き 0・下が無い → 詰まり切る・上が無い → 空。1 刻みに 1 つの親は 1 つの要求だけが触るので、読む所は順番に依存しない。
-// GPU(shaders/sim/multires_graph.hlsl の RefineLevel)はまだ SAME(T-1188)。それまで MultiresNest::refineCells は既定で空(使わない)。
+// GPU は shaders/sim/multires_refine_place.hlsli(multires_graph.hlsl の RefineLevel が呼ぶ。T-1188。tests/gpu_tree_refine_placement_test.cpp)。
+// 世界の箱(MakeLabBoxNest)は既定で使う(D-664)。MakeMultiresNest だけで作る木は使わない(SAME)。
 // 成分ごとの層(T-1220。ADR-0481 の 5 の 4・ADR-0489): 層を持つ成分は「層 = 沈む側(凝縮相)」と「残り = 物質の置かれ方」の 2 つの物質に分けて配り、
 // 子の層 = 子へ配った層の分(子の層の和 = 親の層 × 8・子の量の和 = 親 × 8)。層を使う世界(EnableCellLayers)では粒の残りは舞う粒(空きに同じ濃さ)。
 // 層の無いセル(層を使わない世界)は前と同じ 1 つの物質のまま = ビット単位で同じ。
@@ -28,7 +29,7 @@ namespace bicameral::sim {
 
     namespace {
 
-        // --- 物質の表 → 置かれ方の物質(相の印・モル体積。粒の詰まりは表に値が無いので 0 = 100 %。仮・Q173)---
+        // --- 物質の表 → 置かれ方の物質(相の印・モル体積・粒の詰まり〔印のビット 8〜14。D-679。0 は 100 %〕)---
         PlaceMaterial MaterialOf(const RxSpecies& species) {
             PlaceMaterial material;
             material.kind = SF_SETTLE_GAS;
@@ -40,6 +41,8 @@ namespace bicameral::sim {
                 material.kind = SF_SETTLE_LIQUID;
 
             material.molarVolumeMm3PerMol = species.molarVolume;
+            if (material.kind == SF_SETTLE_GRAIN)
+                material.packedFractionPct = RxSpeciesPackingPercent(species.flags);
 
             return material;
         }

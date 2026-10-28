@@ -126,7 +126,13 @@ namespace bicameral::sim {
             if (entry.phase == SpeciesPhase::Liquid)
                 return RX_SPECIES_LIQUID;
 
-            return entry.transport.solidMotion == SolidMotion::Loose ? RX_SPECIES_GRAIN : RX_SPECIES_ANCHORED;
+            if (entry.transport.solidMotion != SolidMotion::Loose)
+                return RX_SPECIES_ANCHORED;
+
+            // 粒の詰まり(D-679。書かなければ既定 60 % で、WarnSolidMotion が知らせる)
+            const uint32_t packing = entry.transport.packingPercent.value_or(DEFAULT_PACKING_PERCENT);
+
+            return RX_SPECIES_GRAIN | (packing << RX_SPECIES_PACKING_SHIFT);
         }
 
         std::expected<void, std::string> BakeSpecies(const SpeciesDefinition& definition, const NameIndex& elements,
@@ -198,6 +204,7 @@ namespace bicameral::sim {
                 {transport.suctionPascals.has_value(), "suction_pa", SpeciesPhase::Solid},
                 {transport.solidMotion.has_value(), "solid_motion", SpeciesPhase::Solid},             // T-0819
                 {transport.reposeAngleDegrees.has_value(), "repose_angle_deg", SpeciesPhase::Solid},  // T-0819
+                {transport.packingPercent.has_value(), "packing_percent", SpeciesPhase::Solid},       // D-679
             };
             for (const PhaseField& field : fields) {
                 if (field.written && entry.phase != field.phase && !(field.gasToo && entry.phase == SpeciesPhase::Gas))
@@ -218,7 +225,8 @@ namespace bicameral::sim {
             return {};
         }
 
-        // 固体の動き方の警告(T-0819・ADR-0359 §1。表は当たる): 据わる固体の安息角は効かない・ばらける固体の安息角の書き忘れは既定の角
+        // 固体の動き方の警告(T-0819・ADR-0359 §1・D-679。表は当たる): 据わる固体の安息角・粒の詰まりは効かない・
+        // ばらける固体の安息角・粒の詰まりの書き忘れは既定の値
         void WarnSolidMotion(const SpeciesDefinition& entry, std::vector<std::string>& warnings) {
             const SpeciesTransport& transport = entry.transport;
             const bool loose = transport.solidMotion == SolidMotion::Loose;
@@ -231,6 +239,16 @@ namespace bicameral::sim {
                 warnings.push_back(
                     std::format("物質 {}: ばらける固体に安息角(repose_angle_deg)が無い({} 度として崩れる)", entry.name,
                                 DEFAULT_REPOSE_ANGLE_DEGREES));
+
+            if (!loose && transport.packingPercent)
+                warnings.push_back(std::format(
+                    "物質 {}: packing_percent は solid_motion = \"loose\" の固体だけに効く(この固体は動かない)",
+                    entry.name));
+
+            if (loose && !transport.packingPercent)
+                warnings.push_back(
+                    std::format("物質 {}: ばらける固体に粒の詰まり(packing_percent)が無い({} % として積もる)",
+                                entry.name, DEFAULT_PACKING_PERCENT));
         }
 
         // 光の値の書き忘れの警告(T-0942・D-610・ADR-0395。表は当たる。頭は LIGHT_WARNING_PREFIX):

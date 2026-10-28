@@ -975,6 +975,10 @@ namespace bicameral::sim {
             layerWords = std::move(image->words);
         }
 
+        // --- 細かくする段の置かれ方(T-1188): CPU の木が物質の表を持つ世界(EnableRefineCellPlacement)だけ。溢れを使う世界は SAME ---
+        const bool place = !nest.refineCells.species.empty() && !nest.wideCells;
+        m_constants.graphEntries = (m_constants.graphEntries & ~GRAPH_ENTRY_PLACE) | (place ? GRAPH_ENTRY_PLACE : 0u);
+
         // --- 世界の端(表の語。前のリストは GPU で終わっている約束なので、前に外した表の語はもう読まれない)---
         m_retiredTables.clear();
         if (!UpdateTableWords(nest.edges))

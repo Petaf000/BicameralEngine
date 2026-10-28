@@ -14,6 +14,8 @@
 #include "sim/multires_bindings.hlsli"
 #ifdef MR_WIDE_CELLS
 #include "sim/multires_wide_access.hlsli"
+#else
+#include "sim/multires_refine_place.hlsli"
 #endif
 
 // 再帰の深さの上限(要求の鎖は MR_MAX_CHAIN_LEVELS 段まで)
@@ -174,6 +176,13 @@ void RefineLevel(MrRefineRecord record, uint32_t t) {
 
     if (childFraction != MR_NO_FRACTION)
         g_fractions[FractionAddress(childFraction, t)] = LoadFraction(parent.fraction, parentCell);
+
+#ifndef MR_WIDE_CELLS
+    // --- 寄せるセルの中身は置かれ方で(T-1188・T-1176。CPU の PlaceRefineOctantCells。端数は上で写した SAME のまま。
+    //     グループで同じ条件なので、中のバリアは全部のスレッドが通る)---
+    if (fromRequest && real && !uniformChild && (g_graphEntries & MR_GRAPH_ENTRY_PLACE) != 0u)
+        PlaceRefineChildren(parent, record.parentSlot, octant, childPage, t);
+#endif
 
 #ifdef MR_WIDE_CELLS
     // --- 溢れ: 子の頁へ写す(親を覆う前。一様な子は頁を持たない。一様な親は溢れを持たない)。

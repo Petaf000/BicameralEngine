@@ -134,7 +134,7 @@ namespace bicameral::script {
             return squareNanometers;
         }
 
-        // 固体が動くか(solid_motion = "fixed" | "loose")と安息角(repose_angle_deg。0〜90 の整数)。T-0819・ADR-0359 §1。
+        // 固体が動くか(solid_motion = "fixed" | "loose")と安息角(repose_angle_deg。0〜90 の整数)・粒の詰まり(packing_percent。D-679)。T-0819・ADR-0359 §1。
         // どちらも任意(書かない値は無し = 今と同じ)。固体だけに書けるか・書き忘れはベイクが確かめる
         std::expected<void, std::string> ReadSolidMotion(const ScriptValue& value, const std::string& path,
                                                          sim::SpeciesTransport& transport) {
@@ -151,6 +151,16 @@ namespace bicameral::script {
                     return std::unexpected(angle.error());
 
                 transport.reposeAngleDegrees = static_cast<uint32_t>(*angle);
+            }
+
+            // 粒の詰まり(packing_percent。1〜100 の整数。D-679)
+            if (const ScriptValue* declared = value.Find("packing_percent")) {
+                const auto packing = ReadInteger(*declared, path + ".packing_percent", sim::PACKING_PERCENT_MIN,
+                                                 sim::PACKING_PERCENT_MAX);
+                if (!packing)
+                    return std::unexpected(packing.error());
+
+                transport.packingPercent = static_cast<uint32_t>(*packing);
             }
 
             return {};
@@ -259,7 +269,8 @@ namespace bicameral::script {
                                                           "permeability_um2",
                                                           "suction_pa",
                                                           "solid_motion",
-                                                          "repose_angle_deg"};
+                                                          "repose_angle_deg",
+                                                          "packing_percent"};
             if (auto record = CheckRecord(value, FIELDS, path); !record)
                 return std::unexpected(record.error());
 

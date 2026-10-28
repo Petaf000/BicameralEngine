@@ -71,6 +71,14 @@ FX_CONST uint32_t RX_SPECIES_GAS = 1u;
 FX_CONST uint32_t RX_SPECIES_LIQUID = 2u;    // 液体(phase = "liquid")
 FX_CONST uint32_t RX_SPECIES_GRAIN = 4u;     // ばらける固体(solid_motion = "loose")
 FX_CONST uint32_t RX_SPECIES_ANCHORED = 8u;  // 据わる固体(書かない固体)
+// ばらける固体の粒の詰まり(%。積もった時に粒が占める体積の割合。D-679)。ビット 8〜14。ベイクは書いた値か既定 60 を書く。
+// 0 は 100 % と読む(印を手で作る試験の表。sim::PlaceMaterial::packedFractionPct と同じ)
+FX_CONST uint32_t RX_SPECIES_PACKING_SHIFT = 8u;
+FX_CONST uint32_t RX_SPECIES_PACKING_MASK = 127u;
+
+FX_FN uint32_t RxSpeciesPackingPercent(uint32_t flags) {
+    return (flags >> RX_SPECIES_PACKING_SHIFT) & RX_SPECIES_PACKING_MASK;
+}
 
 // 望む進行度の上限。望む量は保存量ではないので飽和させてよく、この後で反応物の量に縮める
 FX_CONST uint64_t RX_EXTENT_SATURATION = FX_U64(0x40000000u, 0u);

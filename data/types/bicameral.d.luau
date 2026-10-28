@@ -49,6 +49,7 @@ export type Species = {
     -- 固体が動くか(T-0819・ADR-0359。名前は仮)。固体だけに書ける(気体・液体に書くとベイクが誤りにする)
     solid_motion: string?, -- "fixed"(据わる。省ける = これ)・"loose"(ばらける。崩れる・沈む・浮く)。"loose" には密度が要る(無ければ誤り)
     repose_angle_deg: number?, -- ばらける固体の安息角(度。0〜90 の整数。砂 34。90 = 横には崩れない)。"loose" に書かないと 35 として警告・"fixed" に書くと効かないと警告
+    packing_percent: number?, -- ばらける固体の粒の詰まり(%。積もった時に粒が占める体積の割合。1〜100 の整数。乾いた砂 60)。"loose" に書かないと 60 として警告・"fixed" に書くと効かないと警告
 }
 
 export type ReactionRate = {

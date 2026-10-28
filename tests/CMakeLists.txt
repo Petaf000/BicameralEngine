@@ -874,7 +874,7 @@ target_link_libraries(gpu_placement_refine_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_placement_refine gpu_placement_refine_test gpu --queue compute)
 bicameral_add_gpu_test_case(gpu_placement_refine_warp gpu_placement_refine_test warp --warp --queue compute)
 
-bicameral_add_gpu_test(gpu_phase_layer_test)  # 凝縮相と気体が混ざるセルの 2 つのエネルギーのセルの段の GPU と CPU のビット一致(T-1211・ADR-0486)
+bicameral_add_gpu_test(gpu_phase_layer_test gpu_tree_refine_placement_test)  # 凝縮相と気体が混ざるセルの 2 つのエネルギーのセルの段の GPU と CPU のビット一致(T-1211・ADR-0486)
 target_link_libraries(gpu_phase_layer_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_phase_layer gpu_phase_layer_test gpu --queue compute)
 bicameral_add_gpu_test_case(gpu_phase_layer_warp gpu_phase_layer_test warp --warp --queue compute)
@@ -1281,6 +1281,6 @@ foreach(_name IN ITEMS
     gpu_conduct_bench gpu_implicit_box_bench gpu_place_bench blank_world_test gpu_probe_blank_test gpu_probe_gas_test
     gpu_probe_liquid_test world_layout_test play_metric_test
     gpu_play_metric_test gpu_radiation_cost_test environment_package_test multires_graded_test placement_refine_test
-    tree_refine_placement_test gpu_phase_layer_test)
+    tree_refine_placement_test gpu_phase_layer_test gpu_tree_refine_placement_test)
   target_link_libraries(${_name} PRIVATE bicameral_test_reaction_table)
 endforeach()
