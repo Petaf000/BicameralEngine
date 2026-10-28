@@ -34,6 +34,11 @@
 //     3 つの節(C・自分・相手)の項 ½ (b/9) (3 × 2Δn'_k − 側 σ_k (d_L + d_U))²(面のブロックへは C と自分の面・C と相手の面・L と U の面に分けて入れる)
 //   曲げは ③ のまま(回りは L・U の伸びの対と細かい面の曲げで運ぶ = 全部細かい塊と同じ分け方)。系の全体は正(どの項も 2 乗・負の項は平均の 2 乗の分け方)。
 //   対の中の面と両方の面の残りの硬さの小さい方 β の分だけ対として読み、1 − β は ③(割れて L と U が離れると面ごと)
+// 対の曲げ(T-1207・ADR-0501。FacePair): 曲げの梁では回りが面に沿って変わる(上の面なら ∂角/∂x = 曲率)。L・U の回りは C の回りから
+//   ±曲率 × s/2 ずれるが、剛体の C はそれを表せないので、面ごとの曲げ ½ (b/3) p_k²(p_k = 2φ_k − φ_C)が L・U に逆向きの偽の回りを出した
+//   (全部細かい塊では面の両側のセルの回りは同じで 0。上の段だけ細かい片持ち梁の中立軸の上の面で 7〜10 %)。
+//   直し(ずれと同じ芯 = 対の中の形の違いは C に掛けない): −½ K_曲げ (p_L − p_U)²(K_曲げ = 直列の硬さ。等しければ b/6 → 対で ½ (2b/3) p̄²)。
+//   面の縁の力の曲げは、負の項の力を曲げの項と同じ両端の割合(C と F の勾配)で足して読む(面の点の回りの内挿は同じ形)
 #include "sim/support_law.h"
 
 #include <algorithm>
@@ -452,6 +457,7 @@ namespace bicameral::sim {
 
         // ずれ: 面の点のばね ½ 4b (Δt + ε (φ_C + φ_F))²(FaceLever は硬さだけ ② の 16b/9)・② ½ (b/9) (4 Δt + ε (3 φ_C + 6 φ_F))²
         const bool atFace = m_options.mixedBeam == MixedBeam::FacePair ||
+                            m_options.mixedBeam == MixedBeam::FacePairShear ||
                             m_options.mixedBeam == MixedBeam::FaceSpring || m_options.mixedBeam == MixedBeam::FaceLever;
         MixedTerm shear = term(!atFace ? b / 9 : m_options.mixedBeam == MixedBeam::FaceLever ? 16 * b / 9 : 4 * b);
         const int64_t slideScale = atFace ? 1 : 4;
@@ -467,13 +473,16 @@ namespace bicameral::sim {
         gradientOf(bend, false)[SUPPORT_TURN] = 2 * fineSide;
         m_mixedTerms.push_back(bend);
 
-        m_mixedGroups.push_back({.beta = beta, .axialPair = axialPair, .shearPair = Scaled(shear.coefficient, beta)});
+        // 対の曲げの差を引くのは FacePair だけ(FacePairShear は 0 = T-1207 の前とビット一致)
+        const uint64_t bendPair = m_options.mixedBeam == MixedBeam::FacePair ? Scaled(bend.coefficient, beta) : 0;
+        m_mixedGroups.push_back(
+            {.beta = beta, .axialPair = axialPair, .shearPair = Scaled(shear.coefficient, beta), .bendPair = bendPair});
     }
 
     // 対の面として読む割合 β(Q16。冒頭): FacePair で、対の相手の細かいセルがあれば、対の中の面と 2 つの違う大きさの面の残りの硬さの
     // 小さい方。(faceX, faceUp) は違う大きさの面の鍵(m_mixedFaceAt)。対の相手は横の座標の奇偶を入れ替えた所
     uint32_t SupportLaw::PairBeta(uint32_t fine, uint32_t axis, uint32_t faceX, uint32_t faceUp) const {
-        if (m_options.mixedBeam != MixedBeam::FacePair)
+        if (m_options.mixedBeam != MixedBeam::FacePair && m_options.mixedBeam != MixedBeam::FacePairShear)
             return 0;
 
         const auto [fx, fup] = m_cells[fine];
@@ -546,6 +555,20 @@ namespace bicameral::sim {
                                .coefficient = SeriesCoefficient(groupLower.shearPair, groupUpper.shearPair),
                                .gradientLow = negated,
                                .gradientHigh = shearFine,
+                               .intact = groupLower.beta,
+                               .negative = true});
+
+        // 曲げの差: −½ K_曲げ (p_L − p_U)²(p = 細かい側の曲げの勾配の分。C の分は消える。冒頭・T-1207)
+        const Gradient bendFine = gradientOf(m_mixedTerms[lower + 2], fineLower);
+        Gradient bendNegated{};
+        for (uint32_t c = 0; c < SUPPORT_COMPONENTS; ++c)
+            bendNegated[c] = -bendFine[c];
+
+        m_pairTerms.push_back({.low = fineLower,
+                               .high = fineUpper,
+                               .coefficient = SeriesCoefficient(groupLower.bendPair, groupUpper.bendPair),
+                               .gradientLow = bendFine,
+                               .gradientHigh = bendNegated,
                                .intact = groupLower.beta,
                                .negative = true});
 
@@ -659,8 +682,10 @@ namespace bicameral::sim {
 
         for (const MixedPair& pair : m_mixedPairs) {
             const MixedTerm& term = m_pairTerms[pair.pairTerm];
+            const MixedTerm& bendTerm = m_pairTerms[pair.pairTerm + 1];
             EquilibriumBlockFace pairFace{.low = term.low, .high = term.high};
             AddTerm(pairFace, term.coefficient, term.gradientLow, term.gradientHigh, true);
+            AddTerm(pairFace, bendTerm.coefficient, bendTerm.gradientLow, bendTerm.gradientHigh, true);
             for (uint32_t i = 0; i < 2; ++i) {
                 const TripleTerm& triple = m_tripleTerms[pair.firstTriple + i];
                 EquilibriumBlockFace& own = faces[mixedFirst + (i == 0 ? pair.lower : pair.upper) / MIXED_GROUP_TERMS];
@@ -1120,6 +1145,16 @@ namespace bicameral::sim {
             forces.axialMn += toFace * force * gradient[along];
             forces.shearMn += toFace * force * gradient[across];
             forces.energyPj -= SpringWork(force, TermProjection(term)) / 2;  // 負の項のエネルギーを 2 つの面で半分ずつ
+
+            // 曲げの差の負の項(T-1207): 自分の細かいセルの回りの力を曲げの項の力に直し(L は −p_U を含む勾配の向きが逆)、
+            // 曲げの項と同じ両端の勾配で回りへ(面の点の回り = 曲げの項 + この分)
+            const MixedTerm& bendTerm = m_pairTerms[pair.pairTerm + 1];
+            const int64_t bendForce = TermForce(bendTerm);
+            const int64_t bendShare = group.upper ? -bendForce : bendForce;
+            const MixedTerm& faceBend = m_mixedTerms[first + 2];
+            turnLow += bendShare * faceBend.gradientLow[SUPPORT_TURN];
+            turnHigh += bendShare * faceBend.gradientHigh[SUPPORT_TURN];
+            forces.energyPj -= SpringWork(bendForce, TermProjection(bendTerm)) / 2;
 
             // 伸びの 3 つの節の項(nodes の 0 = 粗いセル・1 = 自分の細かいセル)
             const TripleTerm& triple = m_tripleTerms[pair.firstTriple + (group.upper ? 1 : 0)];

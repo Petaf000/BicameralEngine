@@ -3,7 +3,7 @@
 // 真ん中・洞窟の天井(幅 24 × 高さ 10 m・8 × 4 m の空洞)を 0.25 m に分け、全部 0.25 m の答え(同じ場面を 0.25 m のセルで)と比べる。
 // 比べ方: 0.5 m の格子のセルごとに、混ざった答え(分けていないセルはその値・分けたセルは細かい 4 つの平均)と全部 0.25 m の答えの
 // 細かい 4 つの平均。探る列(片持ちの先・真ん中・天井の真ん中)のたわみの比(±5 % が T-1120 の合格)と、全部のセルの最大の差 ÷ 最大の変位。
-// 違う大きさの面の形 5 つ(④ 対の面 = 既定・③ 面の点のばね・③' 面の点で梁のずれの硬さ・② 細かい側の面ごとの梁・① 中心どうし)と、全部 0.5 m の答えも並べる。
+// 違う大きさの面の形 6 つ(④ 対の面 = 既定・④' 対のずれだけ〔曲げは面ごと。T-1207 の前〕・③ 面の点のばね・③' 面の点で梁のずれの硬さ・② 細かい側の面ごとの梁・① 中心どうし)と、全部 0.5 m の答えも並べる。
 // 面の縁の力(T-1191): 細かいセルが絡む面(違う大きさの面・細かい面)の縁の力と、全部 0.25 m の答えの同じ面の差 ÷ 全部 0.25 m の縁の力の最大
 // (混ざる場面の板の厚さは 0.5 m なので ÷ 2 で比べる)。
 // 試験が落ちるのは帳簿(毎刻み Σ セルの上の力 = 固定した面の力 − 重さ)・決定性(2 回の実行のハッシュ)・符号・④ の ±5 %・④ の縁の力の差 ≤ 5 %(固定した面から 0.5 m のセル 1 つ以内の面は別に出す。T-1206 で固定した面の式を面の点の形にそろえてからは、それも 5 % に入れる)。
@@ -164,12 +164,13 @@ namespace {
         std::string name;
         sim::SupportScene scene;  // 0.5 m(fine の印つき)
         uint32_t probe = 0;       // 探る列(0.5 m の格子)
-        bool edgeCheck = true;    // 縁の力の差 ≤ 5 % を確かめる(上の段だけの移り目は T-1207 まで記録だけ)
+        bool edgeCheck = true;    // 縁の力の差 ≤ 5 % を確かめる(上の段だけの移り目も T-1207 から確かめる)
     };
 
     const char* BeamName(sim::MixedBeam beam) {
         switch (beam) {
             case sim::MixedBeam::FacePair: return "④ 対の面";
+            case sim::MixedBeam::FacePairShear: return "④' 対のずれだけ";
             case sim::MixedBeam::FaceSpring: return "③ 面の点のばね";
             case sim::MixedBeam::FaceLever: return "③' 面の点・梁のずれの硬さ";
             case sim::MixedBeam::FaceOffset: return "② 面ごとの梁";
@@ -296,8 +297,8 @@ namespace {
                             [&](uint32_t x, uint32_t up, uint32_t c) { return CoarseCellValue(coarse, x, up, c); }));
 
         for (const sim::MixedBeam beam :
-             {sim::MixedBeam::FacePair, sim::MixedBeam::FaceSpring, sim::MixedBeam::FaceLever,
-              sim::MixedBeam::FaceOffset, sim::MixedBeam::CenterLine}) {
+             {sim::MixedBeam::FacePair, sim::MixedBeam::FacePairShear, sim::MixedBeam::FaceSpring,
+              sim::MixedBeam::FaceLever, sim::MixedBeam::FaceOffset, sim::MixedBeam::CenterLine}) {
             const auto read = [](const sim::SupportLaw& law, uint32_t x, uint32_t up) {
                 return CoarseCellValue(law, x, up, sim::SUPPORT_UP);
             };
@@ -348,7 +349,7 @@ namespace {
             {"片持ち梁 8 × 1 m の根の半分を 0.25 m", Marked(cantilever, 0, 8, 0, 2), 15},
             {"片持ち梁 8 × 1 m の先の半分を 0.25 m", Marked(cantilever, 8, 16, 0, 2), 15},
             {"片持ち梁 8 × 1 m の真ん中 4 m を 0.25 m", Marked(cantilever, 4, 12, 0, 2), 15},
-            {"片持ち梁 8 × 1 m の上の段だけ 0.25 m", Marked(cantilever, 0, 16, 1, 2), 15, false},
+            {"片持ち梁 8 × 1 m の上の段だけ 0.25 m", Marked(cantilever, 0, 16, 1, 2), 15},
             {"両端を固定した梁 8 × 1 m の真ん中 3 m を 0.25 m", Marked(clamped, 5, 11, 0, 2), 8},
             {"洞窟の天井(と空洞の縁)を 0.25 m", Marked(cave, 14, 34, 6, 20), 24},
         };
