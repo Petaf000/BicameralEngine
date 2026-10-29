@@ -554,6 +554,19 @@ namespace bicameral::sim {
             {.beta = beta, .axialPair = axialPair, .shearPair = Scaled(shear.coefficient, beta), .bendPair = bendPair});
     }
 
+    // 対のずれの負の項の係数(T-1261): 直列の硬さ K から、粗いセルの材料が対の横の伸びに持つ硬さ K_C との直列の分を残す。
+    // 対はずれの向き(shearFine の横の成分)に並ぶので、K_C はその向きの硬さの単位 b で数える
+    uint64_t SupportLaw::PairShearCoefficient(uint64_t series,
+                                              const std::array<int64_t, SUPPORT_COMPONENTS>& shearFine) const {
+        if (m_options.mixedPairMaterial == MixedPairMaterial::None)
+            return series;
+
+        const uint64_t b = shearFine[SUPPORT_X] != 0 ? m_bondX : m_bondUp;
+        const uint64_t material = (m_options.mixedPairMaterial == MixedPairMaterial::Section ? 12 : 6) * b;
+
+        return series - SeriesCoefficient(series, material);
+    }
+
     // 対の面として読む割合 β(Q16。冒頭): FacePair で、対の相手の細かいセルがあれば、対の中の面と 2 つの違う大きさの面の残りの硬さの
     // 小さい方。(faceX, faceUp) は違う大きさの面の鍵(m_mixedFaceAt)。対の相手は横の座標の奇偶を入れ替えた所
     uint32_t SupportLaw::PairBeta(uint32_t fine, uint32_t axis, uint32_t faceX, uint32_t faceUp) const {
@@ -627,7 +640,8 @@ namespace bicameral::sim {
 
         m_pairTerms.push_back({.low = fineLower,
                                .high = fineUpper,
-                               .coefficient = SeriesCoefficient(groupLower.shearPair, groupUpper.shearPair),
+                               .coefficient = PairShearCoefficient(
+                                   SeriesCoefficient(groupLower.shearPair, groupUpper.shearPair), shearFine),
                                .gradientLow = negated,
                                .gradientHigh = shearFine,
                                .intact = groupLower.beta,

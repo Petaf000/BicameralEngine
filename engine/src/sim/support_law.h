@@ -64,6 +64,15 @@ namespace bicameral::sim {
         FacePairShear,  // ④' 対のずれだけ(曲げは面ごと。T-1191〜T-1206 の既定・T-1207 の比べ用)
     };
 
+    // 違う大きさの面の対の負の項に残す粗いセルの材料の硬さ(T-1261 の研究。FacePair・FacePairShear)。対の 2 つの細かいセルの横の伸び
+    // (粗いセルが剛体で表せない歪み)を、対の負の項で全部外す(None = 今まで)のではなく、粗いセルの材料がその伸びに持つ硬さ K_C との
+    // 直列の分だけ残す: 負の項の係数 = K − K K_C ÷ (K + K_C)。K_C = E × 断面 ÷ 対の中心の間(対の並ぶ向きの硬さの単位 b で)
+    enum class MixedPairMaterial : uint8_t {
+        None,         // 今まで(T-1191・ADR-0485。ビット一致)
+        Section,      // 形 A: 粗いセルの断面全部(2s)÷ s = 12 b
+        HalfSection,  // 形 B: 面の側の半分(s)÷ s = 6 b(細かい面の伸びの硬さと同じ)
+    };
+
     // 違う大きさのセルが絡む段の斜めの棒の硬さ(T-1133・ADR-0504)。棒は段の角を挟む 2 つのセル(違う大きさ)の間に 1 本・向きは 45°。
     // 棒の端を粗いセルの中心に置く(①)か、粗いセルの角に近い細かい場所(剛体の動き)に置く(②)かは、その場所が中心から棒の向きに
     // ずれるだけなので回りは伸びに入らず、違うのは長さ = 硬さだけ(E A ÷ L。A = 一番細かいセルの棒の断面)
@@ -137,6 +146,7 @@ namespace bicameral::sim {
 
         // 違う大きさのセルの間の梁(T-1120)
         MixedBeam mixedBeam = MixedBeam::FacePair;
+        MixedPairMaterial mixedPairMaterial = MixedPairMaterial::None;  // 対の負の項に残す粗いセルの硬さ(T-1261)
 
         // 変位と回り(温めた始まり)を C-1 の温めた始まりの欄に置く(T-0922。値の数 ≥ 成分の数。節 = セル (x, 上, 0)・レベル 0)。
         // Coupled は blocks.warmStart、Lagged は成分 c を値 component + c に。既定は置かない(法則の控えだけ)
@@ -299,6 +309,7 @@ namespace bicameral::sim {
         uint32_t PairBeta(uint32_t fine, uint32_t axis, uint32_t faceX, uint32_t faceUp) const;
         void BuildMixedPairs();
         void AddMixedPair(uint32_t lower, uint32_t upper);
+        uint64_t PairShearCoefficient(uint64_t series, const std::array<int64_t, SUPPORT_COMPONENTS>& shearFine) const;
         void BuildMixedBlocks(std::vector<EquilibriumBlockFace>& faces) const;
         void AddTriple(EquilibriumBlockFace& own, EquilibriumBlockFace& other, EquilibriumBlockFace& pairFace,
                        const TripleTerm& triple) const;
