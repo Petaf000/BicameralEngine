@@ -164,6 +164,7 @@ bicameral_add_shader(sim/multires_step.hlsl PROFILE cs_6_8 ENTRY WideDeferredPas
 bicameral_add_shader(sim/multires_step.hlsl PROFILE cs_6_8 ENTRY WideBigPass NAME multires_step_wide_big DEFINES MR_WIDE_CELLS=1 MR_WIDE_BIG_PASS=1 RX_CELL_ACCESSORS=1)  # 速い形に入らないセルを作業場の形で刻む(T-0362)
 bicameral_add_shader(sim/multires_graph.hlsl PROFILE lib_6_8)  # 多重解像度の細かくする・粗くする・影の引き戻し(T-0017・T-0018)
 bicameral_add_shader(sim/multires_graph.hlsl PROFILE lib_6_8 NAME multires_graph_wide DEFINES MR_WIDE_CELLS=1)  # 溢れを使う世界の細かくする(子の頁へ溢れを写す。T-0237)
+bicameral_add_shader(sim/multires_graph.hlsl PROFILE lib_6_8 NAME multires_graph_place DEFINES MR_REFINE_PLACE=1)  # 細かくする段で寄せるセルを置かれ方で配る世界(T-1188・ADR-0499)
 bicameral_add_shader(sim/multires_activity_graph.hlsl PROFILE lib_6_8)  # 木の上の活性: 種と面の隣だけ刻む(T-0100)
 bicameral_add_shader(sim/multires_conduct_graph.hlsl PROFILE lib_6_8)  # 熱の伝導の段の Work Graph 版(T-0107。D-302 で比べる)
 foreach(_entry IN ITEMS TreeResolve TreeSettle TreeAllocate TreeRelease TreeClearIndex TreeFillIndex TreeQuiet TreeExpand TreeFoldCheck TreeFold TreeFractions TreeQuietCheck)  # 木の管理の段(T-0018・T-0101・T-0102・T-0103・T-0107・T-0113)

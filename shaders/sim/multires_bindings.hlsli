@@ -62,7 +62,8 @@ cbuffer RootConstants : register(b0) {
     uint32_t g_ledgerColumns;
     uint32_t g_graphInputLow;  // u12 の GPU の番地(DispatchGraph の GPU の入力の見出しに書く)
     uint32_t g_graphInputHigh;
-    uint32_t g_graphEntries;  // 下位 16bit = RefineNode、上位 16bit = CoarsenRequestNode の入口の番号
+    // 下位 16bit = RefineNode、上位 16bit = CoarsenRequestNode の入口の番号(使っているプログラムの番号。置かれ方の世界は別のプログラム。T-1188)
+    uint32_t g_graphEntries;
 
     // --- 刻み(T-0107)---
     uint32_t g_stepFlags;  // MR_STEP_*

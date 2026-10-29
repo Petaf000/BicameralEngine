@@ -98,7 +98,8 @@ namespace bicameral::sim {
 
         // CPU の木(状態・索引・取り合いの印)を GPU へ写す。大きさは Create と同じでなければならない。世界の端(nest.edges)が前に写したものと
         // 違えば表の語(t2)を作り直す(前の表の語は次の RecordUpload まで持つ。写しの元を毎回書き換えるのと同じく、前のリストが GPU で
-        // 終わってから呼ぶ約束)
+        // 終わってから呼ぶ約束)。nest.refineCells が物質の表を持てば(EnableRefineCellPlacement)、細かくする段は寄せるセルの中身を
+        // 置かれ方で配る(CPU の ProcessRequests と同じ。T-1188。GPU は自分の表 t0 の相の印を読む)
         [[nodiscard]] bool RecordUpload(ID3D12GraphicsCommandList10* list, const MultiresNest& nest);
 
         // --- 世界の木(multires_nest.h の SubmitRequests・ProcessRequests と同じ結果)---
@@ -188,7 +189,9 @@ namespace bicameral::sim {
         void SetStageTimestamps(bool enabled) { m_stageTimestamps = enabled; }
         [[nodiscard]] uint32_t StageTimestampCount() const { return m_stageStamp; }
 
-        [[nodiscard]] uint64_t GraphBackingMemoryBytes() const { return m_graph->BackingMemoryBytes(); }
+        [[nodiscard]] uint64_t GraphBackingMemoryBytes() const {
+            return m_graphs[m_activeGraph].graph->BackingMemoryBytes();
+        }
 
         // 計測(T-0248): 世界のバッファ(Work Graph の作業場を除く)の VRAM のバイト数と、そのうちの溢れの領域
         [[nodiscard]] uint64_t BufferBytes() const;
@@ -229,7 +232,8 @@ namespace bicameral::sim {
             uint32_t ledgerColumns = 0;
             uint32_t graphInputLow = 0;
             uint32_t graphInputHigh = 0;
-            uint32_t graphEntries = 0;  // 下位 16bit = RefineNode、上位 16bit = CoarsenRequestNode
+            uint32_t graphEntries =
+                0;  // 下位 16bit = RefineNode、上位 16bit = CoarsenRequestNode(使っているプログラムの番号)
 
             // --- 刻み(T-0107)---
             uint32_t stepFlags = 0;  // STEP_FLAG_*(multires_bindings.hlsli の MR_STEP_*)
@@ -356,9 +360,22 @@ namespace bicameral::sim {
         bool m_useConductGraph = false;
         std::array<uint32_t, 4> m_conductEntries = {UINT32_MAX, UINT32_MAX, UINT32_MAX,
                                                     UINT32_MAX};  // 埋める・流れ・足す・小刻みの終わり
-        std::unique_ptr<gpu::WorkGraph> m_graph;
-        bool m_graphInitialized = false;
-        std::array<uint32_t, 4> m_entries{};              // 細かくする・粗くする要求・引き戻す・影を捨てる
+
+        // --- 木を変える Work Graph(multires_graph.hlsl)。置かれ方の世界は別のプログラム(T-1188・ADR-0499)---
+        struct GraphProgram {
+            std::unique_ptr<gpu::WorkGraph> graph;  // 置かれ方の変種は溢れを使う世界では作らない(空)
+            bool initialized = false;
+            std::array<uint32_t, 4> entries{};  // 細かくする・粗くする要求・引き戻す・影を捨てる
+        };
+
+        enum GraphKind : uint8_t {
+            GraphPlain,  // multires_graph か multires_graph_wide(セルの中身は SAME で写す)
+            GraphPlace,  // multires_graph_place(寄せるセルの中身を置かれ方で配る)
+            GraphKindCount,
+        };
+
+        std::array<GraphProgram, GraphKindCount> m_graphs;
+        GraphKind m_activeGraph = GraphPlain;             // RecordUpload が世界の木で選ぶ
         std::unique_ptr<gpu::WorkGraph> m_activityGraph;  // 無ければ活性を使わない
         bool m_activityGraphInitialized = false;
         std::array<uint32_t, 3> m_activityEntries = {UINT32_MAX, UINT32_MAX,

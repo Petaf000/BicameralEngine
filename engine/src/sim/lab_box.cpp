@@ -368,6 +368,9 @@ namespace bicameral::sim {
             }
         }
 
+        // 細かくする時、寄せるセルの中身は置かれ方で配る(D-664 の既定。T-1188。GPU の箱も RecordUpload でこれに合わせる)
+        EnableRefineCellPlacement(nest, table);
+
         return nest;
     }
 
@@ -423,6 +426,11 @@ namespace bicameral::sim {
 
     SpeciesRemapReport RemapLabBox(MultiresNest& nest, const SpeciesRemap& remap, const BakedReactionTable& next) {
         SpeciesRemapReport report;
+
+        // 細かくする時の置かれ方は新しい表の相の印で(T-1188。GPU は差し替えた表 t0 を読む)
+        if (!nest.refineCells.species.empty())
+            EnableRefineCellPlacement(nest, next);
+
         if (remap.identity)
             return report;
 

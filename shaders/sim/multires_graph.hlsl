@@ -2,6 +2,9 @@
 // 細かくする鎖は再帰(1 レベル = 1 グループ。段の数は実行時に決まる。D-302)。
 // 入口は 4 つ: RefineNode(CPU の入力 = 手で決めた影の鎖 / GPU の入力 = 許可した要求の鎖。multires_tree.hlsl の TreeAllocate が作る)・
 // CoarsenRequestNode(GPU の入力 = 許可した粗くする要求)・PullBackNode・RemoveShadowNode(CPU の入力)。
+// 変種は 3 つ: 既定(multires_graph)・溢れを使う世界(MR_WIDE_CELLS。multires_graph_wide)・細かくする段で寄せるセルの中身を置かれ方で配る世界
+// (MR_REFINE_PLACE。multires_graph_place。T-1188・ADR-0499)。置かれ方の段は重く、同じプログラムに入れると使わない木でも RTX の HW の
+// Work Graph が止まった(DEVICE_HUNG)ので、別のプログラムにして置かれ方の世界だけが持つ(gpu_multires.cpp の RecordUpload が選ぶ)。
 // CPU リファレンスは engine/src/sim/multires_tree.cpp の RefineRequestLevel・ApplyCoarsen と、multires_nest.cpp の RefineShadowLevel・
 // PullBackLevel・RemoveShadowChain(同じ順・同じ関数)。
 // 木を変えたブロック(細かくした親と子・粗くした親)は活性の一覧(u13 = この刻みの種)に足す(つつく。T-0100)。
@@ -14,6 +17,12 @@
 #include "sim/multires_bindings.hlsli"
 #ifdef MR_WIDE_CELLS
 #include "sim/multires_wide_access.hlsli"
+#endif
+#ifdef MR_REFINE_PLACE
+#ifdef MR_WIDE_CELLS
+#error 置かれ方の変種は溢れを使わない世界だけ(T-1188)
+#endif
+#include "sim/multires_refine_place.hlsli"
 #endif
 
 // 再帰の深さの上限(要求の鎖は MR_MAX_CHAIN_LEVELS 段まで)
@@ -174,6 +183,13 @@ void RefineLevel(MrRefineRecord record, uint32_t t) {
 
     if (childFraction != MR_NO_FRACTION)
         g_fractions[FractionAddress(childFraction, t)] = LoadFraction(parent.fraction, parentCell);
+
+#ifdef MR_REFINE_PLACE
+    // --- 寄せるセルの中身は置かれ方で(T-1188・T-1176。CPU の PlaceRefineOctantCells。端数は上で写した SAME のまま。
+    //     グループで同じ条件なので、中のバリアは全部のスレッドが通る)---
+    if (fromRequest && real && !uniformChild)
+        PlaceRefineChildren(parent, record.parentSlot, octant, childPage, t);
+#endif
 
 #ifdef MR_WIDE_CELLS
     // --- 溢れ: 子の頁へ写す(親を覆う前。一様な子は頁を持たない。一様な親は溢れを持たない)。

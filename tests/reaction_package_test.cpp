@@ -578,10 +578,10 @@ namespace {
 
     // 読んだ形と相の表(動く 1 bit・安息角の tan θ の Q16)。"fixed" と書いた表・書かない表は同じ表と同じ相の表
     void TestSolidMotionRead() {
-        const auto read = BakeWithSpecies(Grain("test_sand", 1600, "solid_motion = \"loose\", repose_angle_deg = 34") +
-                                          ", " +
-                                          Grain("test_ice", 917, "solid_motion = \"loose\", repose_angle_deg = 90") +
-                                          ", " + Grain("test_rock", 2600, "solid_motion = \"fixed\""));
+        const auto read = BakeWithSpecies(
+            Grain("test_sand", 1600, "solid_motion = \"loose\", repose_angle_deg = 34, packing_percent = 62") + ", " +
+            Grain("test_ice", 917, "solid_motion = \"loose\", repose_angle_deg = 90, packing_percent = 100") + ", " +
+            Grain("test_rock", 2600, "solid_motion = \"fixed\""));
         EXPECT(read.has_value());
         if (!read) {
             std::printf("  %s\n", read.error().c_str());
@@ -595,6 +595,15 @@ namespace {
         EXPECT(transport("test_sand").solidMotion == SolidMotion::Loose &&
                transport("test_sand").reposeAngleDegrees == 34);
         EXPECT(transport("test_ice").reposeAngleDegrees == 90);
+
+        // 粒の詰まり(D-679): 読んだ値と、反応の表の印(ビット 8〜14)。据わる固体は詰まりを持たない
+        const auto flags = [&](std::string_view name) {
+            return read->species[read->SpeciesId(name)].flags;
+        };
+        EXPECT(transport("test_sand").packingPercent == 62 && transport("test_ice").packingPercent == 100);
+        EXPECT(flags("test_sand") == (reaction::RX_SPECIES_GRAIN | (62u << reaction::RX_SPECIES_PACKING_SHIFT)));
+        EXPECT(reaction::RxSpeciesPackingPercent(flags("test_ice")) == 100);
+        EXPECT(flags("test_rock") == reaction::RX_SPECIES_ANCHORED && !transport("test_rock").packingPercent);
         EXPECT(transport("test_rock").solidMotion == SolidMotion::Fixed && !transport("test_rock").reposeAngleDegrees);
         EXPECT(!HasWarning(*read, "test_sand") && !HasWarning(*read, "test_ice") && !HasWarning(*read, "test_rock"));
 
@@ -633,9 +642,22 @@ namespace {
         if (defaulted)
             EXPECT(MakeSpeciesPhases(*defaulted)[defaulted->SpeciesId("test_sand")].reposeSlopeQ16 == 45889);
 
+        // ばらける固体の粒の詰まりの書き忘れ → 60 % として警告(D-679)
+        EXPECT(defaulted && HasWarning(*defaulted, "packing_percent") && HasWarning(*defaulted, "60 %"));
+        if (defaulted) {
+            const uint32_t sandFlags = defaulted->species[defaulted->SpeciesId("test_sand")].flags;
+            EXPECT(reaction::RxSpeciesPackingPercent(sandFlags) == DEFAULT_PACKING_PERCENT);
+        }
+
         // 据わる固体の安息角 → 効かないと警告(相の表は据わる・傾き 0)
         const auto ignored = BakeWithSpecies(Grain("test_rock", 2600, "repose_angle_deg = 30"));
         EXPECT(ignored && HasWarning(*ignored, "test_rock") && HasWarning(*ignored, "だけに効く"));
+
+        // 据わる固体の粒の詰まり → 効かないと警告(印は据わるだけ)
+        const auto packedRock = BakeWithSpecies(Grain("test_rock", 2600, "packing_percent = 55"));
+        EXPECT(packedRock && HasWarning(*packedRock, "packing_percent") && HasWarning(*packedRock, "だけに効く"));
+        if (packedRock)
+            EXPECT(packedRock->species[packedRock->SpeciesId("test_rock")].flags == reaction::RX_SPECIES_ANCHORED);
         if (ignored) {
             const multires::CvSpeciesPhase rock = MakeSpeciesPhases(*ignored)[ignored->SpeciesId("test_rock")];
             EXPECT(rock.motion == multires::CV_MOTION_FIXED && rock.reposeSlopeQ16 == 0);
@@ -653,6 +675,12 @@ namespace {
                        "範囲");
         ExpectModFails("安息角の小数", Grain("test_sand", 1600, "solid_motion = \"loose\", repose_angle_deg = 34.5"),
                        "", "整数");
+        ExpectModFails("粒の詰まり 0", Grain("test_sand", 1600, "solid_motion = \"loose\", packing_percent = 0"), "",
+                       "範囲");
+        ExpectModFails("粒の詰まり 101", Grain("test_sand", 1600, "solid_motion = \"loose\", packing_percent = 101"),
+                       "", "範囲");
+        ExpectModFails("液体に粒の詰まり", Stone("phase = \"liquid\", viscosity_upa_s = 1000, packing_percent = 60"),
+                       "", "packing_percent");
     }
 
     void TestSlopeWarnings() {

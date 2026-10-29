@@ -22,6 +22,21 @@
 #define PR_MATERIAL_MOLAR_VOLUME(m) 0u
 #endif
 
+// a − b(64bit の引き算を 32bit の 2 つに分けて借りを手で回す。値は同じ)。差を 0 と比べる・選ぶ所に 64bit の引き算を並べると、
+// HW の RTX で差の上の 32bit が壊れた(T-1078・T-1159。SfOpenVolume と同じ形)。細かくする段(sim/multires_refine_place.hlsli)が
+// 子の量を 0 と比べるので、ここの差は全部これで作る(T-1188)
+int64_t PrSubS64(int64_t a, int64_t b) {
+    const uint64_t left = (uint64_t)a;
+    const uint64_t right = (uint64_t)b;
+    const uint32_t leftLow = (uint32_t)(left & 0xFFFFFFFFu);
+    const uint32_t rightLow = (uint32_t)(right & 0xFFFFFFFFu);
+    const uint32_t borrow = leftLow < rightLow ? 1u : 0u;
+    const uint32_t low = leftLow - rightLow;
+    const uint32_t high = (uint32_t)(left >> 32) - (uint32_t)(right >> 32) - borrow;
+
+    return (int64_t)(((uint64_t)high << 32) | (uint64_t)low);
+}
+
 // --- 親のセル 1 つの配り方(子 8 つで同じ)---
 struct PrCell {
     bool settled;             // 寄せる(false なら同じ数で配る = SAME)
@@ -56,7 +71,7 @@ PrSplit PrMakeSplit(int64_t fullnessQ16, int64_t slopeQ16) {
 int64_t PrSplitShare(int64_t massMg, PrSplit split, uint32_t column) {
     const int64_t first = FxMulDivS64(massMg, split.weight0, split.weightSum);
 
-    return column == 0 ? first : massMg - first;
+    return column == 0 ? first : PrSubS64(massMg, first);
 }
 
 SfSettleSum PrAddMaterial(SfSettleSum sum, uint32_t m, int64_t massMg) {
@@ -140,7 +155,7 @@ int64_t PrChildMass(PrCell cell, PrColumn column, uint32_t m, uint32_t j) {
     if (row < column.topRow)
         return below;
 
-    return row == column.topRow ? columnMass - (below * (int64_t)column.topRow) : 0;
+    return row == column.topRow ? PrSubS64(columnMass, below * (int64_t)column.topRow) : 0;
 }
 
 // --- 子 j の重み: 凝縮相の量(mg)と空きの体積(mm³。CPU の PlaceChildWeights)---
@@ -179,7 +194,7 @@ int64_t PrGasShare(int64_t columnShareMg, int64_t parentMassMg, uint64_t ownOpen
     if (j != 7)
         return FxMulDivS64(parentMassMg, ownOpenMm3, openSumMm3);
 
-    return parentMassMg - othersGivenMg;
+    return PrSubS64(parentMassMg, othersGivenMg);
 }
 
 #endif  // BICAMERAL_PLACEMENT_REFINE_HLSLI
