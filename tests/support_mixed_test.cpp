@@ -10,7 +10,7 @@
 // 段の角(T-1133・ADR-0504): 壁(幅 1 m・高さ 3 m。左と下を固定)から出た片持ち梁(長さ 4 m・厚さ 1 m)の壁と梁の 2 つの角の片側だけ・
 // 角の間のセルだけを 0.25 m に分け、違う大きさのセルが絡む段の棒の形 3 つ(① 中心〔既定〕・② 角の場所・置かない)を ④ で比べる
 // (落ちるのは ① のたわみ ±5 %・帳簿・決定性。縁の力は記録だけ = BraceCase)。
-// 引数: [--ticks n](既定 240)[--case n](n 番目の場面だけ。0 から。測り用)
+// 引数: [--ticks n](既定 240)[--case n](n 番目の場面だけ。0 から。測り用)[--study](T-1260 の切り分けの場面。記録だけ)
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -172,6 +172,8 @@ namespace {
         bool edgeCheck = true;       // 縁の力の差 ≤ 5 % を確かめる(上の段だけの移り目も T-1207 から確かめる)
         bool braceStudy = false;     // 段の角の場面(T-1133): 違う大きさの面の形は ④ だけで、段の棒の形 3 つを比べる
         bool rootCheck = false;      // 根の線の面が全部細かい(T-1133。根の線の縁の力 ±5 % を確かめる)
+        bool beamStudy = false;      // T-1260 の切り分け: 段の角の場面でも違う大きさの面の形(④・④'・③)を比べる
+        uint32_t rootX = 3;          // 根の線の壁の面の細かい x(壁の右の列の右の細かいセル)
         double sagTolerance = 0.05;  // たわみの比の線(T-1120 の ±5 %。広げた場面は理由と残りのチケットを場面に書く)
     };
 
@@ -283,9 +285,9 @@ namespace {
 
     // 根の線の縁の力(T-1133。support_fracture_test --root-compare の形): 壁の面(細かい x = 3 の面)と x = 1.25 m(細かい x = 4)の面の、
     // 梁の段(細かい上 4〜7)の縁の応力の差 ÷ 全部 0.25 m の最大。分けていない面(幅 0.5 m)は縁の応力(÷ 面積)を同じ高さの細かい縁と比べる
-    double RootLineError(const sim::SupportLaw& reference, const sim::SupportLaw& mixed) {
+    double RootLineError(const sim::SupportLaw& reference, const sim::SupportLaw& mixed, uint32_t rootX) {
         double largest = 0;
-        for (const uint32_t fx : {3u, 4u}) {
+        for (const uint32_t fx : {rootX, rootX + 1}) {
             for (uint32_t fup = 4; fup < 8; ++fup) {
                 const sim::SupportFaceForces forces = reference.FaceForces(fx, fup, 0);
                 largest = std::max({largest, std::abs((double)forces.lowSideMn), std::abs((double)forces.highSideMn)});
@@ -296,7 +298,7 @@ namespace {
         const auto compare = [&](double got, int64_t expected) {
             worst = std::max(worst, std::abs(got - (double)expected) / std::max(largest, 1.0));
         };
-        for (const uint32_t fx : {3u, 4u}) {
+        for (const uint32_t fx : {rootX, rootX + 1}) {
             for (uint32_t fup = 4; fup < 8; ++fup) {
                 const bool fine = mixed.IsFine(fx, fup) || mixed.IsFine(fx + 1, fup);
                 // 分けない場面(全部 0.5 m)は粗い面だけ(細かい x が奇数 = 粗いセルの境)
@@ -337,7 +339,7 @@ namespace {
         });
         const bool pass = std::abs(ratio - 1) <= each.sagTolerance;
         const EdgeError edges = CompareEdges(fineScene, reference, mixed);
-        const double rootLine = each.braceStudy ? RootLineError(reference, mixed) : 0.0;
+        const double rootLine = each.braceStudy ? RootLineError(reference, mixed, each.rootX) : 0.0;
         const bool rootPass = rootLine <= 0.05;
         if (each.braceStudy) {
             Log(Channel::Sim, Level::Info, "[T-1133] {} {}: たわみ {:.3f}・根の線の縁の力の差 ÷ 最大 {:.2f} %({})",
@@ -400,10 +402,15 @@ namespace {
 
         if (each.braceStudy) {
             Log(Channel::Sim, Level::Info, "[T-1133] {} 全部 0.5 m: 根の線の縁の力の差 ÷ 最大 {:.2f} %", each.name,
-                100.0 * RootLineError(reference, coarse));
+                100.0 * RootLineError(reference, coarse, each.rootX));
             for (const sim::MixedBrace brace :
                  {sim::MixedBrace::Center, sim::MixedBrace::Corner, sim::MixedBrace::None})
                 TestForm(each, fineScene, reference, referenceSag, ticks, sim::MixedBeam::FacePair, brace);
+
+            if (each.beamStudy) {
+                for (const sim::MixedBeam beam : {sim::MixedBeam::FacePairShear, sim::MixedBeam::FaceSpring})
+                    TestForm(each, fineScene, reference, referenceSag, ticks, beam, sim::MixedBrace::Center);
+            }
 
             return;
         }
@@ -418,12 +425,12 @@ namespace {
 
     // 壁(0.5 m のセル 2 × 6 = 幅 1 m・高さ 3 m。左と下を固定)から出た片持ち梁(長さ 4 m・厚さ 1 m = 列 2〜9・段 2〜3)。
     // 壁と梁の角は 2 つ(上の角 = 壁 (1, 4) と梁 (2, 3)・下の角 = 壁 (1, 1) と梁 (2, 2))で、どちらも段の斜めの棒が立つ(T-1133)
-    sim::SupportScene WallBeam() {
-        sim::SupportScene scene = test::Beam(10, 6, COARSE_MM, false);
+    sim::SupportScene WallBeam(uint32_t wallColumns = 2) {
+        sim::SupportScene scene = test::Beam(wallColumns + 8, 6, COARSE_MM, false);
         for (uint32_t up = 0; up < scene.height; ++up) {
             for (uint32_t x = 0; x < scene.width; ++x) {
                 const size_t at = x + (size_t)scene.width * up;
-                const bool wall = x < 2;
+                const bool wall = x < wallColumns;
                 scene.solid[at] = wall || up == 2 || up == 3 ? 1 : 0;
                 scene.clamps[at] = (uint8_t)((x == 0 ? sim::SUPPORT_CLAMP_LEFT : 0) |
                                              (wall && up == 0 ? sim::SUPPORT_CLAMP_BOTTOM : 0));
@@ -439,7 +446,7 @@ namespace {
                         double sagTolerance = 0.05) {
         return {.name = std::move(name),
                 .scene = scene,
-                .probe = 9,
+                .probe = scene.width - 1,
                 .edgeCheck = false,
                 .braceStudy = true,
                 .rootCheck = rootCheck,
@@ -468,27 +475,66 @@ namespace {
             BraceCase("壁と梁の 2 つの角の壁の側(壁の右の列の段 1〜4)を 0.25 m", Marked(wallBeam, 1, 2, 1, 5)),
             BraceCase("壁と梁の根の 1 m(壁の右の列と梁の最初の列)を 0.25 m", Marked(wallBeam, 1, 3, 0, 6), true),
             // 根の線の面の両側だけ(割れかけの面の両側を分けて周りなし = 2 つの角とも段の棒の片方の端が粗いセル)・梁の側へ 1 列広げた形。
-            // たわみは ① で 1.056 / 1.052(棒なし 1.105 / 1.101)で ±5 % の外。固定した面から 0.5 m のセル 1 つ以内の違う大きさの面の残り
-            // (ADR-0501 の 4.87 % と同じ所か・未確認)を T-1260 で調べるまで線を 6 % にする
+            // たわみは ① で 1.056 / 1.052(棒なし 1.105 / 1.101)で ±5 % の外。T-1260: 固定した面からの近さ(ADR-0501 の残り)ではなく、
+            // 根の角の横の壁の列の上下の違う大きさの面の対(④ の対のずれ・伸びの読み)が根の角の強く変わる歪みまで外す分。
+            // 周りを 1 セル分ける形(割れの細かくする道の既定 refineRing = 1)では 1.023 なので、周りなしの形だけ線を 6 % にする
             BraceCase("壁と梁の根の線の両側(壁の右の列と梁の最初の列の段 2〜3)だけ 0.25 m",
                       Marked(wallBeam, 1, 3, 2, 4), true, 0.06),
             BraceCase("壁と梁の根の線の両側と梁の 2 列目を 0.25 m", Marked(wallBeam, 1, 4, 2, 4), true, 0.06),
         };
     }
 
+    // 0.5 m の格子の矩形 [fromX, toX) × [fromUp, toUp) を足して分ける(Marked の重ね)
+    sim::SupportScene AlsoMarked(sim::SupportScene scene, uint32_t fromX, uint32_t toX, uint32_t fromUp,
+                                 uint32_t toUp) {
+        for (uint32_t up = fromUp; up < toUp; ++up) {
+            for (uint32_t x = fromX; x < toX; ++x)
+                scene.fine[x + (size_t)scene.width * up] = 1;
+        }
+
+        return scene;
+    }
+
+    // T-1260 の切り分け(--study。ctest には入れない。たわみと縁の力を記録するだけ)
+    std::vector<MixedCase> StudyCases() {
+        const sim::SupportScene wallBeam = WallBeam();
+        const sim::SupportScene wideWall = WallBeam(4);
+        const sim::SupportScene rootLine = Marked(wallBeam, 1, 3, 2, 4);
+        const auto study = [](MixedCase each, uint32_t rootX = 3) {
+            each.beamStudy = true;
+            each.rootX = rootX;
+            return each;
+        };
+
+        return {
+            study(BraceCase("[S] 根の線の両側(壁 2 m・固定した面から 1.5 m)", Marked(wideWall, 3, 5, 2, 4), false, 1.0),
+                  7),
+            study(BraceCase("[S] 根の 1 m(壁 2 m)", Marked(wideWall, 3, 5, 0, 6), false, 1.0), 7),
+            study(BraceCase("[S] 根の線の両側 + 壁の列の上 1 段", AlsoMarked(rootLine, 1, 2, 4, 5), false, 1.0)),
+            study(BraceCase("[S] 根の線の両側 + 壁の列の下 1 段", AlsoMarked(rootLine, 1, 2, 1, 2), false, 1.0)),
+            study(BraceCase("[S] 根の線の両側 + 壁の列の上下 1 段", AlsoMarked(rootLine, 1, 2, 1, 5), false, 1.0)),
+            study(BraceCase("[S] 壁の側だけ(壁の右の列の段 2〜3)", Marked(wallBeam, 1, 2, 2, 4), false, 1.0)),
+            study(BraceCase("[S] 梁の側だけ(梁の最初の列)", Marked(wallBeam, 2, 3, 2, 4), false, 1.0)),
+            study(BraceCase("[S] 根の線の両側 + 壁の左の列の段 2〜3", AlsoMarked(rootLine, 0, 1, 2, 4), false, 1.0)),
+        };
+    }
+
     int RunAll(std::span<char*> arguments) {
         uint32_t ticks = 240;
-        int32_t only = -1;  // --case n: n 番目の場面だけ(0 から。測り用)
+        int32_t only = -1;   // --case n: n 番目の場面だけ(0 から。測り用)
+        bool study = false;  // --study: T-1260 の切り分けの場面(--case はその中の番号)
         for (size_t i = 1; i < arguments.size(); ++i) {
             const std::string_view name = arguments[i];
             if (name == "--ticks" && i + 1 < arguments.size())
                 ticks = (uint32_t)std::atoi(arguments[++i]);
             else if (name == "--case" && i + 1 < arguments.size())
                 only = std::atoi(arguments[++i]);
+            else if (name == "--study")
+                study = true;
         }
 
         static_assert(FINE_MM * 2 == COARSE_MM);
-        const std::vector<MixedCase> cases = Cases();
+        const std::vector<MixedCase> cases = study ? StudyCases() : Cases();
         for (size_t i = 0; i < cases.size(); ++i) {
             if (only < 0 || (size_t)only == i)
                 TestCase(cases[i], ticks);
