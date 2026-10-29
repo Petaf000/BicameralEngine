@@ -173,7 +173,7 @@ FX_FN MrBlock MrMakeChildBlock(MrBlock parent, uint32_t parentSlot, uint32_t oct
 // 子 2³ が同じ値なら粗くした値は同じ値に戻るはずだが、表現(成分の並び)まで同じことを確かめる(違えば親を頁に広げる)
 FX_FN bool MrCoarsenKeepsUniform(RxCell childValue, RxCell parentValue) {
     MrChildren children;
-    for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
+    FX_UNROLL for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
         children.cells[j] = childValue;
         children.fractions[j] = MrMakeEmptyFraction();
     }
