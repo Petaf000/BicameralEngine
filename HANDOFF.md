@@ -1,6 +1,18 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-29(本体の作業役 14 回目・wt3 T-1236 を main へ・T-1251 の直しをブランチに・Q177。会話の入れ物の再起動で途中で止めた)
+最終更新: 2026-10-29(本体の作業役 15 回目・T-1251・wt4 T-1207・wt3 T-1241/T-1238・wt2 T-1188 を main へ)
+
+## この仕事でしたこと(2026-10-29・本体の作業役・15 回目: T-1251・t-1207・t-1241・t-1238・t-1188 のマージ)
+- **T-1251 Done**: t-1251-old-cpu-tests(b061e5ce)を main へ --no-ff。release で radiation_reference・standard_packages・probe_radiation(294 s)・window_lab・window_lab_blank・window_lab_compare・cascade_light(1052 s)合格。
+- **T-1207 Done**: wt4 t-1207-cantilever-root 9687cbea を main へ(衝突なし)。**ADR-0501 は Proposed のまま(Q177・仮で既定)**。ROADMAP の T-0960 の行と T-0944 のチケットに「3 次元の対は曲げの差も同じ芯で」。
+  試験(release・警告 0): support_law・support_mixed・support_fracture(616 s)・support_fracture_thick(623 s)・support_fracture_settle・support_cost・gpu_equilibrium_block 合格。archmap --check OK(227 本・写しの上で)。
+- **T-1241・T-1238 Done**: wt3 t-1241-layer-world-option a4f51560 → t-1238-uniform-layer-header d7721d12 を順に main へ(衝突なし)。ROADMAP の T-1239 に「T-1188・T-1240 の後に回した」。
+- **T-1188 Done**: wt2 t-1188-refine-gpu-2 45adf52d を main へ(衝突なし。multires_nest.h は T-1188 がコメントだけ・T-1238 は枠ごとの番号の組で、意味のぶつかりも無い)。ADR-0499 Accepted。残りは T-1189・T-1240。
+- 3 本のマージの後の試験(release・警告 0): luau_type_check・environment_package・world_layout・multires_state・tree_refine_placement・multires_layers + GPU gpu_multires・gpu_multires_layers・gpu_lab_box・gpu_tree_refine_placement(HW)合格。archmap --check OK(227 本)。→ push
+- COMMANDER の「番号の配り方」に司令塔 2 回目の行(**司令塔の次は T-1272・ADR-0508**)。
+- 次の番号は **D-683・ADR-0479・T-1252・Q178**(本体。この仕事では使っていない)。
+
+(前の版の最終更新: 2026-10-29(本体の作業役 14 回目・wt3 T-1236 を main へ・T-1251 の直しをブランチに・Q177))
 
 ## この仕事でしたこと(2026-10-29・本体の作業役・14 回目: wt3 t-1236 のマージ・T-1251)
 - **マージ(--no-ff・衝突なし)**: wt3 da63d0f7(t-1236-layer-placement)。**T-1236 Done**(層つきの根の置き口 PlaceRootBlock・パッケージの world_cells の settled_umol〔名前は仮〕・ベイクの誤り・(a)/(b) を値 UNWRITTEN_GRAIN_LAYERS で切り替え・仮 = (a))。

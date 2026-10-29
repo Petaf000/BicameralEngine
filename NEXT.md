@@ -1,5 +1,9 @@
 # NEXT.md — 次にやること(上から順に)
 
+**2026-10-29 本体の作業役(15 回目): T-1251・wt4 T-1207(ADR-0501 Proposed = Q177)・wt3 T-1241・T-1238・wt2 T-1188(ADR-0499 Accepted)を main へ(試験合格・push)。**
+次: wt5 の t-1233・t-1234(試験の後に司令塔が頼む)・T-1250(wt4)・T-1189・T-1240(T-1188 の後)・T-1239(T-1240 の後)。Q174〜Q177 の答え待ち(仮で進めている)。
+次の番号は **D-683・ADR-0479・T-1252・Q178**(本体)。司令塔の次は T-1272・ADR-0508(COMMANDER)。
+
 **2026-10-29 本体の作業役(14 回目・会話の入れ物の再起動で途中で止めた): wt3 T-1236(ADR-0489 Proposed = Q175)を main へ(試験合格・push)。T-1251 は直しをブランチ t-1251-old-cpu-tests fe834bde に(試験は未実行)。Q177 を足した。**
 次: **T-1251 の続き** = t-1251-old-cpu-tests を release で radiation_reference・standard_packages・window_lab・window_lab_blank・window_lab_compare・probe_radiation・cascade_light を流し、合格なら main へ(ビルドは通った・警告 0)。
 T-1250(司令塔が配る)・T-1241(wt3)・wt4 t-1207-cantilever-root 9687cbea(ADR-0501 Proposed = Q177)のマージ。Q174〜Q177 の答え待ち(仮で進めている)。
