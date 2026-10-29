@@ -44,7 +44,23 @@ struct OhShellFace {
 // 物ごとの面の並びの始まり(軸 0・1・2 の順に続く。g_momentum と g_faceWork で同じ)
 struct OhShellObject {
     uint32_t faceBegin[3];
-    uint32_t padding;
+    uint32_t multigridBegin;  // 圧力の多重格子の作業場 g_multigrid の始まり(全部の段を続けて。T-1222)
+};
+
+// 圧力の多重格子の段のボクセル(作業場。段 0 = 細かい格子・段 1.. = 粗い格子。T-1222)
+struct OhShellMultigrid {
+    // 6 つの面の重み(− x・+ x・− y・+ y・− z・+ z。箱の外に面する面も入る = 値 0 の項。和は total)
+    uint64_t weightMinusX;
+    uint64_t weightPlusX;
+    uint64_t weightMinusY;
+    uint64_t weightPlusY;
+    uint64_t weightMinusZ;
+    uint64_t weightPlusZ;
+    uint64_t total;
+    FxRecip64 recip;  // 重みの和の逆数
+    int64_t rhs;      // 右辺(残り × 2^16 × 2^8 の単位。粗い段は細かい段の残りの和)
+    int64_t value;    // 値(細かい単位)
+    int64_t scratch;  // 残り(粗い段を作る時だけ)
 };
 
 RWStructuredBuffer<RxCell> g_voxels : register(u0);
@@ -59,6 +75,7 @@ RWStructuredBuffer<uint32_t> g_stats : register(u7);
 RWStructuredBuffer<OhShellVoxel> g_voxelWork : register(u8);
 RWStructuredBuffer<OhVoxelGas> g_gasWork : register(u9);
 RWStructuredBuffer<OhShellFace> g_faceWork : register(u10);
+RWStructuredBuffer<OhShellMultigrid> g_multigrid : register(u11);
 StructuredBuffer<RxSpecies> g_species : register(t0);
 StructuredBuffer<OhSpecies> g_objectSpecies : register(t1);
 StructuredBuffer<uint32_t> g_molarMasses : register(t2);
@@ -92,6 +109,7 @@ FX_CONST uint32_t OH_SHELL_SHARED_VOXELS = 7168;  // 28 KB(groupshared の上限
 FX_CONST uint32_t OH_SHELL_OUTSIDE = 0xFFFFFFFFu;
 FX_CONST uint32_t OH_PRESSURE_UNTIL_QUIET = 1;  // 1 回の赤黒で値が 1 つも変わらなければ止める
 FX_CONST uint32_t OH_PRESSURE_WARM_START = 2;   // 前の小刻みの圧力の値から解き始める
+FX_CONST uint32_t OH_PRESSURE_MULTIGRID = 4;    // 解き始めを多重格子で作る(T-1222。CPU の pressureMultigrid)
 // 段の印(g_stageMask。測るだけ)
 FX_CONST uint32_t OH_STAGE_VOXELS = 1u << 0;    // ① ボクセルの見立て
 FX_CONST uint32_t OH_STAGE_FACES = 1u << 1;     // ② 面の質量・速さ・重み
@@ -135,6 +153,11 @@ groupshared uint32_t gs_failed;
 groupshared uint32_t gs_overflow;
 groupshared uint32_t
     gs_pressureMoved[3];  // 赤黒の回ごと(回 % 3)に、値が変わったボクセルがあったか(読む回・書く回・0 に戻す回を分ける)
+// 収まるまでの赤黒の「汚れた」印(T-1222 2 本目): 色ごとに、その色の並び(PressureColour の k)の 1 bit。
+// 前に計算してから隣の値が変わったボクセルだけを計算し直す(変わらない隣からは同じ値になるので、全部回すのとビット単位で同じ。T-1202)。
+// 色 c の回は色 c の印を読んで消し、隣(もう一方の色)の印を立てるだけなので、同じ回の中で読む語と立てる語が交わらない
+FX_CONST uint32_t OH_SHELL_DIRTY_WORDS = OH_SHELL_SHARED_VOXELS / 32;
+groupshared uint32_t gs_dirty[2][OH_SHELL_DIRTY_WORDS];
 
 // --- 箱の並び(軸の選びは決まった select で。動的な添字の局所の配列を作らない)---
 
@@ -142,6 +165,7 @@ struct ShellBox {
     uint32_t begin;  // ボクセルの始まり
     uint3 size;
     uint32_t faceBegin[3];
+    uint32_t multigridBegin;  // 圧力の多重格子の作業場の始まり
 };
 
 uint32_t Axis(uint3 value, uint32_t axis) {
@@ -467,9 +491,40 @@ void PrepareResidual(ShellBox box, uint32_t thread) {
     }
 }
 
+// 色の並びの数(行ごとに x を 2 つおき。色 0 と色 1 で同じ数え方)
+uint32_t PressureSlots(ShellBox box) {
+    return ((box.size.x + 1) >> 1) * box.size.y * box.size.z;
+}
+
+// ボクセル (x, y, z) の色の並びの番号(どちらの色でも x ÷ 2 + 行 × 半分の幅)
+uint32_t PressureSlotOf(ShellBox box, uint32_t x, uint32_t y, uint32_t z) {
+    return (x >> 1) + (((box.size.x + 1) >> 1) * (y + (box.size.y * z)));
+}
+
+void MarkDirty(uint32_t colour, uint32_t slot) {
+    InterlockedOr(gs_dirty[colour][slot >> 5], 1u << (slot & 31u));
+}
+
+// 値が変わったボクセルの隣(もう一方の色)に印を立てる
+void MarkNeighboursDirty(ShellBox box, uint32_t x, uint32_t y, uint32_t z, uint32_t other) {
+    if (x > 0)
+        MarkDirty(other, PressureSlotOf(box, x - 1, y, z));
+    if (x + 1 < box.size.x)
+        MarkDirty(other, PressureSlotOf(box, x + 1, y, z));
+    if (y > 0)
+        MarkDirty(other, PressureSlotOf(box, x, y - 1, z));
+    if (y + 1 < box.size.y)
+        MarkDirty(other, PressureSlotOf(box, x, y + 1, z));
+    if (z > 0)
+        MarkDirty(other, PressureSlotOf(box, x, y, z - 1));
+    if (z + 1 < box.size.z)
+        MarkDirty(other, PressureSlotOf(box, x, y, z + 1));
+}
+
 // ⑤ 圧力の赤黒の半分(colour の色のボクセル)。値が変わったら gs_pressureMoved[slot] に印。
-// その色のボクセルだけを回す(行ごとに x を 2 つおき。T-1223)。重みが 0 の項(箱の外に面する面)は足しても同じ値
-void PressureColour(ShellBox box, uint32_t thread, uint32_t colour, uint32_t slot) {
+// その色のボクセルだけを回す(行ごとに x を 2 つおき。T-1223)。重みが 0 の項(箱の外に面する面)は足しても同じ値。
+// dirtyOnly なら印の立ったボクセルだけ(印を消して計算し、値が変わったら隣の印を立てる。T-1222 2 本目)
+void PressureColour(ShellBox box, uint32_t thread, uint32_t colour, uint32_t slot, bool dirtyOnly) {
     const uint32_t halfX = (box.size.x + 1) >> 1;
     const uint32_t slots = halfX * box.size.y * box.size.z;
     const uint32_t strideY = box.size.x;
@@ -481,6 +536,14 @@ void PressureColour(ShellBox box, uint32_t thread, uint32_t colour, uint32_t slo
         const uint32_t x = ((k - (row * halfX)) << 1) + ((y + z + colour) & 1u);
         if (x >= box.size.x)
             continue;
+
+        if (dirtyOnly) {
+            const uint32_t bit = 1u << (k & 31u);
+            if ((gs_dirty[colour][k >> 5] & bit) == 0)
+                continue;
+
+            InterlockedAnd(gs_dirty[colour][k >> 5], ~bit);
+        }
 
         const uint32_t v = x + (strideY * y) + (strideZ * z);
         const OhShellVoxel work = g_voxelWork[box.begin + v];
@@ -495,23 +558,479 @@ void PressureColour(ShellBox box, uint32_t thread, uint32_t colour, uint32_t slo
         // = OhMulDivToward0(sum, 1, 重みの和)(0 の向きに切る。逆数の掛け算は厳密)
         const int64_t quotient = (int64_t)FxDivRecipU64(FxAbsU64(sum), work.recip);
         const int64_t potential = sum < 0 ? -quotient : quotient;
+        bool changed = false;
         if (g_sharedPotential == 0) {
-            if (!SameInt64(potential, work.potential))
-                gs_pressureMoved[slot] = 1;
-
+            changed = !SameInt64(potential, work.potential);
             g_voxelWork[box.begin + v].potential = potential;
+        } else {
+            if (!FitsInt32(potential))
+                gs_overflow = 1;
+
+            const int32_t value = (int32_t)potential;
+            changed = value != gs_potential[v];
+            gs_potential[v] = value;
+        }
+
+        if (!changed)
+            continue;
+
+        gs_pressureMoved[slot] = 1;
+        if (dirtyOnly)
+            MarkNeighboursDirty(box, x, y, z, 1 - colour);
+    }
+}
+
+// --- 圧力の多重格子の解き始め(T-1222。CPU リファレンス tests/object_flow_cpu.h の PressureMultigrid と同じ規則・ビット単位で同じ)---
+// ① 細かい単位(Ψ × 2^8)で V 字 1 回 → ② 動かない点の残りの幅の真ん中へ寄せて V 字をもう 1 回 → ③ Ψ = 四捨五入(値 ÷ 2^8)。
+// その後は今までと同じ赤黒を収まるまで(止める判定・上限も同じ)。段はすべて作業場 g_multigrid(物ごとに multigridBegin から、段 0 = 細かい格子・段 1.. = 粗い格子を続けて)。
+// 粗い段: 2 × 2 × 2 をまとめる(奇数の端は 1 つ)。一番粗い段はどの向きも 2 以下(赤黒 16 回)。段の大きさは箱の大きさから毎回数える(GetDimensions を使わない)。
+// 赤黒・残り・まとめる・戻すはグループの同期だけで回す(再帰を使わず、下りの回し → 一番粗い段 → 上りの回し)。
+// 2 本目: 段 0 の値は小さい箱なら groupshared に借りる(MgFineShared)・一番粗い段は 1 波で(MgCoarsestWave)・粗い段の重みは V 字 1 回目だけ作る。
+
+FX_CONST uint32_t OH_MG_FINE_BITS = 8;           // ① ② の細かい単位(Ψ × 2^8)
+FX_CONST int64_t OH_MG_FINE_SCALE = 16777216;    // 残り(Q16)を細かい単位の右辺に: 65536 × 2^8
+FX_CONST uint32_t OH_MG_SMOOTH_SWEEPS = 2;       // 段ごとの前と後の赤黒
+FX_CONST uint32_t OH_MG_COARSEST_SWEEPS = 16;    // 一番粗い段の赤黒
+FX_CONST uint64_t OH_MG_PROLONG_DIVISOR = 1728;  // 三線形の重み 12 × 12 × 12
+FX_CONST uint32_t OH_MG_NONE = 0xFFFFFFFFu;      // 戻しの相手が壁の向こう(値 0)
+
+bool MgCoarsest(uint3 size) {
+    return size.x <= 2 && size.y <= 2 && size.z <= 2;
+}
+
+// 段の数(一番粗い段まで含む)
+uint32_t MgLevelCount(uint3 size) {
+    uint32_t count = 1;
+    while (!MgCoarsest(size)) {
+        size = (size + 1) >> 1;
+        ++count;
+    }
+
+    return count;
+}
+
+// 段 level の大きさと、物の作業場の中の始まり
+void MgLevelOf(ShellBox box, uint32_t level, out uint3 size, out uint32_t begin) {
+    size = box.size;
+    begin = box.multigridBegin;
+    for (uint32_t l = 0; l < level; ++l) {
+        begin += size.x * size.y * size.z;
+        size = (size + 1) >> 1;
+    }
+}
+
+uint32_t MgIndex(uint3 size, uint3 c) {
+    return c.x + (size.x * (c.y + (size.y * c.z)));
+}
+
+uint3 MgCoord(uint3 size, uint32_t v) {
+    return uint3(v % size.x, (v / size.x) % size.y, v / (size.x * size.y));
+}
+
+// 64bit の足し算を 32bit の 2 つで(繰り上がりを手で回す。64bit の引き算と比べを並べない: T-1078・T-1159)
+int64_t MgAddSplit(int64_t a, int64_t b) {
+    const uint64_t ua = (uint64_t)a;
+    const uint64_t ub = (uint64_t)b;
+    const uint32_t aLow = (uint32_t)(ua & 0xFFFFFFFFull);
+    const uint32_t bLow = (uint32_t)(ub & 0xFFFFFFFFull);
+    const uint32_t low = aLow + bLow;
+    const uint32_t carry = low < aLow ? 1u : 0u;
+    const uint32_t high = (uint32_t)(ua >> 32) + (uint32_t)(ub >> 32) + carry;
+
+    return (int64_t)FX_U64(high, low);
+}
+
+// 符号(64bit の上の 32bit の最上位。0 との比べを 64bit で書かない)
+bool MgNegative(int64_t value) {
+    return ((uint32_t)((uint64_t)value >> 32) >> 31) != 0;
+}
+
+// 段 0(細かい格子)の値を groupshared に置く形(T-1222 2 本目): 解き始めの間は gs_potential が使われない
+// (多重格子の規則では、解き始めの前の圧力の値は読まれず、MgFinishToPotential が全部書く)ので、64bit の値を下の 32bit は [v]・上の 32bit は
+// [OH_MG_SHARED_HIGH + v] に借りる。段 0 のボクセルが OH_MG_SHARED_HIGH 以下で、段が 2 つ以上(一番粗い段は作業場)の時だけ
+FX_CONST uint32_t OH_MG_SHARED_HIGH = OH_SHELL_SHARED_VOXELS / 2;
+
+bool MgFineShared(ShellBox box) {
+    return box.size.x * box.size.y * box.size.z <= OH_MG_SHARED_HIGH && !MgCoarsest(box.size);
+}
+
+int64_t MgValueAt(uint32_t begin, uint32_t local, bool onShared) {
+    if (!onShared)
+        return g_multigrid[begin + local].value;
+
+    return (int64_t)FX_U64((uint32_t)gs_potential[OH_MG_SHARED_HIGH + local], (uint32_t)gs_potential[local]);
+}
+
+void MgStoreValue(uint32_t begin, uint32_t local, bool onShared, int64_t value) {
+    if (!onShared) {
+        g_multigrid[begin + local].value = value;
+        return;
+    }
+
+    gs_potential[local] = (int32_t)(uint32_t)((uint64_t)value & 0xFFFFFFFFull);
+    gs_potential[OH_MG_SHARED_HIGH + local] = (int32_t)(uint32_t)((uint64_t)value >> 32);
+}
+
+// 隣の値の重みつきの和(段の外は 0)
+int64_t MgNeighbourSum(uint32_t begin, uint3 size, uint3 c, OhShellMultigrid voxel, bool onShared) {
+    const uint32_t v = MgIndex(size, c);
+    const uint32_t strideY = size.x;
+    const uint32_t strideZ = size.x * size.y;
+    int64_t sum = 0;
+    if (c.x > 0)
+        sum += (int64_t)voxel.weightMinusX * MgValueAt(begin, v - 1, onShared);
+    if (c.x + 1 < size.x)
+        sum += (int64_t)voxel.weightPlusX * MgValueAt(begin, v + 1, onShared);
+    if (c.y > 0)
+        sum += (int64_t)voxel.weightMinusY * MgValueAt(begin, v - strideY, onShared);
+    if (c.y + 1 < size.y)
+        sum += (int64_t)voxel.weightPlusY * MgValueAt(begin, v + strideY, onShared);
+    if (c.z > 0)
+        sum += (int64_t)voxel.weightMinusZ * MgValueAt(begin, v - strideZ, onShared);
+    if (c.z + 1 < size.z)
+        sum += (int64_t)voxel.weightPlusZ * MgValueAt(begin, v + strideZ, onShared);
+
+    return sum;
+}
+
+// 赤黒 1 回(段が作業場にある時。色ごとに同期)。値 = (右辺 + 隣の和)÷ 重みの和(0 の向きに切る。逆数の掛け算は厳密)
+// その色のボクセルだけを回す(行ごとに x を 2 つおき。PressureColour と同じ並べ方。色ごとの答えは回す順によらない)
+void MgSweep(uint32_t begin, uint3 size, uint32_t thread, bool onShared) {
+    const uint32_t halfX = (size.x + 1) >> 1;
+    const uint32_t slots = halfX * size.y * size.z;
+    for (uint32_t colour = 0; colour < 2; ++colour) {
+        for (uint32_t k = thread; k < slots; k += OH_SHELL_THREADS) {
+            const uint32_t row = k / halfX;
+            const uint32_t y = row % size.y;
+            const uint32_t z = row / size.y;
+            const uint32_t x = ((k - (row * halfX)) << 1) + ((y + z + colour) & 1u);
+            if (x >= size.x)
+                continue;
+
+            const uint3 c = uint3(x, y, z);
+            const uint32_t v = MgIndex(size, c);
+            const OhShellMultigrid voxel = g_multigrid[begin + v];
+            const int64_t sum = voxel.rhs + MgNeighbourSum(begin, size, c, voxel, onShared);
+            const int64_t quotient = (int64_t)FxDivRecipU64(FxAbsU64(sum), voxel.recip);
+            MgStoreValue(begin, v, onShared, sum < 0 ? -quotient : quotient);
+        }
+
+        AllMemoryBarrierWithGroupSync();
+    }
+}
+
+void MgSweeps(uint32_t begin, uint3 size, uint32_t sweeps, uint32_t thread, bool onShared) {
+    for (uint32_t s = 0; s < sweeps; ++s)
+        MgSweep(begin, size, thread, onShared);
+}
+
+// 軸の粗い番号 coarse の中心(細かいセル i の中心を 2i + 1 とする単位)
+uint32_t MgCenter2(uint32_t fineCount, uint32_t coarse) {
+    const uint32_t first = 2 * coarse;
+    const uint32_t last = min(first + 1, fineCount - 1);
+
+    return first + last + 1;
+}
+
+// 粗い面の重み: まとめた面の重みの和 × 細かい中心の距離(内 2・壁まで 1)÷ 粗い中心の距離
+uint64_t MgCoarseFaceWeight(uint64_t sum, uint32_t fineCount, uint32_t coarseCount, uint32_t coarse, uint32_t side) {
+    const uint32_t me = MgCenter2(fineCount, coarse);
+    if (side == 0) {
+        if (coarse == 0)
+            return OhDivideU64(sum, me);
+
+        return OhDivideU64(sum * 2, me - MgCenter2(fineCount, coarse - 1));
+    }
+
+    if (coarse + 1 == coarseCount)
+        return OhDivideU64(sum, (2 * fineCount) - me);
+
+    return OhDivideU64(sum * 2, MgCenter2(fineCount, coarse + 1) - me);
+}
+
+// 細かいボクセル f の残り = 右辺 − (重みの和 × 値 − 隣の和)
+int64_t MgResidualAt(uint32_t begin, uint3 size, uint3 f, bool onShared) {
+    const uint32_t v = MgIndex(size, f);
+    const OhShellMultigrid voxel = g_multigrid[begin + v];
+
+    return voxel.rhs + MgNeighbourSum(begin, size, f, voxel, onShared) -
+           ((int64_t)voxel.total * MgValueAt(begin, v, onShared));
+}
+
+// 粗い段のボクセル 1 つを、子(最大 8)から作る(集める書き方。値は 0)。右辺 = 子の残りの和(残りはここで数える。
+// 残りを一度書いて同期する段を省いた。T-1222 2 本目)。面の重みは値によらないので、withWeights の時(解き始めの V 字 1 回目)だけ作る
+void MgCoarsen(uint32_t fineBegin, uint3 fineSize, uint32_t coarseBegin, uint3 coarseSize, uint32_t thread,
+               bool withWeights, bool fineShared) {
+    const uint32_t count = coarseSize.x * coarseSize.y * coarseSize.z;
+    for (uint32_t v = thread; v < count; v += OH_SHELL_THREADS) {
+        const uint3 c = MgCoord(coarseSize, v);
+        int64_t rhs = 0;
+        FX_UNROLL
+        for (uint32_t k = 0; k < 8; ++k) {
+            const uint3 f = (c * 2) + uint3(k & 1u, (k >> 1) & 1u, (k >> 2) & 1u);
+            if (f.x >= fineSize.x || f.y >= fineSize.y || f.z >= fineSize.z)
+                continue;
+
+            rhs += MgResidualAt(fineBegin, fineSize, f, fineShared);
+        }
+
+        if (!withWeights) {
+            g_multigrid[coarseBegin + v].rhs = rhs;
+            g_multigrid[coarseBegin + v].value = 0;
             continue;
         }
+
+        uint64_t sumMinusX = 0;
+        uint64_t sumPlusX = 0;
+        uint64_t sumMinusY = 0;
+        uint64_t sumPlusY = 0;
+        uint64_t sumMinusZ = 0;
+        uint64_t sumPlusZ = 0;
+        FX_UNROLL
+        for (uint32_t k = 0; k < 8; ++k) {
+            const uint3 f = (c * 2) + uint3(k & 1u, (k >> 1) & 1u, (k >> 2) & 1u);
+            if (f.x >= fineSize.x || f.y >= fineSize.y || f.z >= fineSize.z)
+                continue;
+
+            const OhShellMultigrid child = g_multigrid[fineBegin + MgIndex(fineSize, f)];
+            // まとまりの外へ向く面だけ(− 側は偶数の座標・+ 側は奇数の座標か箱の端)
+            sumMinusX += (f.x & 1u) == 0 ? child.weightMinusX : (uint64_t)0;
+            sumPlusX += (f.x & 1u) == 1 || f.x + 1 == fineSize.x ? child.weightPlusX : (uint64_t)0;
+            sumMinusY += (f.y & 1u) == 0 ? child.weightMinusY : (uint64_t)0;
+            sumPlusY += (f.y & 1u) == 1 || f.y + 1 == fineSize.y ? child.weightPlusY : (uint64_t)0;
+            sumMinusZ += (f.z & 1u) == 0 ? child.weightMinusZ : (uint64_t)0;
+            sumPlusZ += (f.z & 1u) == 1 || f.z + 1 == fineSize.z ? child.weightPlusZ : (uint64_t)0;
+        }
+
+        OhShellMultigrid coarse;
+        coarse.weightMinusX = MgCoarseFaceWeight(sumMinusX, fineSize.x, coarseSize.x, c.x, 0);
+        coarse.weightPlusX = MgCoarseFaceWeight(sumPlusX, fineSize.x, coarseSize.x, c.x, 1);
+        coarse.weightMinusY = MgCoarseFaceWeight(sumMinusY, fineSize.y, coarseSize.y, c.y, 0);
+        coarse.weightPlusY = MgCoarseFaceWeight(sumPlusY, fineSize.y, coarseSize.y, c.y, 1);
+        coarse.weightMinusZ = MgCoarseFaceWeight(sumMinusZ, fineSize.z, coarseSize.z, c.z, 0);
+        coarse.weightPlusZ = MgCoarseFaceWeight(sumPlusZ, fineSize.z, coarseSize.z, c.z, 1);
+        coarse.total = coarse.weightMinusX + coarse.weightPlusX + coarse.weightMinusY + coarse.weightPlusY +
+                       coarse.weightMinusZ + coarse.weightPlusZ;
+        coarse.recip = FxMakeRecipU64(coarse.total > 0 ? coarse.total : (uint64_t)1);
+        coarse.rhs = rhs;
+        coarse.value = 0;
+        coarse.scratch = 0;
+        g_multigrid[coarseBegin + v] = coarse;
+    }
+}
+
+// 三線形の戻しの軸ごとの重み(12 分): 細かいセル i が使う粗い番号 2 つ(OH_MG_NONE = 壁の向こう = 0)
+void MgProlongTap(uint32_t fineCount, uint32_t coarseCount, uint32_t i, out uint32_t close, out uint32_t other,
+                  out int64_t closeWeight, out int64_t otherWeight) {
+    const uint32_t position = (2 * i) + 1;
+    close = i / 2;
+    const uint32_t closeCenter = MgCenter2(fineCount, close);
+    other = OH_MG_NONE;
+    closeWeight = 12;
+    otherWeight = 0;
+    if (position == closeCenter)
+        return;
+
+    // 反対側の中心(壁なら壁の位置)
+    uint32_t otherCenter = 0;
+    if (position < closeCenter) {
+        if (close > 0) {
+            other = close - 1;
+            otherCenter = MgCenter2(fineCount, other);
+        }
+    } else if (close + 1 < coarseCount) {
+        other = close + 1;
+        otherCenter = MgCenter2(fineCount, other);
+    } else {
+        otherCenter = 2 * fineCount;
+    }
+
+    const uint32_t toClose = position > closeCenter ? position - closeCenter : closeCenter - position;
+    const uint32_t toOther = position > otherCenter ? position - otherCenter : otherCenter - position;
+    const uint32_t weight = (12 * toOther) / (toClose + toOther);
+    closeWeight = (int64_t)weight;
+    otherWeight = (int64_t)(12 - weight);
+}
+
+// 細かい段の値に、粗い段の直しの三線形の戻しを足す
+void MgProlongAdd(uint32_t fineBegin, uint3 fineSize, uint32_t coarseBegin, uint3 coarseSize, uint32_t thread,
+                  bool fineShared) {
+    const uint32_t count = fineSize.x * fineSize.y * fineSize.z;
+    for (uint32_t v = thread; v < count; v += OH_SHELL_THREADS) {
+        const uint3 c = MgCoord(fineSize, v);
+        uint32_t x0, x1, y0, y1, z0, z1;
+        int64_t wx0, wx1, wy0, wy1, wz0, wz1;
+        MgProlongTap(fineSize.x, coarseSize.x, c.x, x0, x1, wx0, wx1);
+        MgProlongTap(fineSize.y, coarseSize.y, c.y, y0, y1, wy0, wy1);
+        MgProlongTap(fineSize.z, coarseSize.z, c.z, z0, z1, wz0, wz1);
+        int64_t sum = 0;
+        FX_UNROLL
+        for (uint32_t k = 0; k < 8; ++k) {
+            const uint32_t cx = (k & 1u) == 0 ? x0 : x1;
+            const uint32_t cy = ((k >> 1) & 1u) == 0 ? y0 : y1;
+            const uint32_t cz = ((k >> 2) & 1u) == 0 ? z0 : z1;
+            if (cx == OH_MG_NONE || cy == OH_MG_NONE || cz == OH_MG_NONE)
+                continue;
+
+            const int64_t weight = ((k & 1u) == 0 ? wx0 : wx1) * (((k >> 1) & 1u) == 0 ? wy0 : wy1) *
+                                   (((k >> 2) & 1u) == 0 ? wz0 : wz1);
+            sum += weight * g_multigrid[coarseBegin + MgIndex(coarseSize, uint3(cx, cy, cz))].value;
+        }
+
+        const int64_t correction = OhMulDivToward0(sum, 1, OH_MG_PROLONG_DIVISOR);
+        MgStoreValue(fineBegin, v, fineShared, MgAddSplit(MgValueAt(fineBegin, v, fineShared), correction));
+    }
+}
+
+// 一番粗い段(どの向きも 2 以下 = 8 ボクセル以下)の赤黒を 1 波の中で回す(レーン = ボクセル。値はレジスタ・隣の値は WaveReadLaneAt。
+// グループの同期 2 × 16 回の代わり。T-1222 2 本目)。波の全レーンで呼ぶ。色ごとの答えは回す順によらないので、全スレッドの赤黒とビット単位で同じ
+void MgCoarsestWave(uint32_t begin, uint3 size) {
+    const uint32_t count = size.x * size.y * size.z;
+    const uint32_t lane = WaveGetLaneIndex();
+    const bool mine = lane < count;
+    const uint32_t own = mine ? lane : 0u;
+    const uint3 c = MgCoord(size, own);
+    const uint32_t strideY = size.x;
+    const uint32_t strideZ = size.x * size.y;
+    const OhShellMultigrid voxel = g_multigrid[begin + own];
+    const uint32_t ownColour = (c.x + c.y + c.z) & 1u;
+    // 隣のレーン(段の外なら自分。重み 0 の項にする)
+    const uint32_t minusX = c.x > 0 ? own - 1 : own;
+    const uint32_t plusX = c.x + 1 < size.x ? own + 1 : own;
+    const uint32_t minusY = c.y > 0 ? own - strideY : own;
+    const uint32_t plusY = c.y + 1 < size.y ? own + strideY : own;
+    const uint32_t minusZ = c.z > 0 ? own - strideZ : own;
+    const uint32_t plusZ = c.z + 1 < size.z ? own + strideZ : own;
+    const int64_t weightMinusX = c.x > 0 ? (int64_t)voxel.weightMinusX : (int64_t)0;
+    const int64_t weightPlusX = c.x + 1 < size.x ? (int64_t)voxel.weightPlusX : (int64_t)0;
+    const int64_t weightMinusY = c.y > 0 ? (int64_t)voxel.weightMinusY : (int64_t)0;
+    const int64_t weightPlusY = c.y + 1 < size.y ? (int64_t)voxel.weightPlusY : (int64_t)0;
+    const int64_t weightMinusZ = c.z > 0 ? (int64_t)voxel.weightMinusZ : (int64_t)0;
+    const int64_t weightPlusZ = c.z + 1 < size.z ? (int64_t)voxel.weightPlusZ : (int64_t)0;
+    int64_t value = voxel.value;
+    for (uint32_t s = 0; s < OH_MG_COARSEST_SWEEPS; ++s) {
+        for (uint32_t colour = 0; colour < 2; ++colour) {
+            int64_t sum = voxel.rhs;
+            sum += weightMinusX * WaveReadLaneAt(value, minusX);
+            sum += weightPlusX * WaveReadLaneAt(value, plusX);
+            sum += weightMinusY * WaveReadLaneAt(value, minusY);
+            sum += weightPlusY * WaveReadLaneAt(value, plusY);
+            sum += weightMinusZ * WaveReadLaneAt(value, minusZ);
+            sum += weightPlusZ * WaveReadLaneAt(value, plusZ);
+            const int64_t quotient = (int64_t)FxDivRecipU64(FxAbsU64(sum), voxel.recip);
+            if (ownColour == colour)
+                value = sum < 0 ? -quotient : quotient;
+        }
+    }
+
+    if (mine)
+        g_multigrid[begin + lane].value = value;
+}
+
+// V 字 1 回(段 0 の右辺と値から。再帰の代わりに下りと上りの回し)。withWeights = 粗い段の面の重みも作る(解き始めの 1 回目)
+void MgCycle(ShellBox box, uint32_t thread, bool withWeights) {
+    const uint32_t levels = MgLevelCount(box.size);
+    const bool fineShared = MgFineShared(box);
+    for (uint32_t level = 0; level + 1 < levels; ++level) {
+        uint3 fineSize;
+        uint32_t fineBegin;
+        uint3 coarseSize;
+        uint32_t coarseBegin;
+        MgLevelOf(box, level, fineSize, fineBegin);
+        MgLevelOf(box, level + 1, coarseSize, coarseBegin);
+        MgSweeps(fineBegin, fineSize, OH_MG_SMOOTH_SWEEPS, thread, fineShared && level == 0);
+        MgCoarsen(fineBegin, fineSize, coarseBegin, coarseSize, thread, withWeights, fineShared && level == 0);
+        AllMemoryBarrierWithGroupSync();
+    }
+
+    uint3 coarsestSize;
+    uint32_t coarsestBegin;
+    MgLevelOf(box, levels - 1, coarsestSize, coarsestBegin);
+    // 波の幅(装置で決まる)が 8 以上なら 1 波で、でなければ全スレッドの赤黒で
+    const bool inWave = WaveGetLaneCount() >= 8;
+    if (inWave && WaveActiveAnyTrue(thread == 0))
+        MgCoarsestWave(coarsestBegin, coarsestSize);
+    if (!inWave)
+        MgSweeps(coarsestBegin, coarsestSize, OH_MG_COARSEST_SWEEPS, thread, false);
+
+    AllMemoryBarrierWithGroupSync();
+    for (uint32_t up = levels - 1; up > 0; --up) {
+        uint3 fineSize;
+        uint32_t fineBegin;
+        uint3 coarseSize;
+        uint32_t coarseBegin;
+        MgLevelOf(box, up - 1, fineSize, fineBegin);
+        MgLevelOf(box, up, coarseSize, coarseBegin);
+        MgProlongAdd(fineBegin, fineSize, coarseBegin, coarseSize, thread, fineShared && up == 1);
+        AllMemoryBarrierWithGroupSync();
+        MgSweeps(fineBegin, fineSize, OH_MG_SMOOTH_SWEEPS, thread, fineShared && up == 1);
+    }
+}
+
+// 段 0 を面の重み(箱の外の面も)と残りから作る(値 0)
+void MgPrepareFine(ShellBox box, uint32_t thread) {
+    const uint32_t count = box.size.x * box.size.y * box.size.z;
+    for (uint32_t v = thread; v < count; v += OH_SHELL_THREADS) {
+        const uint3 c = VoxelCoord(box, v);
+        OhShellMultigrid fine;
+        fine.weightMinusX = g_faceWork[FaceAt(box, 0, c)].weight;
+        fine.weightPlusX = g_faceWork[FaceAt(box, 0, c + Unit(0))].weight;
+        fine.weightMinusY = g_faceWork[FaceAt(box, 1, c)].weight;
+        fine.weightPlusY = g_faceWork[FaceAt(box, 1, c + Unit(1))].weight;
+        fine.weightMinusZ = g_faceWork[FaceAt(box, 2, c)].weight;
+        fine.weightPlusZ = g_faceWork[FaceAt(box, 2, c + Unit(2))].weight;
+        fine.total = g_voxelWork[box.begin + v].total;
+        fine.recip = g_voxelWork[box.begin + v].recip;
+        fine.rhs = g_voxelWork[box.begin + v].residual * OH_MG_FINE_SCALE;
+        fine.value = 0;
+        fine.scratch = 0;
+        g_multigrid[box.multigridBegin + v] = fine;
+        if (MgFineShared(box))
+            MgStoreValue(box.multigridBegin, v, true, 0);
+    }
+}
+
+// ② 動かない点の残りの幅の真ん中へ寄せる: 右辺から 符号(値)×(重みの和 − 1)÷ 2(細かい単位)を引く
+void MgCenterRhs(ShellBox box, uint32_t thread) {
+    const uint32_t count = box.size.x * box.size.y * box.size.z;
+    for (uint32_t v = thread; v < count; v += OH_SHELL_THREADS) {
+        const OhShellMultigrid fine = g_multigrid[box.multigridBegin + v];
+        const uint64_t total = fine.total > 0 ? fine.total : (uint64_t)1;
+        const uint64_t middle = ((total - 1) >> 1) << OH_MG_FINE_BITS;
+        // 値 ≥ 0 なら − middle、負なら + middle(符号を付けて 32bit の 2 つで足す)
+        const int64_t shift = FxApplySign(middle, !MgNegative(MgValueAt(box.multigridBegin, v, MgFineShared(box))));
+        g_multigrid[box.multigridBegin + v].rhs = MgAddSplit(fine.rhs, shift);
+    }
+}
+
+// ③ Ψ = 四捨五入(値 ÷ 2^8。0 から遠い方へ)を圧力の値に
+void MgFinishToPotential(ShellBox box, uint32_t thread) {
+    const uint32_t count = box.size.x * box.size.y * box.size.z;
+    const uint64_t carryUnit = (uint64_t)1 << (OH_MG_FINE_BITS - 1);
+    for (uint32_t v = thread; v < count; v += OH_SHELL_THREADS) {
+        const int64_t value = MgValueAt(box.multigridBegin, v, MgFineShared(box));
+        const uint64_t rounded = (FxAbsU64(value) + carryUnit) >> OH_MG_FINE_BITS;
+        const int64_t potential = MgNegative(value) ? -(int64_t)rounded : (int64_t)rounded;
+        g_voxelWork[box.begin + v].potential = potential;
+        if (g_sharedPotential == 0)
+            continue;
 
         if (!FitsInt32(potential))
             gs_overflow = 1;
 
-        const int32_t value = (int32_t)potential;
-        if (value != gs_potential[v])
-            gs_pressureMoved[slot] = 1;
-
-        gs_potential[v] = value;
+        gs_potential[v] = (int32_t)potential;
     }
+}
+
+// ① ② ③ の解き始め(グループの全スレッドで呼ぶ。前後に同期)
+void MgSolveStart(ShellBox box, uint32_t thread) {
+    MgPrepareFine(box, thread);
+    AllMemoryBarrierWithGroupSync();
+    MgCycle(box, thread, true);
+    MgCenterRhs(box, thread);
+    AllMemoryBarrierWithGroupSync();
+    MgCycle(box, thread, false);
+    MgFinishToPotential(box, thread);
 }
 
 // ⑥ 圧力の力積(ΔM = (Ψ_i − Ψ_j)× 基準の質量)→ 速さ。運動量の真実は壁なら 0
@@ -699,6 +1218,7 @@ void WakeChanged(OhObject object, ShellBox box, uint32_t thread, uint64_t tick, 
     box.faceBegin[0] = shell.faceBegin[0];
     box.faceBegin[1] = shell.faceBegin[1];
     box.faceBegin[2] = shell.faceBegin[2];
+    box.multigridBegin = shell.multigridBegin;
     const uint64_t tick = FX_U64(g_tickHigh, g_tickLow);
     const uint32_t pass = g_passBase + objectIndex + 1;
     const uint64_t gravity = OhFlowGravityQ16(object.bodyLevel, g_substeps);
@@ -727,6 +1247,11 @@ void WakeChanged(OhObject object, ShellBox box, uint32_t thread, uint64_t tick, 
             gs_pressureMoved[0] = 0;
         }
 
+        for (uint32_t w = thread; w < OH_SHELL_DIRTY_WORDS; w += OH_SHELL_THREADS) {
+            gs_dirty[0][w] = 0xFFFFFFFFu;
+            gs_dirty[1][w] = 0xFFFFFFFFu;
+        }
+
         AllMemoryBarrierWithGroupSync();
         if ((g_stageMask & OH_STAGE_VOXELS) != 0)
             PrepareVoxels(table, gases, box, thread);
@@ -744,10 +1269,17 @@ void WakeChanged(OhObject object, ShellBox box, uint32_t thread, uint64_t tick, 
             PrepareResidual(box, thread);
 
         AllMemoryBarrierWithGroupSync();
+        // 解き始めを多重格子で(T-1222。g_pressureMode はルート定数なのでグループの全スレッドが同じ道を通る)
+        if ((g_pressureMode & OH_PRESSURE_MULTIGRID) != 0 && (g_stageMask & OH_STAGE_PRESSURE) != 0) {
+            MgSolveStart(box, thread);
+            AllMemoryBarrierWithGroupSync();
+        }
+
         // 圧力の値が groupshared なら、反復の間は groupshared の同期だけ(作業場の読みは反復の前に書いた値だけ)
         // 回 sweep は印 sweep % 3 に書き、終わりの同期の後に全スレッドが読む。次の回の印は今 0 に戻す(最後に読まれたのは 2 回前)
         uint32_t used = 0;
         bool quiet = false;
+        const bool dirtyOnly = PressureSlots(box) <= OH_SHELL_DIRTY_WORDS * 32;
         const uint32_t sweepLimit = (g_stageMask & OH_STAGE_PRESSURE) != 0 ? g_pressureSweeps : 0u;
         for (uint32_t sweep = 0; sweep < sweepLimit; ++sweep) {
             const uint32_t slot = sweep % 3;
@@ -755,7 +1287,7 @@ void WakeChanged(OhObject object, ShellBox box, uint32_t thread, uint64_t tick, 
                 gs_pressureMoved[(sweep + 1) % 3] = 0;
 
             for (uint32_t colour = 0; colour < 2; ++colour) {
-                PressureColour(box, thread, colour, slot);
+                PressureColour(box, thread, colour, slot, dirtyOnly);
                 if (g_sharedPotential != 0)
                     GroupMemoryBarrierWithGroupSync();
                 else

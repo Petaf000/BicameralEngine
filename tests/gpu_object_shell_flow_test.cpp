@@ -55,9 +55,9 @@ namespace {
     constexpr uint32_t SHARED_VOXELS = 7168;
     constexpr uint32_t ROOT_CONSTANT_COUNT = 10;
     constexpr uint32_t SWEEP_STATS = 4;  // g_stats の後ろ: 解いた回数・赤黒の和・一番多い・上限で止まった(T-1201)
-    // u0〜u10 / b0 / デバッグのリング / t0〜t7(11 × 2 + 10 + 2 + 8 × 2 = 50 語。物の熱の 63 語とは別の署名)
+    // u0〜u11 / b0 / デバッグのリング / t0〜t7(12 × 2 + 10 + 2 + 8 × 2 = 52 語。物の熱の 63 語とは別の署名)
     constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
-        .uavCount = 11, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = 8};
+        .uavCount = 12, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = 8};
 
     // 段の印(object_shell_flow.hlsl の OH_STAGE_*。1 つずつだけ回して費用を分ける。T-1223)
     constexpr uint32_t ALL_STAGES = 0xFFFFFFFFu;
@@ -93,8 +93,21 @@ namespace {
 
     struct ShellObject {
         uint32_t faceBegin[3];
-        uint32_t padding;
+        uint32_t multigridBegin;  // 圧力の多重格子の作業場の始まり(T-1222)
     };
+
+    // 圧力の多重格子の段のボクセル(object_shell_flow.hlsl の OhShellMultigrid。T-1222)
+    struct ShellMultigridWork {
+        std::array<uint64_t, 6> weights;
+        uint64_t total;
+        uint64_t recipMultiplier;
+        uint32_t recipShift1;
+        uint32_t recipShift2;
+        int64_t rhs;
+        int64_t value;
+        int64_t scratch;
+    };
+    static_assert(sizeof(ShellMultigridWork) == 96);
 
     enum Uav : uint8_t {
         UavVoxels,
@@ -108,6 +121,7 @@ namespace {
         UavVoxelWork,
         UavGasWork,
         UavFaceWork,
+        UavMultigrid,
         UAV_COUNT,
     };
     constexpr uint32_t SRV_COUNT = 8;
@@ -230,9 +244,24 @@ namespace {
     }
 
     // 物ごとの面の並びの始まり(軸 0・1・2 の順)と面の数
-    std::vector<ShellObject> ShellObjectsOf(const test::OhWorld& world, uint32_t& faceCount) {
+    // 圧力の多重格子の全部の段のボクセルの数(object_shell_flow.hlsl の MgLevelCount・MgLevelOf と同じ。一番粗い段はどの向きも 2 以下)
+    uint32_t MultigridVoxels(const test::OhFlowBox& box) {
+        std::array<uint32_t, 3> size = {box.size[0], box.size[1], box.size[2]};
+        uint32_t count = 0;
+        while (true) {
+            count += size[0] * size[1] * size[2];
+            if (size[0] <= 2 && size[1] <= 2 && size[2] <= 2)
+                return count;
+
+            for (uint32_t& s : size)
+                s = (s + 1) / 2;
+        }
+    }
+
+    std::vector<ShellObject> ShellObjectsOf(const test::OhWorld& world, uint32_t& faceCount, uint32_t& multigridCount) {
         std::vector<ShellObject> shells;
         faceCount = 0;
+        multigridCount = 0;
         for (const rx::OhObject& object : world.objects) {
             const test::OhFlowBox box = test::FlowBoxOf(object);
             ShellObject shell{};
@@ -241,6 +270,8 @@ namespace {
                 faceCount += static_cast<uint32_t>(box.FaceCount(a));
             }
 
+            shell.multigridBegin = multigridCount;
+            multigridCount += MultigridVoxels(box);
             shells.push_back(shell);
         }
 
@@ -261,8 +292,9 @@ namespace {
         uint32_t faceCount = 0;
         uint32_t passBase = 0;
         uint32_t sharedPotential = 0;
-        uint32_t pressureSweeps = 1024;   // 圧力の赤黒の上限(CPU の OhShellFlow と同じ既定)
-        uint32_t pressureMode = 1;        // 1 = 収まったら止める・2 = 温めた始まり(shaders の OH_PRESSURE_*。T-1201)
+        uint32_t pressureSweeps = 1024;  // 圧力の赤黒の上限(CPU の OhShellFlow と同じ既定)
+        uint32_t pressureMode =
+            1;  // 1 = 収まったら止める・2 = 温めた始まり・4 = 多重格子(shaders の OH_PRESSURE_*。T-1201・T-1222)
         uint32_t stageMask = ALL_STAGES;  // 回す段(測るだけ。T-1223)
     };
 
@@ -277,6 +309,7 @@ namespace {
         flow.pressureSweeps = rule.sweeps;
         flow.pressureUntilQuiet = (rule.mode & 1u) != 0;
         flow.pressureWarmStart = (rule.mode & 2u) != 0;
+        flow.pressureMultigrid = (rule.mode & 4u) != 0;
     }
 
     size_t StatsCount(size_t objects) {
@@ -304,12 +337,14 @@ namespace {
         if (!result.pipeline)
             return std::unexpected("パイプラインを作れない");
 
-        const std::vector<ShellObject> shells = ShellObjectsOf(world, result.faceCount);
+        uint32_t multigridCount = 0;
+        const std::vector<ShellObject> shells = ShellObjectsOf(world, result.faceCount, multigridCount);
         const std::vector<int64_t> momentum(result.faceCount, 0);
         const std::vector<uint32_t> stats(StatsCount(world.objects.size()), 0);
         const std::vector<ShellVoxelWork> voxelWork(world.voxels.size(), ShellVoxelWork{});
         const std::vector<rx::OhVoxelGas> gasWork(world.voxels.size(), rx::OhVoxelGas{});
         const std::vector<ShellFaceWork> faceWork(result.faceCount, ShellFaceWork{});
+        const std::vector<ShellMultigridWork> multigridWork(multigridCount, ShellMultigridWork{});
         const std::array<std::span<const std::byte>, UAV_COUNT> initial = {BytesOf(world.voxels),
                                                                            BytesOf(world.cells),
                                                                            BytesOf(world.carries),
@@ -320,7 +355,8 @@ namespace {
                                                                            BytesOf(stats),
                                                                            BytesOf(voxelWork),
                                                                            BytesOf(gasWork),
-                                                                           BytesOf(faceWork)};
+                                                                           BytesOf(faceWork),
+                                                                           BytesOf(multigridWork)};
         for (size_t i = 0; i < initial.size(); ++i) {
             result.uavs[i] = gpu::CreateBuffer(device, initial[i].size(), gpu::BufferKind::UnorderedAccess);
             result.uploads[i] = gpu::CreateFilledUpload(device, initial[i]);
@@ -717,9 +753,9 @@ namespace {
         if (compare) {
             const std::array<Shape, 2> shapes = {Shape{"紙 24 列・層 2 段", 24, 3, 2},
                                                  Shape{"紙 24 列・層 4 段", 24, 3, 4}};
-            const std::array<PressureRule, 3> rules = {PressureRule{"0 から決まった 24 回", 24, 0},
-                                                       PressureRule{"0 から収まるまで", 1024, 1},
-                                                       PressureRule{"温めた始まり + 収まるまで", 1024, 3}};
+            const std::array<PressureRule, 4> rules = {
+                PressureRule{"0 から決まった 24 回", 24, 0}, PressureRule{"0 から収まるまで", 1024, 1},
+                PressureRule{"温めた始まり + 収まるまで", 1024, 3}, PressureRule{"多重格子 + 収まるまで", 1024, 5}};
             for (const PressureRule& rule : rules) {
                 for (const Shape& shape : shapes) {
                     for (const bool sharedPotential : {true, false}) {
@@ -747,9 +783,9 @@ namespace {
             for (const Shape& shape : shapes) {
                 const uint32_t outer = (shape.columns + (2 * shape.layers)) * (1 + (2 * shape.layers)) *
                                        (shape.sizeZ + (2 * shape.layers));
-                const std::array<PressureRule, 3> rules = {PressureRule{"0 から決まった回数", measureSweeps, 0},
-                                                           PressureRule{"0 から収まるまで", 1024, 1},
-                                                           PressureRule{"温めた始まり + 収まるまで", 1024, 3}};
+                const std::array<PressureRule, 4> rules = {
+                    PressureRule{"0 から決まった回数", measureSweeps, 0}, PressureRule{"0 から収まるまで", 1024, 1},
+                    PressureRule{"温めた始まり + 収まるまで", 1024, 3}, PressureRule{"多重格子 + 収まるまで", 1024, 5}};
                 for (const PressureRule& rule : rules) {
                     if (onlyRule >= 0 && static_cast<uint32_t>(onlyRule) != rule.mode)
                         continue;
