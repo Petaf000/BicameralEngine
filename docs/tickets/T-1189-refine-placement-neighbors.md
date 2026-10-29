@@ -51,6 +51,12 @@
   斜面の空気の速さの比べは T-1257 に分けた。
   引き継ぎの組 14 本(reaction_package・gpu_multires・stress・wide_many・warp・activity・quiet・layers・uniform・gpu_lab_box〔HW・WARP〕・gpu_placement_refine〔HW・WARP〕・gpu_phase_layer)も合格(20261029-075222。u6 の後ろを溢れを使わない世界でも使うようにしたので全部の非溢れの世界に当たる)。`archmap --check` OK。
 
+- 2026-10-29 wt2(作業役 2 回目・仕上げ): rebase main(4d60f487。perf.md の行だけ衝突 → 両方残した)。dxil_alloca_check(T-1233 で main に入った検査)が
+  multires_refine_halo の 1 個で落ちた → 隣の写しの段で子をバッファから直に読む形に直して 0(e8b7feda)。ほかに落ちた 6 本(implicit_levels_tail_o0 など)は
+  今のビルドが作らない古い asm(10-08・10-09)の残りで、`_to_delete/stale-asm-20261029/` へ移した。release 警告 0。CPU の組(multires・placement_refine・
+  tree_refine_placement・multires_layers・float_check 5 本・dxil_alloca_check)と GPU の組(gpu_multires・gpu_multires_layers〔HW・WARP〕・gpu_placement_refine〔HW・WARP〕・
+  gpu_tree_refine_placement〔HW・WARP〕。20261029-115310)が合格。`archmap --check` OK。
+
 ## 残り(T-1257 へ)
 - 0.25 m の 25° の斜面の空気の速さの比べ(T-1106 の 2.8 m/s → 1 mm/s): 案 B の場面(case_b)は世界の木を通らず、絵 → 箱の細かくする口が PlaceRefineCell を直接呼び
   隣は絵のセルから読む(= もう隣を読む形。T-1106 の 1 mm/s はこの形の値)。世界の木で同じ比べをするには、斜面を世界の木の複数の根に描き、
