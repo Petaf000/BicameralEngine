@@ -11,7 +11,7 @@
 //   穴から「穴の長い辺 × 倍率」の内だけを細かく、閉じずに解き、全部細かい塊の答えと比べる(掘ったことによる変化の差)。
 // 引数: [--measure](全部の場面。既定は ctest 用の 32 × 16 m・0.5 m だけ)[--coarse](2 本目の全部の場面)[--ticks n](掘った後の刻み。既定 600)
 //   [--beam n](違う大きさの面の形 sim::MixedBeam の番号。既定 0 = ④ 対の面。1 = ③ 面の点のばね・2 = ③'・3 = ②・4 = ①・5 = ④' 対のずれだけ〔T-1207 の前〕。T-1191・T-1207 の比べ)
-//   [--pair n](対の負の項に残す粗いセルの硬さ sim::MixedPairMaterial の番号。既定 0 = 無し。T-1261 の研究)
+//   [--pair n](対の負の項に残す粗いセルの硬さ sim::MixedPairMaterial の番号。既定は SupportOptions の既定〔今は 0 = 無し〕。T-1261・T-1278)
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -593,7 +593,7 @@ namespace {
 
     // 1 つの場面: 全部細かい塊(閉じない)と、粗さで閉じた塊(倍率 2・4)
     // 対の負の項に残す粗いセルの硬さ(T-1261 の研究。--pair n)
-    sim::MixedPairMaterial pairMaterial = sim::MixedPairMaterial::None;
+    sim::MixedPairMaterial pairMaterial = sim::SupportOptions{}.mixedPairMaterial;  // 既定は支えの法則の既定(T-1279)
 
     CoarseResult CoarseCase(const Case& c, uint32_t ticks, bool bitCheck, size_t multiplierCount, sim::MixedBeam beam) {
         const sim::SupportOptions mixedOptions{.mixedBeam = beam, .mixedPairMaterial = pairMaterial};

@@ -11,7 +11,7 @@
 // 角の間のセルだけを 0.25 m に分け、違う大きさのセルが絡む段の棒の形 3 つ(① 中心〔既定〕・② 角の場所・置かない)を ④ で比べる
 // (落ちるのは ① のたわみ ±5 %・帳簿・決定性。縁の力は記録だけ = BraceCase)。
 // 引数: [--ticks n](既定 240)[--case n](n 番目の場面だけ。0 から。測り用)[--study](T-1260 の切り分けの場面。記録だけ)
-//   [--pair n](対の負の項に残す粗いセルの硬さ sim::MixedPairMaterial の番号。既定 0 = 無し。1・2 = T-1261・3・4 = T-1278 の研究。
+//   [--pair n](対の負の項に残す粗いセルの硬さ sim::MixedPairMaterial の番号。既定は SupportOptions の既定〔今は 0 = 無し〕。1・2 = T-1261・3・4 = T-1278 の研究。
 //   3 = NeighborStrain では周りなしの根の線の 2 場面も ±5 % の線〔T-1278〕)
 #include <algorithm>
 #include <cmath>
@@ -48,7 +48,8 @@ namespace {
     constexpr uint64_t FINE_MM = 250;
 
     // 対の負の項に残す粗いセルの硬さ(T-1261 の研究。--pair n で全部の場面に掛ける)
-    sim::MixedPairMaterial pairMaterial = sim::MixedPairMaterial::None;
+    // 既定は支えの法則の既定(SupportOptions。既定を変えれば試験も変わる。T-1279)
+    sim::MixedPairMaterial pairMaterial = sim::SupportOptions{}.mixedPairMaterial;
 
     // 解き方: 早く着く形(V 4 回 + 刻みをまたぐ共役勾配。T-1086)で釣り合いまで回す(答えの比べ。着く速さは T-1086)
     sim::SupportOptions Options(sim::MixedBeam beam, sim::MixedBrace brace = sim::MixedBrace::Center) {
@@ -433,22 +434,7 @@ namespace {
     // --- 場面 ---
     using test::Marked;
 
-    // 壁(0.5 m のセル 2 × 6 = 幅 1 m・高さ 3 m。左と下を固定)から出た片持ち梁(長さ 4 m・厚さ 1 m = 列 2〜9・段 2〜3)。
-    // 壁と梁の角は 2 つ(上の角 = 壁 (1, 4) と梁 (2, 3)・下の角 = 壁 (1, 1) と梁 (2, 2))で、どちらも段の斜めの棒が立つ(T-1133)
-    sim::SupportScene WallBeam(uint32_t wallColumns = 2) {
-        sim::SupportScene scene = test::Beam(wallColumns + 8, 6, COARSE_MM, false);
-        for (uint32_t up = 0; up < scene.height; ++up) {
-            for (uint32_t x = 0; x < scene.width; ++x) {
-                const size_t at = x + (size_t)scene.width * up;
-                const bool wall = x < wallColumns;
-                scene.solid[at] = wall || up == 2 || up == 3 ? 1 : 0;
-                scene.clamps[at] = (uint8_t)((x == 0 ? sim::SUPPORT_CLAMP_LEFT : 0) |
-                                             (wall && up == 0 ? sim::SUPPORT_CLAMP_BOTTOM : 0));
-            }
-        }
-
-        return scene;
-    }
+    using test::WallBeam;
 
     // 縁の力は記録だけ(T-1133): 段の角は入り隅で応力が細かさとともに伸びる所(全部 0.25 m でも角の面の力が一番大きい)・角の面は
     // 固定した面から 0.5 m のセル 1 つ以内。分けたセルが段の角に無い「根の 1 m」でも 10 % あり、棒の形によらない。落ちるのはたわみ ±5 %・帳簿・決定性
