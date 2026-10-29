@@ -1,7 +1,8 @@
 // gpu_cascade_light.h — 世界の中の光: 距離ごとの段を GPU で(Compute。shaders/sim/cascade_light.hlsl。T-0959・ADR-0432)。
 // CPU リファレンスは sim/cascade_light.h の StepCascadeLight(同じ刻みの結果がビット一致)。
-// 多重解像度の木(sim/gpu_multires)のルート署名と外のバッファ u4・u5 を借りる(太陽の影の柱と同じ形)。今は段 0 の密な写し(CascadeGrid)を読む
-// (木の細かい葉・粗い根を読む形は T-0973)。
+// 多重解像度の木(sim/gpu_multires)のルート署名と外のバッファ u4・u5 を借りる(太陽の影の柱と同じ形)。段 0 の密な写し(CascadeGrid)を読む。
+// CreateFromTree で作ると、RecordTreeGrid が刻みの初めの木の葉(粗い葉を含む)から GPU の上で写しを作る(CPU の MakeCascadeTreeGrid と
+// ビット単位で同じ。T-1117)。粗い葉の中も 0.5 m で歩く(葉の大きさで歩く形・127 の限りを外す形は T-1117 の残り)。
 // 仮の世界(sim/probe_sim。T-1154)は CreateStandalone で作る: 同じシェーダーを自分のルート署名(u0〜u5 + 定数 26 語 + デバッグのリング。
 // 木のルート署名と同じ並びの部分だけ)で動かし、光の値と温度は呼ぶ側の GPU の段が毎刻み作業のバッファ(Work の workLights・workTemperatures)へ書く。
 // 持ち越しの表は刻みの偶奇で選ぶ(刻み t は表 t & 1 を読み、表 1 − (t & 1) へ書く)ので、CPU に刻みをまたぐ状態が無い(写し・巻き戻しは状態のバッファの頭だけを写す)。
@@ -43,8 +44,8 @@ namespace bicameral::sim {
     struct GpuCascadeTickResult {
         CascadeTickResult result;  // CPU と同じ形(持ち越しはセル・面・帯の順に並べ直す)
         uint32_t activeFaces = 0;  // 段 0 で放った面の数
-        uint32_t overflow = 0;     // 1 = 放つ面・2 = 袋が溢れた
-        uint32_t bagPeak = 0;      // 段 1 つの袋の数の最大(作ってから)
+        uint32_t overflow = 0;  // 1 = 放つ面・2 = 袋が溢れた・4 = 木を読む写しが 0.5 m より細かい葉に当たった(T-1117)
+        uint32_t bagPeak = 0;   // 段 1 つの袋の数の最大(作ってから)
     };
 
     class GpuCascadeLight {
@@ -54,6 +55,12 @@ namespace bicameral::sim {
                                                                                 const CascadeGrid& grid,
                                                                                 const CascadeParams& params,
                                                                                 const GpuCascadeCapacity& capacity);
+
+        // 木を読む形(T-1117): 升目の箱は shape の世界の箱(MakeCascadeTreeBox。形だけ読む)、光の値と温度は毎刻み RecordTreeGrid が
+        // 木から書く。物質の光の値(table.speciesLight)は作業のバッファへ写す。読む枠は世界の枠(shape.capacity.worldBlocks)だけ
+        [[nodiscard]] static std::expected<GpuCascadeLight, std::string> CreateFromTree(
+            ID3D12Device5* device, const GpuMultires& nest, const MultiresNest& shape, const BakedReactionTable& table,
+            const CascadeParams& params, const GpuCascadeCapacity& capacity);
 
         // 仮の世界用(T-1154): 自分のルート署名で動く。grid の光の値と温度は初めの値(毎刻み呼ぶ側が作業のバッファへ書き直す)
         [[nodiscard]] static std::expected<GpuCascadeLight, std::string> CreateStandalone(
@@ -67,6 +74,11 @@ namespace bicameral::sim {
         // 1 刻み(前の刻みの持ち越しを読み、次の刻みへの持ち越しを書く)
         void RecordTick(ID3D12GraphicsCommandList10* list, GpuMultires& nest, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                         uint64_t tick);
+
+        // 木の葉 → 作業の光の値と温度(CreateFromTree で作った時だけ。RecordTick の前に刻みごとに 1 回)。
+        // 0.5 m より細かい葉は書かずに Read の overflow に 4 を立てる。CreateFromTree でなければ false
+        [[nodiscard]] bool RecordTreeGrid(ID3D12GraphicsCommandList10* list, GpuMultires& nest,
+                                          D3D12_GPU_VIRTUAL_ADDRESS debugRing);
 
         // --- 仮の世界用(CreateStandalone で作った時だけ)---
         // 初めの持ち越しは表 0(刻み 0 から始める世界)。作業のバッファは既定のヒープへ写し、UAV の状態で返す
@@ -130,11 +142,11 @@ namespace bicameral::sim {
                               const CascadeCarry& carry);
         void RecordTickWith(ID3D12GraphicsCommandList10* list, GpuMultires* nest, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                             uint64_t tick, uint32_t in, gpu::StageStamps* stamps = nullptr, uint8_t firstStage = 0);
-        static std::expected<GpuCascadeLight, std::string> CreateWith(ID3D12Device5* device,
-                                                                      ID3D12RootSignature* rootSignature,
-                                                                      const CascadeGrid& grid,
-                                                                      const CascadeParams& params,
-                                                                      const GpuCascadeCapacity& capacity);
+        // treeLights は木を読む形の物質の光の値(作業のバッファの温度の後ろへ。空なら置かない)
+        static std::expected<GpuCascadeLight, std::string> CreateWith(
+            ID3D12Device5* device, ID3D12RootSignature* rootSignature, const CascadeGrid& grid,
+            const CascadeParams& params, const GpuCascadeCapacity& capacity,
+            std::span<const reaction::LtSpeciesLight> treeLights = {});
 
         ComPtr<ID3D12RootSignature> m_ownRoot;  // CreateStandalone の時だけ
         std::vector<ComPtr<ID3D12PipelineState>> m_pipelines;
@@ -150,6 +162,11 @@ namespace bicameral::sim {
             m_levelArgs;  // 段ごとの起動の引数(u3。COMMON で置き、刻みの中で書く間 UAV・読む間 INDIRECT_ARGUMENT)
         ComPtr<ID3D12CommandSignature> m_dispatchSignature;  // 起動 1 回だけの形(ルートの引数は変えない)
         bool m_indirectLevels = false;
+
+        // --- 木を読む形(CreateFromTree の時だけ。T-1117)---
+        ComPtr<ID3D12PipelineState> m_treeGrid;
+        uint32_t m_treeWorldBlocks = 0;
+        uint32_t m_treeLightsOffset = 0;          // 作業の中の物質の光の値(バイト)
         std::vector<std::byte> m_workBytesImage;  // 作業の中身(初めの持ち越しの前まで)
         reaction::RcGpuParams m_params{};
         uint64_t m_workBytes = 0;

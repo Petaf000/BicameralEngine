@@ -154,6 +154,36 @@ namespace bicameral::sim {
         return CreateWith(device, nest.RootSignature(), grid, params, capacity);
     }
 
+    std::expected<GpuCascadeLight, std::string> GpuCascadeLight::CreateFromTree(
+        ID3D12Device5* device, const GpuMultires& nest, const MultiresNest& shape, const BakedReactionTable& table,
+        const CascadeParams& params, const GpuCascadeCapacity& capacity) {
+        const auto box = MakeCascadeTreeBox(shape);
+        if (!box)
+            return std::unexpected(box.error());
+
+        if (table.speciesLight.empty())
+            return std::unexpected("物質の光の値が無い");
+
+        if (uint64_t{shape.capacity.worldBlocks} * multires::MR_BLOCK_CELLS >= (uint64_t{1} << 32))
+            return std::unexpected("世界の枠が多すぎる(葉のセルの番号が 32bit)");
+
+        auto result = CreateWith(device, nest.RootSignature(), *box, params, capacity, table.speciesLight);
+        if (!result)
+            return result;
+
+        const auto shader = gpu::LoadShader("sim/cascade_light_tree_grid.cso");
+        if (!shader)
+            return std::unexpected(shader.error());
+
+        result->m_treeGrid = gpu::CreateComputePipeline(device, nest.RootSignature(), *shader);
+        if (!result->m_treeGrid)
+            return std::unexpected("木を読む写しのパイプラインを作れない");
+
+        result->m_treeWorldBlocks = shape.capacity.worldBlocks;
+
+        return result;
+    }
+
     std::expected<GpuCascadeLight, std::string> GpuCascadeLight::CreateStandalone(ID3D12Device5* device,
                                                                                   const CascadeGrid& grid,
                                                                                   const CascadeParams& params,
@@ -186,11 +216,9 @@ namespace bicameral::sim {
         return m_levelArgs && SUCCEEDED(created);
     }
 
-    std::expected<GpuCascadeLight, std::string> GpuCascadeLight::CreateWith(ID3D12Device5* device,
-                                                                            ID3D12RootSignature* rootSignature,
-                                                                            const CascadeGrid& grid,
-                                                                            const CascadeParams& params,
-                                                                            const GpuCascadeCapacity& capacity) {
+    std::expected<GpuCascadeLight, std::string> GpuCascadeLight::CreateWith(
+        ID3D12Device5* device, ID3D12RootSignature* rootSignature, const CascadeGrid& grid, const CascadeParams& params,
+        const GpuCascadeCapacity& capacity, std::span<const rx::LtSpeciesLight> treeLights) {
         if (auto checked = CheckGpuShape(grid, params, capacity); !checked)
             return std::unexpected(checked.error());
 
@@ -240,7 +268,10 @@ namespace bicameral::sim {
         gpu.workTexels = static_cast<uint32_t>(WORK_PARAMS_BYTES);
         gpu.workLights = static_cast<uint32_t>(AlignUp(gpu.workTexels + (texels->size() * 4)));
         gpu.workTemperatures = static_cast<uint32_t>(AlignUp(gpu.workLights + (cells * LIGHT_BYTES)));
-        gpu.workCarry = static_cast<uint32_t>(AlignUp(gpu.workTemperatures + (cells * 4)));
+        // 木を読む形の物質の光の値は温度の後ろ(初めの持ち越しの前なので、作業の中身の写しに入る)
+        result.m_treeLightsOffset = static_cast<uint32_t>(AlignUp(gpu.workTemperatures + (cells * 4)));
+        const uint64_t treeLightsBytes = treeLights.size_bytes();
+        gpu.workCarry = static_cast<uint32_t>(AlignUp(result.m_treeLightsOffset + treeLightsBytes));
         result.m_workBytes = gpu.workCarry + (uint64_t{capacity.carry} * 16);
         result.m_stateBytes = LayOutState(gpu, cells, capacity, result.m_readbackBytes);
         if (result.m_stateBytes >= (uint64_t{1} << 32) || result.m_workBytes >= (uint64_t{1} << 32))
@@ -251,6 +282,8 @@ namespace bicameral::sim {
         std::memcpy(image.data() + gpu.workTexels, texels->data(), texels->size() * 4);
         std::memcpy(image.data() + gpu.workLights, grid.lights.data(), cells * LIGHT_BYTES);
         std::memcpy(image.data() + gpu.workTemperatures, grid.temperatureMk.data(), cells * 4);
+        if (!treeLights.empty())
+            std::memcpy(image.data() + result.m_treeLightsOffset, treeLights.data(), treeLightsBytes);
 
         result.m_work = gpu::CreateBuffer(device, result.m_workBytes, gpu::BufferKind::UnorderedAccess);
         result.m_workUpload = gpu::CreateBuffer(device, result.m_workBytes, gpu::BufferKind::Upload);
@@ -379,6 +412,24 @@ namespace bicameral::sim {
     void GpuCascadeLight::RecordTick(ID3D12GraphicsCommandList10* list, GpuMultires& nest,
                                      D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick) {
         RecordTickWith(list, &nest, debugRing, tick, m_parity);
+    }
+
+    bool GpuCascadeLight::RecordTreeGrid(ID3D12GraphicsCommandList10* list, GpuMultires& nest,
+                                         D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
+        if (!m_treeGrid)
+            return false;
+
+        // 1 スレッド = 葉のセル 1 つ(世界の枠 × 512)。歩幅で回す(ほかの段と同じ)。
+        // 1 スレッド = 升目のセル 1 つ(索引で葉を引く)の形と比べて、こちらが速かった(docs/perf.md 2026-10-29)
+        const uint64_t items = uint64_t{m_treeWorldBlocks} * multires::MR_BLOCK_CELLS;
+        const uint64_t groups = std::clamp<uint64_t>((items + RC_GROUP_THREADS - 1) / RC_GROUP_THREADS, 1, MAX_GROUPS);
+        nest.SetExternalViews(m_work->GetGPUVirtualAddress(), m_state->GetGPUVirtualAddress());
+        nest.RecordExternalDispatch(
+            list, debugRing, m_treeGrid.Get(), static_cast<uint32_t>(groups),
+            {m_treeWorldBlocks, m_treeLightsOffset, static_cast<uint32_t>(groups * RC_GROUP_THREADS), 0});
+        nest.SetExternalViews(0, 0);
+
+        return true;
     }
 
     void GpuCascadeLight::RecordTick(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
