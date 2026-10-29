@@ -33,3 +33,5 @@
 - 2026-10-29(wt4): 段 1 のうち「受けのあった葉」だけ(CascadeTouchedSlots。T-1227 のブランチ t-1227-rc-carry-leaf)。RadiationGrid・RcSources を
   PROBE_SCHEDULE_CHANGED_WORD で飛ばす GPU の部分と gpu_radiation_cost の「全部変わった」場面はまだ(次の作業役)。段 2 に要るもの: 当てる段の 1 つの関数が
   受けのあった枠に busyTick を書く(T-1252)・GPU では集めて書く段の印のブロック(触ったブロックの冪等の OR)がそのまま受けのあった枠になる。
+- 2026-10-29(wt4 3 本目): 段 1 の RadiationGrid・RcSources を印で飛ばす分は未着手(時間切れ)。読んだ所の要点と案・注意(放つセルの印・保存点・
+  表の差し替え)は T-1227 の「T-1228 段 1 の残り」に書いた。T-1227 の頁の印(t-1227-gpu-carry)の上で始めてよい。

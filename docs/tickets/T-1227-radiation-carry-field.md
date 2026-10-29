@@ -25,6 +25,10 @@ RC の持ち越し(今は (セル・面・帯) の鍵の密な表を刻みの偶
 - [x] **段 1 の CPU(2026-10-29 wt4・司令塔の完了条件)**: 持ち越しの鍵を (葉の枠・セル・面・帯) に(sim/cascade_light の CascadeLeafCarry・FoldCarryToLeaves・SpreadLeafCarry・
       StepCascadeLightOnLeaves・RcCarrySpreadShare)。全部 0.5 m の木で升目の鍵と 6 刻みビット一致・1 m の根の木と混ざった木で帳簿が合う(cascade_tree_grid の 5)。
       上の GPU の「ブロックの頁 × セル × 12」の表と CarryIn・RadiationHash を印のブロックだけにするのは**まだ**(下の「段 1 の残り」)
+- [x] **段 1 の GPU の頁の印(2026-10-29 wt4 3 本目)**: 持ち越しの表に頁の印・RcCarryIn と RadiationHash は印の頁だけ(下の「段 1 の残りの GPU の形」)。
+      gpu_cascade_light(_warp)・gpu_cascade_tree_grid(_warp。4 = 葉へ畳んで 0.5 m の木で CPU の葉の鍵とビット一致・混ざった木で帳簿)・
+      gpu_radiation_cost・gpu_probe_rewind・probe_radiation が通った。2 側の CarryIn + Hash 約 190 → 約 90 µs(perf.md)。
+      木を読む形(CreateFromTree)の GPU の葉の頁へ atomic で畳む・広げるは段 2(頁の取り方が段 2 の集めて書く段)
 - [ ] 帳簿の 4-3 の行
 - [ ] release のビルド(警告 0)・archmap --check
 
@@ -104,3 +108,5 @@ RC の持ち越し(今は (セル・面・帯) の鍵の密な表を刻みの偶
   ブランチ t-1227-rc-carry-leaf。
 - 2026-10-29(wt4 2 本目): t-1227-rc-carry-leaf を渡す形に(release 警告 0・cascade_light・cascade_light_swing・cascade_tree_grid・probe_radiation・dxil_alloca_check)。
   GPU の頁の表と印(段 1 の残り)は時間切れで未着手。案を「段 1 の残り」の引き継ぎに書いた。
+- 2026-10-29(wt4 3 本目): 段 1 の残りの GPU のうち頁の印(AddCarry が立てる・RcCarryIn と RadiationHash は印の頁だけ・RcLevel0Prepare が 0 に)。
+  試験は上。T-1228 段 1 の RadiationGrid を印で飛ばす分は未着手(T-1228 と下の「T-1228 段 1 の残り」に読んだ所の要点)。ブランチ t-1227-gpu-carry。
