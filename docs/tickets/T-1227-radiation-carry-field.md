@@ -50,6 +50,14 @@ RC の持ち越し(今は (セル・面・帯) の鍵の密な表を刻みの偶
 - 木を読む形(CreateFromTree)で葉の鍵の持ち越し(上の CPU)を GPU に: 畳む = 升目ごとに葉の頁へ atomic の和・広げる = CarryIn が葉の面の層へ RcCarrySpreadShare。
   CPU の StepCascadeLightOnLeaves とビット一致(gpu_cascade_tree_grid に場面)。頁の取り方は段 2 の集めて書く段(枠の順のプレフィックス和)に合わせる = **段 2 で**。
 
+- 引き継ぎ(2026-10-29 wt4 2 本目・未着手。形の案だけ): 頁の単位は「セル 512 個の連続 = 鍵 6144 個 = 48 KiB」(仮の世界 64³ は 512 頁)。
+  印は表ごとに頁 1 語(uint32。stateCarry0/1 の後ろに 2 × 頁の数)。AddCarry が 0 から増やした時に頁の印を冪等の OR で立てる(今の RC_GPU_CARRY_COUNT と同じ所)。
+  RcCarryIn は「頁 × 6144」を回して印の無い頁を飛ばし、読み終えた頁の印を 0 に。RadiationHash も出る表の印の頁だけ(読むだけ・0 にしない)。
+  RcInitBags の初めの持ち越しも印を立てる。保存点は PersistentStateBytes に印の語を含める(読み戻し・写しの早送りの形がそのまま)。
+  ハッシュの項は (セル・面・帯) のまま = 今とビット一致の見込み。確かめ: gpu_cascade_light・gpu_cascade_light_warp・gpu_radiation_cost・probe_radiation(CPU)。
+  T-1228 段 1(RadiationGrid を PROBE_SCHEDULE_CHANGED_WORD で飛ばす)は「最後に写した刻み」を作業のバッファに持ち、ブロックの印 > それのブロックだけ写す。
+  読み込んだ直後・表の差し替えの後は全部(RecordRadiationInitialization・RecordRadiationTableSwap で「最後に写した刻み」を 0 に)。gpu_radiation_cost に「全部変わった」の場面。
+
 ## 段 2 に要るもの(T-1252 段 2 の後)
 - 登録に持ち越しの欄(セル・12 値・SF_SCALE_OWNER の光の配り・保存量の列)。SF_MAX_COMPONENTS 12(T-1252)。
 - 配り手の関数 2 つ: 木の段ごとの細かく(面 f の側の子 4 つへ同じ重み・反対は 0)/ 粗く(面 f の側の子 4 つの和)。上の升目への広げ(一度に 4^−L)とは端数の置き場が違うので別の関数。
@@ -63,3 +71,5 @@ RC の持ち越し(今は (セル・面・帯) の鍵の密な表を刻みの偶
 - 2026-10-29(wt4): 段 1 の CPU。葉の鍵の持ち越し(CascadeLeafCarry・FoldCarryToLeaves・SpreadLeafCarry・StepCascadeLightOnLeaves・RcCarrySpreadShare)と
   受けのあった枠(CascadeTouchedSlots = T-1228 段 1)。cascade_tree_grid に 5・6(0.5 m の木で 6 刻みビット一致・粗い木と混ざった木で帳簿)。GPU の頁の表は段 1 の残り。
   ブランチ t-1227-rc-carry-leaf。
+- 2026-10-29(wt4 2 本目): t-1227-rc-carry-leaf を渡す形に(release 警告 0・cascade_light・cascade_light_swing・cascade_tree_grid・probe_radiation・dxil_alloca_check)。
+  GPU の頁の表と印(段 1 の残り)は時間切れで未着手。案を「段 1 の残り」の引き継ぎに書いた。
