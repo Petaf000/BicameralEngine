@@ -359,7 +359,10 @@ namespace {
 
         TestGasSave(Scene::Blast, 32, 20, 8);
 
-        TestSupportSave("片持ち梁 16 × 4 m", test::Beam(32, 8, 500, false), sim::SupportSolve::Coupled, 60, 20);
+        // 1 つの系の保存点は 10(2026-10-29 本体: T-1206〔440ddf8b〕の後、刻み 20 で持つ向きを捨てても答えが変わらなくなった =
+        // 試験が弱くなった。持つ向きは 485 個 0 でないが、その刻みでは使われない〔p_前ᵀ r_前 が正でないとみられる・未確認〕。
+        // 保存点 2・5・10・15 では捨てるとその刻みからずれる)
+        TestSupportSave("片持ち梁 16 × 4 m", test::Beam(32, 8, 500, false), sim::SupportSolve::Coupled, 60, 10);
         TestSupportSave("洞窟 0.5 m", test::Cave(500), sim::SupportSolve::Coupled, 40, 12);
         TestSupportSave("片持ち梁 16 × 4 m", test::Beam(32, 8, 500, false), sim::SupportSolve::Lagged, 60, 20);
 
