@@ -1603,6 +1603,290 @@ namespace {
         return trace;
     }
 
+    // --- T-1212: 静かな夜の刻みを選ぶ段の並び(y = z = 0 の列の単位ごとの e・望み・窓の上限・選んだ e)と、
+    // 毎刻みとの差の x(1 m ごと)の分布。night-trace [tracefrom=刻み] [traceto=刻み] ---
+    uint64_t traceFrom = 0;
+    uint64_t traceTo = UINT64_MAX;
+    uint64_t traceLockstep = 0;  // lockstep=n: 毎刻みと並べて、歩を終えたセルの差が n mK 以上の刻みを書く(traceto まで)
+
+    void CheckNightTrace(const Material& material) {
+        const Profile profile = PondProfile(WorldLength(TreeShape{}));
+        TimeTreeSetup setup = MakeSetup(material, TimeStepRule::Change);
+        setup.groupShift = groupShift;
+        const TimeTreeWorld world = MakeWorld(setup, material, sceneShape, profile);
+        std::vector<double> unitX;
+        std::vector<uint8_t> row;
+        for (const uint32_t unit : world.layout.units) {
+            const MrBlock& block = world.nest.blocks[unit / MR_BLOCK_CELLS];
+            const uint32_t index = unit % MR_BLOCK_CELLS;
+            const bool onRow = block.originY + MrCellY(index) == 0 && block.originZ + MrCellZ(index) == 0;
+            unitX.push_back(static_cast<double>(block.originX + MrCellX(index)) * CellMeters(block.level));
+            row.push_back(onRow ? 1 : 0);
+        }
+
+        TimeTreeWorld run = world;
+        const TimeTreeChooseObserver observer = [&](const TimeTreeChooseView& view) {
+            if (view.tick < traceFrom || view.tick > traceTo)
+                return;
+
+            const TimeTreeSteps& steps = run.steps;
+            std::string line;
+            for (size_t u = 0; u < view.next.size(); ++u) {
+                if (row[u] == 0)
+                    continue;
+
+                const uint32_t unit = run.layout.units[u];
+                line += std::format(" {:g}:w{}", unitX[u], view.windowCaps[u]);
+                if (view.next[u] >= 0)
+                    line += std::format(">{}", view.next[u]);
+                else
+                    line += std::format("|{}@{}", steps.exponent[unit], steps.end[unit]);
+
+                line += std::format("d{}", steps.desired[unit]);
+            }
+
+            Log(Channel::Sim, Level::Info, "選ぶ段 刻み {}・上限 {}・打ち切り計 {}:{}", view.tick, view.cap,
+                steps.truncations, line);
+        };
+
+        setup.chooseObserver = &observer;
+        const uint64_t ticks = sceneTicks != 0 ? sceneTicks : NIGHT_TICKS;
+        RunResult trial;
+        for (uint64_t done = 0; done < ticks; done += COMPARE_EVERY) {
+            StepTimeTree(setup, run, COMPARE_EVERY);
+            trial.snapshots.push_back(TakeSnapshot(run));
+        }
+
+        trial.steps = run.steps;
+        if (traceLockstep != 0) {
+            bool fileConserved = true;
+            const std::string fileTag = shapeName == "mixed" ? std::string("night")
+                                                             : std::format("night_{}", shapeName);
+            const std::vector<Snapshot> fileReference = ReferenceSnapshots("夜の並び", fileTag, material, profile,
+                                                                           NIGHT_TICKS, {}, fileConserved);
+            TimeTreeSetup fixed = MakeSetup(material, TimeStepRule::Fixed);
+            fixed.cyclesAtZero = 0;
+            TimeTreeWorld a = MakeWorld(setup, material, sceneShape, profile);
+            TimeTreeWorld b = MakeWorld(fixed, material, sceneShape, profile);
+            setup.chooseObserver = nullptr;
+            const double cap = material.heatPerCubic * LEVEL0_VOLUME;
+            double overall = 0.0;
+            uint64_t overallTick = 0;
+            for (uint64_t tick = 1; tick <= traceTo; ++tick) {
+                StepTimeTree(setup, a, 1);
+                StepTimeTree(fixed, b, 1);
+                if (tick % COMPARE_EVERY == 0) {
+                    const Snapshot sa = TakeSnapshot(a);
+                    const Snapshot sb = TakeSnapshot(b);
+                    const Snapshot& sf = fileReference[tick / COMPARE_EVERY - 1];
+                    double ab = 0.0;
+                    double bf = 0.0;
+                    double af = 0.0;
+                    for (size_t c = 0; c < sa.energy.size(); ++c) {
+                        ab = std::max(ab, std::abs(static_cast<double>(sa.energy[c] - sb.energy[c])) / cap);
+                        bf = std::max(bf, std::abs(static_cast<double>(sb.energy[c] - sf.energy[c])) / cap);
+                        af = std::max(af, std::abs(static_cast<double>(sa.energy[c] - sf.energy[c])) / cap);
+                    }
+
+                    Log(Channel::Sim, Level::Info,
+                        "並走 刻み {}: 試しと毎刻み {:.2f} mK・毎刻みと写し {:.2f} mK・試しと写し {:.2f} mK", tick, ab,
+                        bf, af);
+                }
+
+                if (tick < traceFrom)
+                    continue;
+
+                // 歩をちょうど終えた単位のセルだけ比べる(歩の途中の値は歩の終わりの値なので比べられない)
+                double worst = 0.0;
+                uint32_t worstId = 0;
+                for (const uint32_t unit : a.layout.units) {
+                    if (a.steps.open[unit] == 0 || a.steps.end[unit] != tick)
+                        continue;
+
+                    for (const uint32_t id : a.layout.unitCells[unit]) {
+                        const uint32_t slot = id / MR_BLOCK_CELLS;
+                        const uint32_t index = id % MR_BLOCK_CELLS;
+                        const double d = std::abs(static_cast<double>(TimeTreeSettledEnergy(a, slot, index) -
+                                                                      TimeTreeSettledEnergy(b, slot, index))) /
+                                         cap;
+                        if (d > worst) {
+                            worst = d;
+                            worstId = id;
+                        }
+                    }
+                }
+
+                if (worst > overall) {
+                    overall = worst;
+                    overallTick = tick;
+                }
+
+                if (worst < static_cast<double>(traceLockstep))
+                    continue;
+
+                const uint32_t slot = worstId / MR_BLOCK_CELLS;
+                const uint32_t index = worstId % MR_BLOCK_CELLS;
+                const MrBlock& block = a.nest.blocks[slot];
+                const uint32_t unit = TimeTreeUnitOf(a, slot, index);
+                std::string around;
+                for (const uint32_t other : a.layout.neighbors[unit])
+                    around += std::format(" {}:{}@{}-{}", other, a.steps.exponent[other], a.steps.start[other],
+                                          a.steps.end[other]);
+
+                Log(Channel::Sim, Level::Info,
+                    "並走 刻み {}: 歩を終えたセルの差の最大 {:.2f} mK(セル {},{},{}・単位 {} の e {}・歩 {}〜)・隣{}",
+                    tick, worst, block.originX + MrCellX(index), block.originY + MrCellY(index),
+                    block.originZ + MrCellZ(index), unit, a.steps.exponent[unit], a.steps.start[unit], around);
+            }
+
+            Log(Channel::Sim, Level::Info, "並走 刻み {}〜{}: 歩を終えたセルの差の最大 {:.2f} mK(刻み {})", traceFrom,
+                traceTo, overall, overallTick);
+        }
+        LogRun("夜の並び", TrialName(), run, trial, ticks);
+        bool conserved = true;
+        const std::string tag = shapeName == "mixed" ? std::string("night") : std::format("night_{}", shapeName);
+        const std::vector<Snapshot> reference = ReferenceSnapshots("夜の並び", tag, material, profile, NIGHT_TICKS, {},
+                                                                   conserved);
+        const double capacity = material.heatPerCubic * LEVEL0_VOLUME;
+        for (size_t i = 0; i < trial.snapshots.size() && i < reference.size(); ++i) {
+            std::map<int, double> worst;
+            for (size_t c = 0; c < trial.snapshots[i].energy.size(); ++c) {
+                const double energy = static_cast<double>(trial.snapshots[i].energy[c] - reference[i].energy[c]);
+                double& slot = worst[static_cast<int>(std::floor(trial.snapshots[i].x[c]))];
+                slot = std::max(slot, std::abs(energy) / capacity);
+            }
+
+            std::string line;
+            for (const auto& [x, mk] : worst)
+                line += std::format(" {}:{:.1f}", x, mk);
+
+            Log(Channel::Sim, Level::Info, "夜の並び 刻み {} の差(x m: mK):{}", (i + 1) * COMPARE_EVERY, line);
+        }
+    }
+
+    // --- T-1269: 境の面の誤差の扱いの比べ。border-trace [scene=night|fire] [modes=none,mismatch,restart,gap0,c<n>,…] [traceto=刻み]
+    // 毎刻み 1 本と試しを扱いごとに並べて 1 刻みずつ進め、歩をちょうど終えた単位のセルだけを毎刻みと比べる(night-trace の (b) の形)。
+    // 扱いごとに: 歩を終えた時の差の最大(全体と 16384 刻みの区間ごと)・食い違いの計器の最大(TimeTreeSteps::worstMismatch)・費用 ---
+    std::string borderModes = "none,mismatch,restart,gap0,c0,c-4,c-8";
+    bool borderFire = false;  // scene=fire
+
+    struct BorderTrial {
+        std::string name;
+        TimeTreeSetup setup;
+        TimeTreeWorld world;
+        TimeTreeTotals first;
+        double worst = 0.0;
+        uint64_t worstTick = 0;
+        std::vector<double> windows;  // 16384 刻みの区間ごとの最大
+    };
+
+    TimeTreeSetup BorderSetup(const TimeTreeSetup& base, std::string_view mode) {
+        TimeTreeSetup setup = base;
+        if (mode == "mismatch")
+            setup.border = TimeTreeBorder::Mismatch;
+        else if (mode == "restart")
+            setup.border = TimeTreeBorder::Restart;
+        else if (mode == "gap0")
+            setup.border = TimeTreeBorder::Gap0;
+        else if (mode.starts_with("c")) {
+            setup.border = TimeTreeBorder::Coupling;
+            setup.couplingShift = std::atoi(std::string(mode.substr(1)).c_str());
+        }
+
+        return setup;
+    }
+
+    // 歩をちょうど tick に終えた単位のセルの、毎刻みとの差の最大(mK)
+    double StepEndDifference(const TimeTreeWorld& trial, const TimeTreeWorld& fixed, uint64_t tick, double capacity) {
+        double worst = 0.0;
+        for (const uint32_t unit : trial.layout.units) {
+            if (trial.steps.open[unit] == 0 || trial.steps.end[unit] != tick)
+                continue;
+
+            for (const uint32_t id : trial.layout.unitCells[unit]) {
+                const uint32_t slot = id / MR_BLOCK_CELLS;
+                const uint32_t index = id % MR_BLOCK_CELLS;
+                const auto d = static_cast<double>(TimeTreeSettledEnergy(trial, slot, index) -
+                                                   TimeTreeSettledEnergy(fixed, slot, index));
+                worst = std::max(worst, std::abs(d) / capacity);
+            }
+        }
+
+        return worst;
+    }
+
+    void CheckBorderTrace(const Material& material, const Profile& profile, uint64_t ticks, const Ignition& ignition) {
+        const TimeTreeSetup base = MakeSetup(material, TimeStepRule::Change);
+        TimeTreeSetup fixed = MakeSetup(material, TimeStepRule::Fixed);
+        fixed.cyclesAtZero = 0;
+        TimeTreeWorld reference = MakeWorld(fixed, material, sceneShape, profile);
+        std::vector<BorderTrial> trials;
+        for (size_t at = 0; at <= borderModes.size();) {
+            const size_t comma = std::min(borderModes.find(',', at), borderModes.size());
+            const std::string mode = borderModes.substr(at, comma - at);
+            at = comma + 1;
+            if (mode.empty())
+                continue;
+
+            const TimeTreeSetup setup = BorderSetup(base, mode);
+            TimeTreeWorld world = MakeWorld(setup, material, sceneShape, profile);
+            const TimeTreeTotals first = ConservedTimeTree(world);
+            trials.push_back({.name = mode, .setup = setup, .world = std::move(world), .first = first});
+        }
+
+        const double capacity = material.heatPerCubic * LEVEL0_VOLUME;
+        const auto begin = std::chrono::steady_clock::now();
+        for (uint64_t tick = 1; tick <= ticks; ++tick) {
+            StepTimeTree(fixed, reference, 1);
+            for (BorderTrial& trial : trials) {
+                StepTimeTree(trial.setup, trial.world, 1);
+                const double d = StepEndDifference(trial.world, reference, tick, capacity);
+                const size_t window = (tick - 1) / COMPARE_EVERY;
+                if (trial.windows.size() <= window)
+                    trial.windows.resize(window + 1, 0.0);
+
+                trial.windows[window] = std::max(trial.windows[window], d);
+                if (d > trial.worst) {
+                    trial.worst = d;
+                    trial.worstTick = tick;
+                }
+            }
+
+            if (ignition.tick != 0 && tick == ignition.tick) {
+                Ignite(fixed, material, reference, ignition);
+                for (BorderTrial& trial : trials)
+                    Ignite(trial.setup, material, trial.world, ignition);
+            }
+        }
+
+        const double seconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - begin).count();
+        uint64_t cells = 0;
+        for (const uint8_t stepped : reference.layout.stepped)
+            cells += stepped;
+
+        const auto cellTicks = static_cast<double>(cells) * static_cast<double>(ticks);
+        for (const BorderTrial& trial : trials) {
+            const TimeTreeSteps& steps = trial.world.steps;
+            std::string line;
+            for (const double w : trial.windows)
+                line += std::format(" {:.1f}", w);
+
+            Log(Channel::Sim, Level::Info,
+                "境の比べ {}・{}・{} セル角・扱い {}: 歩を終えた時の差の最大 {:.2f} mK(刻み {})・区間ごと(mK):{}・"
+                "食い違いの最大 {:.2f} mK・予算を超えた食い違い {}・解き {:.5f} /セル/刻み・e = 0 {:.5f}・出来事 "
+                "{}・部品 {}・"
+                "V {}・打ち切り {}・保存 {}",
+                shapeName, ignition.tick != 0 ? "火事" : "夜", unitEdgeCells, trial.name, trial.worst, trial.worstTick,
+                line, static_cast<double>(steps.worstMismatch) / Q16, steps.mismatchOverBudget,
+                static_cast<double>(steps.cellSteps) / cellTicks, static_cast<double>(steps.zeroCellSteps) / cellTicks,
+                steps.events, steps.solves, steps.vCycles, steps.truncations,
+                ConservedTimeTree(trial.world) == trial.first ? "厳密" : "破れ");
+            Expect(ConservedTimeTree(trial.world) == trial.first, "境の比べ: 保存は厳密");
+        }
+
+        Log(Channel::Sim, Level::Info, "境の比べ: {} 刻み・{} セル・{:.1f} 秒", ticks, cells, seconds);
+    }
+
     void CheckChooseDump(const Material& material, const Ignition& ignition) {
         TimeTreeSetup setup = MakeSetup(material, TimeStepRule::Change);
         setup.groupShift = groupShift;
@@ -1705,9 +1989,10 @@ namespace {
                 mergeCheck = value != "0";
             else if (key == "every")
                 mergeDumpEvery = static_cast<uint32_t>(std::atoi(value.c_str()));
-            else if (key == "scene")
+            else if (key == "scene") {
                 mergeNight = value == "night";
-            else if (key == "offset")
+                borderFire = value == "fire";
+            } else if (key == "offset")
                 placeOffset = std::atof(value.c_str());
             else if (key == "heaterk")
                 placeHeaterKelvin = std::atof(value.c_str());
@@ -1715,6 +2000,14 @@ namespace {
                 placeFuel = value == "1";
             else if (key == "rule")
                 placeRule = value;
+            else if (key == "tracefrom")
+                traceFrom = std::strtoull(value.c_str(), nullptr, 10);
+            else if (key == "traceto")
+                traceTo = std::strtoull(value.c_str(), nullptr, 10);
+            else if (key == "lockstep")
+                traceLockstep = std::strtoull(value.c_str(), nullptr, 10);
+            else if (key == "modes")
+                borderModes = value;
         }
 
         const bool all = part == "all";
@@ -1748,6 +2041,19 @@ namespace {
 
         if (part == "choose-dump")
             CheckChooseDump(fire, fireIgnition);
+
+        if (part == "night-trace")
+            CheckNightTrace(pond);
+
+        if (part == "border-trace") {
+            const uint64_t borderTicks = traceTo != UINT64_MAX ? traceTo : 0;
+            if (!borderFire)
+                CheckBorderTrace(pond, PondProfile(WorldLength(TreeShape{})),
+                                 borderTicks != 0 ? borderTicks : NIGHT_TICKS, {});
+            else
+                CheckBorderTrace(fire, Ambient(fire.groundKelvin), borderTicks != 0 ? borderTicks : FIRE_TICKS,
+                                 fireIgnition);
+        }
 
         if (part == "forward-estimate")
             CheckForwardEstimate(fire, fireIgnition);

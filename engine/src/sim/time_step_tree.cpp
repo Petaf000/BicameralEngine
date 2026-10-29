@@ -300,6 +300,37 @@ namespace bicameral::sim {
             std::ranges::sort(layout.units);
         }
 
+        // 隣の差 1 段を許す最も長い e(T-1269 の (c)): 単位のセルごとに、ほかの単位への面の係数の和(そのセルの単位 / 刻み)を出し、
+        // 和 × 2^e ≤ 容量 × 2^-couplingShift の最も長い e。和は面の結びつきの数(後ろ向きの Euler で隣を値を固定した面と見た時の
+        // 誤差の倍率)。法則の係数と木の形だけで決まる(状態の値を読まない)
+        void AddLooseExponents(const TimeTreeSetup& setup, TimeTreeLayout& layout) {
+            std::vector<FxU128> crossing(layout.stepped.size(), FxU128{});
+            for (const TimeTreeFace& face : layout.faces) {
+                if (face.unitA == face.unitB)
+                    continue;
+
+                crossing[face.a] = ImWideAdd(crossing[face.a], face.coefficient);
+                crossing[face.b] = ImWideAdd(crossing[face.b],
+                                             ImWideShiftRight(face.coefficient, MR_LEVEL_SHIFT * face.gap));
+            }
+
+            const FxU128 capacity = ImWide(setup.capacityQ32);
+            const FxU128 threshold = setup.couplingShift >= 0
+                                         ? ImWideShiftRight(capacity, static_cast<uint32_t>(setup.couplingShift))
+                                         : ImWideShiftLeft(capacity, static_cast<uint32_t>(-setup.couplingShift));
+            layout.looseExponent.assign(layout.stepped.size(), setup.maxExponent);
+            for (const uint32_t unit : layout.units) {
+                int32_t loose = setup.maxExponent;
+                for (const uint32_t id : layout.unitCells[unit]) {
+                    while (loose > 0 &&
+                           ImWideLess(threshold, ImWideShiftLeft(crossing[id], static_cast<uint32_t>(loose))))
+                        --loose;
+                }
+
+                layout.looseExponent[unit] = loose;
+            }
+        }
+
         TimeTreeLayout MakeLayout(const MultiresNest& nest, const TimeTreeSetup& setup) {
             TimeTreeLayout layout;
             const size_t cells = size_t{nest.capacity.worldBlocks} * MR_BLOCK_CELLS;
@@ -337,6 +368,9 @@ namespace bicameral::sim {
                 std::ranges::sort(list);
 
             AddMates(nest, setup, layout);
+            if (setup.border == TimeTreeBorder::Coupling)
+                AddLooseExponents(setup, layout);
+
             if (setup.windowLevel0Cells > 0)
                 AddWindowGrid(nest, setup, layout);
 
@@ -488,19 +522,49 @@ namespace bicameral::sim {
             return change;
         }
 
+        // 歩の終わりの食い違い(T-1269): 歩の初めに解いた温度(導かれる値の欄)と、真実 + 歩の変化から出した温度の差の最大。
+        // 違う刻みの隣との境の面は、短い側が長い側の歩の初めの温度で流れを記録するので、長い側の解いた温度(隣を歩の初めの値で
+        // 固定した後ろ向きの Euler)と食い違う。この差がその面の誤差(と解けきらなさ)。眠った枠は導かれる値が平均なので測らない
+        uint64_t UnitMismatch(const TimeTreeSetup& setup, const TimeTreeWorld& world, uint32_t unit) {
+            const uint32_t slot = SlotOf(unit);
+            if (MrIsUniform(world.nest.blocks[slot]))
+                return 0;
+
+            uint64_t worst = 0;
+            for (const uint32_t id : world.layout.unitCells[unit]) {
+                const uint32_t index = IndexOf(id);
+                const int64_t energy = LoadNestCell(world.nest, slot, index).energy + world.steps.deltaEnergy[id];
+                const int64_t settled = TimeTreeTemperatureQ16(setup, energy);
+                const int64_t solved = LoadNestField(world.nest, world.temperatureField, slot, index, 0);
+                worst = std::max(worst, FxAbsU64(settled - solved));
+            }
+
+            return worst;
+        }
+
         void CloseUnit(const TimeTreeSetup& setup, TimeTreeWorld& world, uint32_t unit, bool measured) {
             TimeTreeSteps& steps = world.steps;
+            const uint64_t mismatch = measured ? UnitMismatch(setup, world, unit) : 0;
             const uint64_t change = SettleUnit(setup, world, unit);
             steps.open[unit] = 0;
             if (!measured)
                 return;
 
+            steps.worstMismatch = std::max(steps.worstMismatch, mismatch);
+            steps.mismatchOverBudget += mismatch > setup.budgetQ16 ? 1u : 0u;
+
             if (setup.rule == TimeStepRule::Fixed)
                 steps.desired[unit] = setup.fixedExponent;
             else if (setup.select == TimeTreeSelect::Jump)
                 return;  // 退く道: 決めるのは上限の倍数の刻みの試しの解きだけ(1 刻みの変化は丸めの揺れで測れない)
-            else
-                steps.desired[unit] = TsDesiredExponent(TS_RULE_CHANGE, steps.exponent[unit], change, setup.budgetQ16);
+            else {
+                // (a) 食い違いは結びつきの数(∝ 2^e)× 温度の変わり(∝ 2^e)なので N² に比例と見る(規則 B の段)
+                int32_t desired = TsDesiredExponent(TS_RULE_CHANGE, steps.exponent[unit], change, setup.budgetQ16);
+                if (setup.border == TimeTreeBorder::Mismatch)
+                    desired = std::min(
+                        desired, TsDesiredExponent(TS_RULE_ESTIMATE, steps.exponent[unit], mismatch, setup.budgetQ16));
+                steps.desired[unit] = desired;
+            }
         }
 
         // 歩を刻み tick で打ち切る(記録を経った刻みの割合に縮めてから閉じる。保存はそのまま)
@@ -827,6 +891,27 @@ namespace bicameral::sim {
             return LimitToExponent(setup, world, choice, unit, Current(world.steps, choice, other) + allowed);
         }
 
+        // 境の面の扱い(T-1269)で隣の差を締める: (b) 歩の途中に隣が歩を始めたら 0 段・(b) の行き着く形はいつも 0 段・
+        // (c) 長い側の e が結びつきの数の上限を超えるなら 0 段。どれも e は減るだけなので、掃く回は不動点に着く
+        int32_t BorderAllowed(const TimeTreeSetup& setup, const TimeTreeWorld& world, const Choice& choice,
+                              uint32_t unit, uint32_t neighbor, int32_t allowed) {
+            if (setup.select == TimeTreeSelect::Jump || allowed == 0)
+                return allowed;
+
+            if (setup.border == TimeTreeBorder::Gap0)
+                return 0;
+
+            // 歩の途中で、隣がこの刻みに歩を始める(この単位の歩の中で隣の温度が変わり始める)→ 打ち切って隣に揃える
+            if (setup.border == TimeTreeBorder::Restart && choice.next[unit] < 0 && choice.next[neighbor] >= 0)
+                return 0;
+
+            if (setup.border == TimeTreeBorder::Coupling &&
+                Current(world.steps, choice, neighbor) + 1 > world.layout.looseExponent[unit])
+                return 0;
+
+            return allowed;
+        }
+
         // 前線の緩衝を単位で(T-1074): 動いている組から面の隣をたどって frontBufferUnits 組までの単位に印
         std::vector<uint8_t> BufferedUnits(const TimeTreeSetup& setup, const TimeTreeWorld& world) {
             const TimeTreeSteps& steps = world.steps;
@@ -960,7 +1045,8 @@ namespace bicameral::sim {
                         if (jump && !active)
                             continue;
 
-                        const int32_t allowed = jump || (setup.frontBuffer && !units && active) ? 0 : 1;
+                        int32_t allowed = jump || (setup.frontBuffer && !units && active) ? 0 : 1;
+                        allowed = BorderAllowed(setup, world, choice, unit, neighbor, allowed);
                         changed = LimitTo(setup, world, choice, unit, neighbor, allowed) || changed;
                     }
 
@@ -1363,7 +1449,8 @@ namespace bicameral::sim {
         const bool matesFree = std::ranges::all_of(layout.units,
                                                    [&](uint32_t unit) { return layout.mates[unit].empty(); });
         tables.supported = setup.windowLevel0Cells > 0 && setup.select == TimeTreeSelect::Previous &&
-                           !setup.frontBuffer && setup.frontBufferUnits == 0 && setup.maxExponent <= 14 && matesFree;
+                           !setup.frontBuffer && setup.frontBufferUnits == 0 && setup.maxExponent <= 14 && matesFree &&
+                           setup.border == TimeTreeBorder::None;
         tables.units = static_cast<uint32_t>(layout.units.size());
         tables.gridSize = layout.window.size;
         tables.radius = layout.window.radius;

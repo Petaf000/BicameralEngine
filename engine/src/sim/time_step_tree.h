@@ -39,6 +39,17 @@ namespace bicameral::sim {
         Jump,
     };
 
+    // 違う刻みで歩を始めた単位どうしの境の面の誤差の扱い(T-1269。研究。既定は None = 今の形)。
+    // 長い側は歩の初めの隣の温度を固定した面で解き、面の流れは短い側が長い側の歩の初めの温度で記録する(短い側が持ち主)。
+    // そのずれは歩の終わりに「解いた温度」と「真実 + 歩の変化から出した温度」の差(食い違い)として測れる(TimeTreeSteps::worstMismatch)
+    enum class TimeTreeBorder : uint8_t {
+        None,      // 今の形(隣の差 1 段だけ)
+        Mismatch,  // (a) 歩の終わりの食い違いも望みの e に入れる(N² に比例と見る = 規則 B の段)
+        Restart,   // (b) 歩の途中の単位は、隣が歩を始めたら打ち切る(隣の差 1 段はそのまま)
+        Gap0,      // (b) の行き着く形: 隣の差 0 段(面でつながる単位は同じ e)
+        Coupling,  // (c) 面の結びつきの数(係数 × 2^e ÷ 容量)が 2^-couplingShift を超える e では隣の差 0 段、ほかは 1 段
+    };
+
     // 列の解きを見る口(T-1111。GPU の試験が同じ系を GPU で解き直す)。系は δ = 0 から V を cycles 回で解く(SolveSpan と同じ)。
     // 残差で止める形(residualStop)の時は呼ばない
     struct TimeTreeSpanSolve {
@@ -121,6 +132,10 @@ namespace bicameral::sim {
         // 窓を外した時(格子・groupShift・unit=block の比べ)と退く道(Jump)は枠のまま
         uint32_t unitEdgeCells = 1;
 
+        // 境の面の誤差の扱い(T-1269)。couplingShift は Coupling の閾値(結びつきの数 ≤ 2^-これ なら隣の差 1 段を許す)
+        TimeTreeBorder border = TimeTreeBorder::None;
+        int32_t couplingShift = 0;  // 負なら緩める(結びつきの数 ≤ 2^-これ)
+
         // --- 見る口(結果に効かない)---
         const TimeTreeSpanObserver* spanObserver = nullptr;      // 列の解き(T-1111)
         const TimeTreeChooseObserver* chooseObserver = nullptr;  // 刻みを選ぶ段(T-1112)
@@ -162,6 +177,8 @@ namespace bicameral::sim {
         std::vector<std::vector<uint32_t>> neighbors;  // 単位ごと: 面でつながる単位(番号の順)
         std::vector<std::vector<uint32_t>> mates;      // 単位ごと: 同じ e に揃える単位(groupShift。自分は入れない)
         TimeTreeWindowGrid window;                     // 窓の格子(windowLevel0Cells > 0 の時)
+        // 単位ごと: 隣の差 1 段を許す最も長い e(T-1269 の (c)。単位のセルの、ほかの単位への面の係数の和 × 2^e ≤ 容量 ÷ 2^couplingShift)
+        std::vector<int32_t> looseExponent;
         int32_t finestLevel = 0;
     };
 
@@ -213,6 +230,10 @@ namespace bicameral::sim {
         uint64_t retakes = 0;          // 取り直した枠の数(2 通り目)
         uint64_t zeroCellSteps = 0;    // e = 0 の列で解いたセル(T-1074)
         uint64_t forcedCellSteps = 0;  // そのうち自分の望みの e は 0 でない枠(緩衝・隣の差・揃える相手で毎刻みにされた)
+        // 歩を終えた時の食い違いの最大(mK × 2^16。T-1269: 歩の初めに解いた温度〔導かれる値の欄。新しい記録は要らない〕と、
+        // 真実 + 歩の変化から出した温度の差。境の面の誤差 + 解けきらなさ。結果にも要約にも効かない)
+        uint64_t worstMismatch = 0;
+        uint64_t mismatchOverBudget = 0;  // 食い違いが予算を超えて歩を終えた単位の数
 
         // --- 段の重みを使い回せるか(T-1090。測りだけ。結果にも要約にも効かない)---
         // e = 0 の解きのうち、枠の組が前の e = 0 の解きと違った回(段の形が変わる = 段の重みを作り直す)と、組は同じでも
