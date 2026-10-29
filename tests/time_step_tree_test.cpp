@@ -19,6 +19,7 @@
 //       [budgetmk=予算(mK)] [group=揃える段] [buffer=1(前線の緩衝)]
 //       [zerocycles=1 刻みの V の回数(既定 1)] [unit=block(単位 4 m を外す)]
 //       [bufferunits=前線の緩衝の単位の数(T-1074)] [shape=mixed|coarse|fine|finer(night・fire の木。1 m・0.5 m・0.25 m の根だけ)]
+//       [roots=XxYxZ(T-1287: shape= の木の根の並び。刻みを選ぶ段の GPU 版の区画を 2 つ以上に)]
 //       [cycles=V の回数] [trialcycles=試しの V の回数] [trial=fixed(試しも毎刻み = 床の測り)] [galerkin=1]
 // T-1111: span-dump dump=<ファイル>(火事〔shape= の木〕の途中の列の系を書く。gpu_time_step_span_test が GPU で解き比べる)
 //         forward-estimate(早送りの待ちの見積もり〔D-650〕と実際に進めた解きの数)
@@ -29,6 +30,7 @@
 //         (置く場所による違い: 熱い物の隣の床が着火の温度に届くか〔しきい値の近く〕・燃え広がり。毎刻みと長い刻みで)
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <chrono>
 #include <cmath>
 #include <cstdint>
@@ -156,6 +158,8 @@ namespace {
 
     // 境の面の扱い(border=。T-1270: 案 (c) を既定にした時の差を測る。none・mismatch・restart・gap0・c<n>。既定 none = 今の既定)
     std::string borderMode = "none";
+    // 根の並び(roots=XxYxZ。T-1287。空 = shape= のまま)
+    std::string rootsGiven;
 
     // 境の面の扱いを名前から(T-1269 の border-trace の modes= と同じ名前。none は今の形に戻す)
     void ApplyBorder(TimeTreeSetup& setup, std::string_view mode) {
@@ -314,6 +318,28 @@ namespace {
 
     double WorldLength(const TreeShape& shape) {
         return shape.roots * MR_BLOCK_EDGE * CellMeters(shape.rootLevel);
+    }
+
+    // "XxYxZ" → 3 つの数(読めなければ 0 を含む)
+    std::array<uint32_t, 3> ParseRoots(std::string_view text) {
+        std::array<uint32_t, 3> counts{};
+        const char* cursor = text.data();
+        const char* end = text.data() + text.size();
+        for (uint32_t axis = 0; axis < 3; ++axis) {
+            const auto [next, error] = std::from_chars(cursor, end, counts[axis]);
+            if (error != std::errc{})
+                return {};
+
+            cursor = next;
+            if (axis < 2) {
+                if (cursor == end || *cursor != 'x')
+                    return {};
+
+                ++cursor;
+            }
+        }
+
+        return cursor == end ? counts : std::array<uint32_t, 3>{};
     }
 
 }  // namespace
@@ -2030,6 +2056,21 @@ namespace {
                 borderModes = value;
             else if (key == "border")
                 borderMode = value;
+            else if (key == "roots")
+                rootsGiven = value;
+        }
+
+        // roots=XxYxZ(T-1287): shape= の木の根の並びを変える(刻みを選ぶ段の GPU 版の区画〔4,096 単位〕を 2 つ以上にする)
+        if (!rootsGiven.empty()) {
+            const std::array<uint32_t, 3> counts = ParseRoots(rootsGiven);
+            if (counts[0] > 0 && counts[1] > 0 && counts[2] > 0) {
+                sceneShape.roots = counts[0];
+                sceneShape.rootsY = counts[1];
+                sceneShape.rootsZ = counts[2];
+                shapeName = std::format("{}_{}", shapeName, rootsGiven);
+            } else {
+                Expect(false, "roots= は XxYxZ(どれも 1 以上)");
+            }
         }
 
         const bool all = part == "all";
