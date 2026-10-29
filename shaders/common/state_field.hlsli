@@ -53,9 +53,14 @@ FX_CONST uint32_t SF_PHASE_COUNT = 3;
 // VOLUME: 細かく = 子は親と同じ数。粗く = 和 ÷ 8 + 端数(余りは世界の帳簿の「粗くした端数・出」の、その欄の列へ。量の欄 = 保存量。T-0762)
 // ブロック・世界の欄は SAME だけ(ブロック: 細かく = 子のブロックは親の値・粗く = 親は自分の値のまま)
 // 観察の影(親を覆わない・世界に返さない。D-403): 細かく = 子は親と同じ数。引き戻す = 子の和を親 × 8 に(SfPullBackChild。ADR-0361)
+// OWNER:  配り手(T-1252。ADR-0500 の 1・20 §10.7)。一般の段(nest_fields::Refine / Coarsen・影)は写さない・平均しない。
+//         値は木の操作の中の「セルの配りの口」(nest_fields::RefineOwners / CoarsenOwners)が、登録の配り手の番号
+//         (SfFieldDesc::owner = SF_OWNER_*。エンジンの決まった関数の表)の関数で書く。セル・面の真実の欄だけ。
+//         畳む・広げる・眠る・保存点・ハッシュは一般の段のまま(どれも値をビット単位で変えない)。保存量なら配りは和をビット単位で保つ
 FX_CONST uint32_t SF_SCALE_SAME = 0;
 FX_CONST uint32_t SF_SCALE_VOLUME = 1;
-FX_CONST uint32_t SF_SCALE_COUNT = 2;
+FX_CONST uint32_t SF_SCALE_OWNER = 2;
+FX_CONST uint32_t SF_SCALE_COUNT = 3;
 
 // --- 印 ----------------------------------------------------------------------------------------
 FX_CONST uint32_t SF_FLAG_CONSERVED = 1u;  // 保存量(世界の帳簿の列に入る。VOLUME の欄と同じもの。T-0712・T-0762)
@@ -83,9 +88,19 @@ FX_CONST uint32_t SF_FLAG_SLEEP_DISCARD = 64u;
 //   - 粗くする: 内訳は和 ÷ 8 の切り捨て・親は和 ÷ 8 + 端数(帳簿)。切り捨て ≤ 切り捨てなので 0 ≤ 内訳 ≤ 親 のまま
 //   - 眠る: 残りが 0 でないセル(舞う粒がある)のある頁は畳まない(SfBreakdownKeepsAwake。止まった層だけなら畳める)
 FX_CONST uint32_t SF_FLAG_BREAKDOWN = 128u;
-FX_CONST uint32_t SF_FLAG_MASK = 255u;
+// この刻みだけ(T-1252。ADR-0500 の 2・20 §10.7): 刻みの中で書いて同じ刻みに読む値(源の項)。状態ではない(SF_KIND_TICK)。
+// ハッシュ・保存点・保存量に入らない。刻みの境目では全部 0(使い終わったら nest_fields::EndTickOnly で 0 に・頁を返す)。
+// セル・面の欄・SAME だけ(細かく/粗く・畳む・眠るは刻みの境目にしか起きないので 0 を扱うだけ)。HASHED・導かれる値の印を持たない
+FX_CONST uint32_t SF_FLAG_TICK_ONLY = 256u;
+FX_CONST uint32_t SF_FLAG_MASK = 511u;
 
 FX_CONST uint32_t SF_NO_PARENT = 0xFFFFFFFFu;  // 内訳でない欄の親(SfFieldDesc::parent)
+
+// --- 配り手の表(T-1252。SF_SCALE_OWNER の欄の SfFieldDesc::owner。GPU は決まった数の回しで選ぶ = T-0397)---
+// 使い手が足す: 相の層の配り(Ec。T-1230)・光の配り(放射の持ち越し。T-1227)。今は試験用の 1 つだけ
+FX_CONST uint32_t SF_OWNER_TEST = 0;  // 試験用(子 j の重み j + 1 で配る・粗く = 和 ÷ 8 + 端数。レベルの単位)
+FX_CONST uint32_t SF_OWNER_COUNT = 1;
+FX_CONST uint32_t SF_NO_OWNER = 0xFFFFFFFFu;  // 配り手でない欄(SfFieldDesc::owner)
 
 // --- 細かくする時の配り方(印から決まる。SfRefinePlacement)---
 FX_CONST uint32_t SF_REFINE_SAME = 0;
@@ -96,6 +111,7 @@ FX_CONST uint32_t SF_REFINE_OPEN = 2;
 FX_CONST uint32_t SF_KIND_TRUTH = 0;       // 真実(状態そのもの)
 FX_CONST uint32_t SF_KIND_DERIVED = 1;     // 導かれる値(状態に入らない。読み込んだ後・起きた時に真実から解き直す)
 FX_CONST uint32_t SF_KIND_WARM_START = 2;  // 温めた始まり(SF_WARM_START_IN_STATE なら状態に入る)
+FX_CONST uint32_t SF_KIND_TICK = 3;        // この刻みだけ(源の項。状態に入らない・刻みの境目で 0。T-1252)
 
 // D-549(仮・ユーザー未確認。おすすめ (A)): 温めた始まりをハッシュと保存点に入れる。(B)(真実だけ)に戻すならここを false にするだけ
 // (読み込んだ直後の数刻みの導かれる値が、続けて遊んだ場合とビット単位で一致しなくなる)
@@ -105,7 +121,9 @@ FX_CONST bool SF_WARM_START_IN_STATE = true;
 // (a) 捨てる(0 にして、起きた時に解き直す)へ下げる = ここを false にするだけ
 FX_CONST bool SF_DERIVED_SLEEP_KEEP_COARSE = true;
 
-FX_CONST uint32_t SF_MAX_COMPONENTS = 3;  // セル・ブロック・世界の欄の値の数の上限(面は 3 つ決まり)
+// セル・ブロック・世界の欄の値の数の上限(面は 3 つ決まり)。12 = 放射の持ち越し(入った面 6 × 帯 2。ADR-0500 の 5・T-1252)。
+// 欄の置き場は欄ごとの値の数で取るので、上限を上げても今の欄の大きさは変わらない(docs/perf.md 2026-10-29)
+FX_CONST uint32_t SF_MAX_COMPONENTS = 12;
 
 // 欄の登録 1 行(名前は C++ の側。GPU へは定数バッファでこの並びのまま渡す)
 struct SfFieldDesc {
@@ -116,6 +134,7 @@ struct SfFieldDesc {
     uint32_t flags;
     uint32_t components;  // セル・ブロック・世界: 1〜3。面: 3(+ 側の 3 面)
     uint32_t parent;      // 内訳の欄の親の欄の番号(登録の順。親が先)。内訳でなければ SF_NO_PARENT(T-1177)
+    uint32_t owner;       // 配り手の番号(SF_OWNER_*。scale が SF_SCALE_OWNER の時だけ)。でなければ SF_NO_OWNER(T-1252)
 };
 
 FX_FN SfFieldDesc SfMakeFieldDesc(uint32_t place, uint32_t type, uint32_t phase, uint32_t scale, uint32_t flags,
@@ -128,8 +147,23 @@ FX_FN SfFieldDesc SfMakeFieldDesc(uint32_t place, uint32_t type, uint32_t phase,
     desc.flags = flags;
     desc.components = place == SF_PLACE_FACE ? 3u : components;
     desc.parent = SF_NO_PARENT;
+    desc.owner = SF_NO_OWNER;
 
     return desc;
+}
+
+// 配り手の欄の登録 1 行(T-1252): 真実のセル・面の欄。flags は保存量(SF_FLAG_CONSERVED)・ハッシュ(SF_FLAG_HASHED)
+FX_FN SfFieldDesc SfMakeOwnerDesc(uint32_t place, uint32_t type, uint32_t phase, uint32_t flags, uint32_t components,
+                                  uint32_t owner) {
+    SfFieldDesc desc = SfMakeFieldDesc(place, type, phase, SF_SCALE_OWNER, flags, components);
+    desc.owner = owner;
+
+    return desc;
+}
+
+// この刻みだけの欄の登録 1 行(T-1252): セル・面・SAME・保存量でない・ハッシュに入らない
+FX_FN SfFieldDesc SfMakeTickDesc(uint32_t place, uint32_t type, uint32_t phase, uint32_t components) {
+    return SfMakeFieldDesc(place, type, phase, SF_SCALE_SAME, SF_FLAG_TICK_ONLY, components);
 }
 
 // 内訳の欄の登録 1 行(T-1177): 真実・SAME・ハッシュに入る。flags には置かれ方の印(内訳そのものの配り方)を足せる
@@ -144,7 +178,7 @@ FX_FN SfFieldDesc SfMakeBreakdownDesc(uint32_t place, uint32_t type, uint32_t ph
 
 FX_FN bool SfSameDesc(SfFieldDesc a, SfFieldDesc b) {
     return a.place == b.place && a.type == b.type && a.phase == b.phase && a.scale == b.scale && a.flags == b.flags &&
-           a.components == b.components && a.parent == b.parent;
+           a.components == b.components && a.parent == b.parent && a.owner == b.owner;
 }
 
 FX_FN bool SfDescValid(SfFieldDesc desc) {
@@ -158,9 +192,15 @@ FX_FN bool SfDescValid(SfFieldDesc desc) {
     if (desc.place == SF_PLACE_FACE && desc.components != 3u)
         return false;
 
-    // 量の欄(VOLUME)と保存量は同じもの: 粗くした余りを載せる帳簿の列は保存量の欄だけが持ち、
-    // 保存量の検査(ComputeConservedTotals)は和を取る欄だけを数える(T-0762。仮)
-    if (((desc.flags & SF_FLAG_CONSERVED) != 0u) != (desc.scale == SF_SCALE_VOLUME))
+    // 保存量 ⇒ VOLUME か配り手・VOLUME ⇒ 保存量(T-1252。前は「保存量 ⇔ VOLUME」T-0762): 粗くした余りを載せる帳簿の列は
+    // 保存量の欄だけが持ち、保存量の検査(ComputeConservedTotals)は和を取る欄(配り手の欄も)だけを数える。配り手は和を保つ約束
+    const bool conserved = (desc.flags & SF_FLAG_CONSERVED) != 0u;
+    if ((conserved && desc.scale == SF_SCALE_SAME) || (desc.scale == SF_SCALE_VOLUME && !conserved))
+        return false;
+
+    // 配り手(T-1252): 配り手の番号を持つ ⇔ SF_SCALE_OWNER。表の中の番号
+    const bool owned = desc.scale == SF_SCALE_OWNER;
+    if (owned != (desc.owner != SF_NO_OWNER) || (owned && desc.owner >= SF_OWNER_COUNT))
         return false;
 
     // 温めた始まりは導かれる値の一つ
@@ -177,10 +217,22 @@ FX_FN bool SfDescValid(SfFieldDesc desc) {
     if ((desc.flags & SF_FLAG_SLEEP_DISCARD) != 0u && !derived)
         return false;
 
-    // 置かれ方の印は真実のセル・面の欄だけ・どちらか 1 つ(T-1157)
+    // 置かれ方の印は真実のセル・面の欄だけ・どちらか 1 つ(T-1157)。配り手の欄は配り手が配る(印を持たない。T-1252)
     const uint32_t placeFlags = desc.flags & (SF_FLAG_PLACE_CONDENSED | SF_FLAG_PLACE_OPEN);
-    if (placeFlags != 0u && (placeFlags == (SF_FLAG_PLACE_CONDENSED | SF_FLAG_PLACE_OPEN) || derived ||
+    if (placeFlags != 0u && (placeFlags == (SF_FLAG_PLACE_CONDENSED | SF_FLAG_PLACE_OPEN) || derived || owned ||
                              (desc.place != SF_PLACE_CELL && desc.place != SF_PLACE_FACE)))
+        return false;
+
+    // 配り手の欄は真実のセル・面の欄(T-1252)
+    const bool onCells = desc.place == SF_PLACE_CELL || desc.place == SF_PLACE_FACE;
+    if (owned && (derived || !onCells))
+        return false;
+
+    // この刻みだけ(T-1252): セル・面・SAME。真実の印(HASHED)・導かれる値・保存量・置かれ方・内訳の印を持たない
+    const uint32_t notWithTick = SF_FLAG_HASHED | SF_FLAG_DERIVED | SF_FLAG_WARM_START | SF_FLAG_SLEEP_DISCARD |
+                                 SF_FLAG_CONSERVED | SF_FLAG_PLACE_CONDENSED | SF_FLAG_PLACE_OPEN | SF_FLAG_BREAKDOWN;
+    if ((desc.flags & SF_FLAG_TICK_ONLY) != 0u &&
+        ((desc.flags & notWithTick) != 0u || desc.scale != SF_SCALE_SAME || !onCells))
         return false;
 
     // 内訳(T-1177): 真実のセル・面の欄・SAME(保存量の列は親だけ)・ハッシュに入る・親を持つ。内訳でない欄は親を持たない
@@ -214,6 +266,9 @@ FX_FN SfFieldDesc SfMakeDerivedDesc(uint32_t place, uint32_t type, uint32_t phas
 
 // 欄の種類(SF_KIND_*)
 FX_FN uint32_t SfFieldKind(SfFieldDesc desc) {
+    if ((desc.flags & SF_FLAG_TICK_ONLY) != 0u)
+        return SF_KIND_TICK;
+
     if ((desc.flags & SF_FLAG_DERIVED) == 0u)
         return SF_KIND_TRUTH;
 
@@ -234,7 +289,7 @@ FX_FN bool SfConserved(SfFieldDesc desc) {
     return (desc.flags & SF_FLAG_CONSERVED) != 0u;
 }
 
-// 状態のハッシュに入るか: 真実は HASHED の印・温めた始まりは SF_WARM_START_IN_STATE・導かれる値は入らない(T-0854)
+// 状態のハッシュに入るか: 真実は HASHED の印・温めた始まりは SF_WARM_START_IN_STATE・導かれる値とこの刻みだけは入らない(T-0854)
 FX_FN bool SfHashed(SfFieldDesc desc) {
     const uint32_t kind = SfFieldKind(desc);
     if (kind == SF_KIND_TRUTH)
@@ -243,7 +298,7 @@ FX_FN bool SfHashed(SfFieldDesc desc) {
     return kind == SF_KIND_WARM_START && SF_WARM_START_IN_STATE;
 }
 
-// 保存点・写しに入るか: 真実はいつも・温めた始まりは SF_WARM_START_IN_STATE・導かれる値は入らない
+// 保存点・写しに入るか: 真実はいつも・温めた始まりは SF_WARM_START_IN_STATE・導かれる値とこの刻みだけは入らない
 // (戻した時は 0 にして、起きている所は次に計算する時に真実から解き直す。15 §1「差分に入るのは真実だけ」)
 FX_FN bool SfSaved(SfFieldDesc desc) {
     const uint32_t kind = SfFieldKind(desc);
@@ -265,6 +320,16 @@ FX_FN bool SfValueFits(SfFieldDesc desc, int64_t value) {
         return value >= 0 && value <= (int64_t)0xFFFFFFFFu;
 
     return true;
+}
+
+// 配り手の欄か(T-1252。一般の段は写さず、セルの配りの口が配り手の関数で書く)
+FX_FN bool SfOwned(SfFieldDesc desc) {
+    return desc.scale == SF_SCALE_OWNER;
+}
+
+// この刻みだけの欄か(T-1252)
+FX_FN bool SfTickOnly(SfFieldDesc desc) {
+    return (desc.flags & SF_FLAG_TICK_ONLY) != 0u;
 }
 
 // --- 内訳(T-1177。SF_FLAG_BREAKDOWN)---
@@ -638,6 +703,63 @@ FX_FN int64_t SfPullBackChild(int64_t parentValue, SfFamily family, uint32_t chi
         return SfPullBackSharedChild(parentValue, family, child);
 
     return SfPullBackShiftedChild(parentValue, family, child);
+}
+
+// --- 配り手の関数(T-1252。ADR-0500 の 1。CPU と GPU の 1 つの源。配り手は owner の決まった数の分かれで選ぶ = T-0397)-------------
+// 細かくする: 頁を持つ親のセルの値 → 子 child(子の番号は MrChildCell の j)。一様な親 → 一様な子の値 1 つ(子 8 つが同じ値)。
+// 粗くする:   子 8 つ → 親の値と余り(SfCoarsenSum の形。保存量の欄の余りは一般の段と同じく帳簿の「粗くした端数・出」へ)。
+// 保存量の配り手は「子の和 = 親 × 8(子のレベルの単位)」と「粗く = 和 ÷ 8 + 余り」で和をビット単位で保つ。
+// セルの中身を読む配り手(相の層の配り。T-1230)は、引数に子の重みを足す(この形を広げる。使い手の作業)
+
+// 試験用の配り手の重み: 子 j は j + 1(和 36)。子 7 が残り(SfPlacedLastValue)
+FX_CONST uint64_t SF_OWNER_TEST_WEIGHT_SUM = 36;
+
+FX_FN int64_t SfOwnerTestChild(int64_t parentValue, uint32_t child) {
+    if (child + 1u < SF_CHILDREN)
+        return SfPlacedValue(parentValue, (uint64_t)(child + 1u), SF_OWNER_TEST_WEIGHT_SUM, SF_CHILDREN);
+
+    int64_t given = 0;
+    FX_UNROLL
+    for (uint32_t j = 0; j + 1u < SF_CHILDREN; ++j)
+        given += SfPlacedValue(parentValue, (uint64_t)(j + 1u), SF_OWNER_TEST_WEIGHT_SUM, SF_CHILDREN);
+
+    return SfPlacedLastValue(parentValue, given, SF_CHILDREN);
+}
+
+FX_FN int64_t SfOwnerRefineChild(uint32_t owner, int64_t parentValue, uint32_t child) {
+    if (owner == SF_OWNER_TEST)
+        return SfOwnerTestChild(parentValue, child);
+
+    return 0;
+}
+
+FX_FN int64_t SfOwnerRefineUniform(uint32_t owner, int64_t parentValue) {
+    if (owner == SF_OWNER_TEST)
+        return parentValue;  // 一様な親の子は親と同じ数(子の和 = 親 × 8)
+
+    return 0;
+}
+
+FX_FN SfCoarsenSum SfOwnerCoarsen(uint32_t owner, SfFamily family) {
+    SfCoarsenSum sum = SfMakeCoarsenSum();
+    if (owner != SF_OWNER_TEST)
+        return sum;
+
+    FX_UNROLL
+    for (uint32_t j = 0; j < SF_CHILDREN; ++j)
+        sum = SfAddCoarsenChild(sum, family.values[j]);
+
+    return sum;
+}
+
+// 観察の影を引き戻す(ADR-0361 の配り手の形。T-1252): 引き戻した子を配り手の粗くする関数で粗くすると親と同じ値・余り 0 になる。
+// 粗く = 和 ÷ 8 の配り手(試験用・相の層の配り)では ADR-0361 の「子の和 = 親 × 8」と同じ(SfPullBackChild)。
+// 粗く = 面の側の子の和の配り手(光の配り。T-1227)は「面の側の子の和 = 親」に合わせる関数を足す(使い手の作業)
+FX_FN int64_t SfOwnerPullBackChild(uint32_t owner, int64_t parentValue, SfFamily family, uint32_t child) {
+    if (owner == SF_OWNER_TEST)
+        return SfPullBackChild(parentValue, family, child);
+
+    return 0;
 }
 
 SF_NAMESPACE_END

@@ -452,6 +452,9 @@ add_test(NAME multires_state COMMAND multires_state_test)
 add_executable(field_storage_test field_storage_test.cpp)  # 欄の持ち方: 真実 / 導かれる値 / 温めた始まり・眠らせて起こす往復(T-0854)
 target_link_libraries(field_storage_test PRIVATE bicameral_multires bicameral_core)
 add_test(NAME field_storage COMMAND field_storage_test)
+add_executable(field_owner_test field_owner_test.cpp)  # 欄の書き手と寿命: 配り手・この刻みだけ・集めて書く段(T-1252)
+target_link_libraries(field_owner_test PRIVATE bicameral_multires bicameral_core)
+add_test(NAME field_owner COMMAND field_owner_test)
 add_executable(placement_refine_test placement_refine_test.cpp)  # 細かくする時の置かれ方で配る・wt3 の T-1106 と同じ答え(T-1157)
 target_link_libraries(placement_refine_test PRIVATE bicameral_multires bicameral_core)
 add_test(NAME placement_refine COMMAND placement_refine_test)
@@ -1290,7 +1293,7 @@ add_test(NAME dxil_alloca_check
 foreach(_name IN ITEMS
     reaction_package_test reaction_package_scene_test reaction_species_remap_test reaction_test reaction_contention_test
     reaction_wait_test multires_test multires_wide_test multires_layers_test multires_activity_test multires_quiet_test multires_uniform_test
-    multires_state_test field_storage_test sun_column_test sun_lens_test object_heat_test object_heat_nest_test grass_wake_test object_shell_test cascade_light_test sky_port_test cascade_light_swing_test cascade_tree_grid_test
+    multires_state_test field_storage_test field_owner_test sun_column_test sun_lens_test object_heat_test object_heat_nest_test grass_wake_test object_shell_test cascade_light_test sky_port_test cascade_light_swing_test cascade_tree_grid_test
     multires_conduction_test multires_edge_test multires_subcycle_test multires_implicit_test multires_implicit_tree_test lab_box_test
     gpu_reaction_test gpu_sun_column_test gpu_cascade_light_test gpu_cascade_tree_grid_test gpu_object_heat_test gpu_object_heat_nest_test gpu_object_shell_flow_test gpu_multires_test gpu_multires_activity_test gpu_multires_quiet_test gpu_multires_uniform_test gpu_multires_layers_test
     gpu_multires_conduction_test gpu_multires_implicit_test gpu_multires_implicit_build_test gpu_multires_implicit_tree_test

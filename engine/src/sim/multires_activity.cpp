@@ -373,6 +373,7 @@ namespace bicameral::sim {
 
     void StepActive(MultiresNest& nest, const BakedReactionTable& table, uint64_t worldSeed, uint64_t tick,
                     const MultiresStepOptions& options) {
+        FX_ASSERT(TickOnlyFieldsClear(nest));  // この刻みだけの欄は刻みの境目で 0(T-1252。ADR-0500 の 2)
         const uint32_t worldBlocks = nest.capacity.worldBlocks;
         const uint32_t mark = MrActivityMark(tick);
 

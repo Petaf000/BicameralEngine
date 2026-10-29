@@ -780,6 +780,7 @@ namespace bicameral::sim {
 
     void StepNest(MultiresNest& nest, const BakedReactionTable& table, uint64_t worldSeed, uint64_t tick,
                   const MultiresStepOptions& options) {
+        FX_ASSERT(TickOnlyFieldsClear(nest));  // この刻みだけの欄は刻みの境目で 0(T-1252。ADR-0500 の 2)
         std::vector<uint8_t> stepped(nest.blocks.size(), 0);
         for (uint32_t slot = 0; slot < nest.blocks.size(); ++slot) {
             const uint32_t kind = nest.blocks[slot].kind;

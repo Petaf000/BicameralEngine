@@ -12,8 +12,10 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "common/state_field.hlsli"
 #include "sim/multires_nest.h"
@@ -67,6 +69,53 @@ namespace bicameral::sim {
     // 内訳の欄(SF_FLAG_BREAKDOWN。T-1177)の状態の検査: 0 ≤ 内訳 ≤ 親 でない値の数(世界と観察の枠の全部。一様な枠は値 1 つで数える)
     [[nodiscard]] uint64_t CountBreakdownMisfits(const MultiresNest& nest);
 
+    // --- 集めて書く段(T-1252。ADR-0500 の 3・20 §10.7)---
+    // 順の決まらない書き手(光線など)は欄へ直に足さず、自分の作業(NestGatherWork。刻みの中だけ)へ整数で足す(順によらない。R3・R4)。
+    // 作業の鍵は (本物の葉の世界の枠・セル・値)。升目 → 葉の写し(粗い葉は 2^L 角の和)は書き手の側(T-1117 の葉ごとの写し)。
+    // GatherNestField が触った枠を枠の順に回り、(a) 欄の頁が無ければ枠の順に頁を取る(プレフィックス和と同じ番号の順。GPU の段 2 も同じ)、
+    // (b) 一様な枠は頁に広げてから(ExpandWantedPages と同じ枠の順。値はビット単位で変わらない)、(c) 作業の値を欄へ足し、書いた枠をつつく。
+    // 頁の予算(SetNestFieldPageBudget)が尽きた・セルの頁が尽きた枠は書かず、値は作業に残す(量を捨てない。報告の pageShortage で計器の誤り)
+    struct NestGatherWork {
+        uint32_t field = MULTIRES_NO_FIELD;
+        uint32_t components = 0;
+        std::vector<uint32_t> blockOf;  // [世界の枠] → 作業のブロックの番号(MULTIRES_NO_FIELD_PAGE = 触っていない)
+        std::vector<uint32_t> slots;    // 作業のブロック → 世界の枠(足した順。集める時に枠の順に並べる)
+        std::vector<int64_t> values;    // [作業のブロック × MR_BLOCK_CELLS × 値の数]
+    };
+
+    struct NestGatherReport {
+        uint32_t blocks = 0;            // 書いた枠
+        uint32_t pagesTaken = 0;        // 新しく取った欄の頁
+        uint32_t expanded = 0;          // 頁に広げた一様な枠
+        uint32_t pageShortage = 0;      // 欄の頁の予算が尽きて書かなかった枠(計器の誤り。値は作業に残る)
+        uint32_t cellPageShortage = 0;  // セルの頁が尽きて広げられなかった一様な枠(同上)
+    };
+
+    [[nodiscard]] NestGatherWork MakeNestGatherWork(const MultiresNest& nest, uint32_t field);
+
+    // 書き手が足す(slot は本物の世界の枠・index は刻むセル)
+    void AddNestGatherWork(NestGatherWork& work, uint32_t slot, uint32_t index, uint32_t component, int64_t value);
+
+    // 作業に残っている値の和(頁が尽きて書かなかった分。保存の検査で欄の和に足す)
+    [[nodiscard]] int64_t NestGatherWorkTotal(const NestGatherWork& work, uint32_t component);
+
+    [[nodiscard]] NestGatherReport GatherNestField(MultiresNest& nest, NestGatherWork& work);
+
+    // 疎な欄の頁の予算(世界の作りで前もって決める。D-468。0 = 決めない = 今まで通り要るだけ取る)
+    void SetNestFieldPageBudget(MultiresNest& nest, uint32_t field, uint32_t pages);
+
+    // 使っている欄の頁の数(疎: 値のある頁・密: セルの頁の数)
+    [[nodiscard]] uint32_t UsedNestFieldPages(const MultiresNest& nest, uint32_t field);
+
+    // --- この刻みだけの欄(SF_FLAG_TICK_ONLY。T-1252。ADR-0500 の 2)---
+    // 当てる段の読む口: 欄 field の 0 でない値を枠の順・セルの順に 1 回の掃きで渡し、欄を 0 にする(頁を返す)。使い手はまだ無い(T-1228)
+    void ConsumeTickOnlyField(
+        MultiresNest& nest, uint32_t field,
+        const std::function<void(uint32_t slot, uint32_t index, uint32_t component, int64_t value)>& apply);
+
+    // 刻みの境目の検査: この刻みだけの欄が全部 0 か(StepNest・StepActive の初めに FX_ASSERT)
+    [[nodiscard]] bool TickOnlyFieldsClear(const MultiresNest& nest);
+
     // --- 木の操作が呼ぶ(multires_tree・multires_nest・multires_activity)---
     namespace nest_fields {
 
@@ -92,14 +141,15 @@ namespace bicameral::sim {
         void FoldPage(MultiresNest& nest, uint32_t slot);
 
         // 親 parentSlot の八分の一 octant を子 childSlot(頁 childPage。一様なら MR_NO_PAGE)に細かくする: 子は親と同じ数。
-        // 頁を持つ親の覆われたセルは 0 に。子の見出しを書く前に呼ぶ
+        // 頁を持つ親の覆われたセルは 0 に。子の見出しを書く前に呼ぶ。配り手の欄(SF_SCALE_OWNER)は最後にセルの配りの口が
+        // 配り手の細かくする関数で書く(セルの中身の配りの後。T-1252)
         void Refine(MultiresNest& nest, uint32_t parentSlot, uint32_t octant, uint32_t childSlot, uint32_t childPage);
 
         // 一様な親 parentSlot へ子 childSlot を粗くしても、欄が一様のままか(違えば親を頁に広げる)。導かれる値は見ない(T-0854)
         [[nodiscard]] bool CoarsenKeepsUniform(const MultiresNest& nest, uint32_t childSlot, uint32_t parentSlot);
 
         // 子 childSlot を親の八分の一へ粗くする(和 ÷ 8。VOLUME の欄の余りは世界の帳簿の「粗くした端数・出」のその欄の列へ)。親の頁(要るなら広げた後)に書き、
-        // 子の見出しを消す前に呼ぶ
+        // 子の見出しを消す前に呼ぶ。配り手の欄は一般の段の後に粗くする時のセルの配りの口が配り手の粗くする関数で書く(T-1252)
         void Coarsen(MultiresNest& nest, uint32_t childSlot);
 
         // --- 観察の影(親を覆わない・世界に返さない。D-403。ADR-0361)---
