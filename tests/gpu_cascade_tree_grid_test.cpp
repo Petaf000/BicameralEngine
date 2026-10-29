@@ -7,6 +7,9 @@
 //   1. 刻みごとに GPU が木から写しを作って RC を流した結果(セルごとの吸った・放った・帳簿・光線・持ち越し)が、
 //      CPU の MakeCascadeTreeGrid の写しで StepCascadeLight を流した結果と全部の刻みでビット単位で同じ
 //   2. 0.5 m より細かい葉のある木は、GPU が溢れの印 4 を立てる(CPU は誤り。細かい葉へ配る規則は土台)
+//   4. 葉の鍵の持ち越し(T-1227 段 1): GPU の持ち越し(頁の印で読む表)を葉へ畳んだものが、全部 0.5 m の木では CPU の
+//      StepCascadeLightOnLeaves の持ち越しと全部の刻みでビット一致。どの木でも帳簿が合う(入った持ち越し = carriedIn + kept・
+//      出る持ち越し = reflected + held + kept)・受けのあった枠が CPU の CascadeTouchedSlots と同じ
 //   3. 費用(HW の時だけ): CPU を挟まず続けて流した刻みの写しの段と RC の GPU 時間(docs/perf.md)
 // 引数は gpu_test_options.h。
 #include <algorithm>
@@ -204,6 +207,46 @@ namespace {
         return run.light.Read();
     }
 
+    std::array<uint64_t, rx::LT_BANDS> LeafCarrySum(const sim::CascadeLeafCarry& carry) {
+        std::array<uint64_t, rx::LT_BANDS> sums{};
+        for (const sim::CascadeLeafCarryEntry& entry : carry.entries)
+            sums[entry.band] += entry.amount;
+
+        return sums;
+    }
+
+    // 4. GPU の持ち越しを葉へ畳む(T-1227 段 1)。leafCarry は CPU の葉の鍵の持ち越し(全部 0.5 m の木だけ比べる)
+    std::string CheckLeafCarry(const World& world, const sim::CascadeTreeGrid& tree, const sim::CascadeTickResult& gpu,
+                               std::array<uint64_t, rx::LT_BANDS>& carriedBefore, sim::CascadeLeafCarry& leafCarry,
+                               uint64_t tick) {
+        const sim::CascadeLeafCarry folded = sim::FoldCarryToLeaves(tree, gpu.carry);
+        const std::array<uint64_t, rx::LT_BANDS> carried = LeafCarrySum(folded);
+        for (uint32_t band = 0; band < rx::LT_BANDS; ++band) {
+            const sim::CascadeBandLedger& ledger = gpu.ledger[band];
+            if (ledger.carriedIn + ledger.kept != carriedBefore[band] ||
+                ledger.reflected + ledger.held + ledger.kept != carried[band])
+                return std::format("葉へ畳んだ持ち越しの帳簿(帯 {})", band);
+        }
+
+        carriedBefore = carried;
+        if (sim::CascadeTouchedSlots(tree, gpu).empty() && gpu.ledger[rx::LT_BAND_LONG].absorbed != 0)
+            return "受けのあった枠";
+
+        if (world.nest.edges.world.rootLevel != 0 || world.fineLeaves)
+            return {};
+
+        const sim::CascadeLeafTick step = sim::StepCascadeLightOnLeaves(world.nest, tree, leafCarry, {}, tick);
+        leafCarry = step.carry;
+        if (folded != step.carry)
+            return std::format("葉の鍵の持ち越し(CPU {} 個・GPU {} 個)", step.carry.entries.size(),
+                               folded.entries.size());
+
+        if (sim::CascadeTouchedSlots(tree, gpu) != step.touchedSlots)
+            return "受けのあった枠(CPU の葉の鍵と)";
+
+        return {};
+    }
+
     // 1. 刻みごとに CPU の写しの結果とビット一致(比べた刻みの数を返す)
     std::expected<uint64_t, std::string> CompareWorld(const GpuContext& context, const sim::BakedReactionTable& table,
                                                       const World& world) {
@@ -216,6 +259,8 @@ namespace {
             return std::unexpected(run.error());
 
         sim::CascadeCarry carry;
+        sim::CascadeLeafCarry leafCarry;
+        std::array<uint64_t, rx::LT_BANDS> carriedBefore{};
         uint64_t emitting = 0;
         // 刻みごとの最小(GPU は刻みのたびに CPU のリファレンスを待つので、クロックが落ちた刻みの値は大きく揺れる)
         std::array<uint64_t, StageCount> fastest{};
@@ -237,6 +282,10 @@ namespace {
 
             if (const std::string difference = Difference(cpu, gpu->result); !difference.empty())
                 return std::unexpected(std::format("刻み {}: {} が食い違う", tick, difference));
+
+            if (const std::string leaf = CheckLeafCarry(world, *tree, gpu->result, carriedBefore, leafCarry, tick);
+                !leaf.empty())
+                return std::unexpected(std::format("刻み {}: {} が合わない", tick, leaf));
 
             emitting += cpu.ledger[rx::LT_BAND_LONG].emitted != 0 ? 1 : 0;
             carry = cpu.carry;

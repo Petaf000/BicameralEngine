@@ -25,6 +25,10 @@ RC の持ち越し(今は (セル・面・帯) の鍵の密な表を刻みの偶
 - [x] **段 1 の CPU(2026-10-29 wt4・司令塔の完了条件)**: 持ち越しの鍵を (葉の枠・セル・面・帯) に(sim/cascade_light の CascadeLeafCarry・FoldCarryToLeaves・SpreadLeafCarry・
       StepCascadeLightOnLeaves・RcCarrySpreadShare)。全部 0.5 m の木で升目の鍵と 6 刻みビット一致・1 m の根の木と混ざった木で帳簿が合う(cascade_tree_grid の 5)。
       上の GPU の「ブロックの頁 × セル × 12」の表と CarryIn・RadiationHash を印のブロックだけにするのは**まだ**(下の「段 1 の残り」)
+- [x] **段 1 の GPU の頁の印(2026-10-29 wt4 3 本目)**: 持ち越しの表に頁の印・RcCarryIn と RadiationHash は印の頁だけ(下の「段 1 の残りの GPU の形」)。
+      gpu_cascade_light(_warp)・gpu_cascade_tree_grid(_warp。4 = 葉へ畳んで 0.5 m の木で CPU の葉の鍵とビット一致・混ざった木で帳簿)・
+      gpu_radiation_cost・gpu_probe_rewind・probe_radiation が通った。2 側の CarryIn + Hash 約 190 → 約 90 µs(perf.md)。
+      木を読む形(CreateFromTree)の GPU の葉の頁へ atomic で畳む・広げるは段 2(頁の取り方が段 2 の集めて書く段)
 - [ ] 帳簿の 4-3 の行
 - [ ] release のビルド(警告 0)・archmap --check
 
@@ -58,6 +62,37 @@ RC の持ち越し(今は (セル・面・帯) の鍵の密な表を刻みの偶
   T-1228 段 1(RadiationGrid を PROBE_SCHEDULE_CHANGED_WORD で飛ばす)は「最後に写した刻み」を作業のバッファに持ち、ブロックの印 > それのブロックだけ写す。
   読み込んだ直後・表の差し替えの後は全部(RecordRadiationInitialization・RecordRadiationTableSwap で「最後に写した刻み」を 0 に)。gpu_radiation_cost に「全部変わった」の場面。
 
+## 段 1 の残りの GPU の形(2026-10-29 wt4 3 本目。ブランチ t-1227-gpu-carry)
+- 頁 = 鍵の連続 `RC_GPU_CARRY_PAGE_KEYS`(セル 512 個 × 面 6 × 帯 2 = 6144 鍵 = 48 KiB。段 2 の欄の頁と同じ大きさ)。仮の世界 64³ は 512 頁。
+  頁は升目の番号の連続(段 2 の葉の枠の頁とは鍵の並びが違う。段 2 で枠の頁に置き換える)。
+- 置き場: `RcGpuParams` の末尾に `carryPages`・`stateCarryMarks0/1`(状態のバッファの持ち越しの表 2 枚の直後・頁 1 語の uint32)。
+  `LayOutState`(gpu_cascade_light.cpp)が置く。読み戻しと保存点(`PersistentStateBytes` = `m_readbackBytes`)の範囲に入る = 写しの早送り・巻き戻しはそのまま。
+- 立てる: `AddCarry`(cascade_light.hlsl)が 0 から増やした鍵の頁に `MarkCarryPage`(冪等の OR)。`RcInitBags` の初めの持ち越しも。
+  0 でない鍵は、表が最後に読まれて 0 に戻った後に必ず 0 から増えているので、印の無い頁の鍵はいつも 0(印で飛ばしても落とさない)。
+- 読む: `RcCarryIn` は印の頁の鍵だけ(波の中は同じ頁なので分かれは揃う)。`RadiationHash`(probe_radiation.hlsl)は出る表の印の頁だけ・0 にしない。
+- 0 に戻す: 読み終えた表の印は次の起動の `RcLevel0Prepare` の頭(RcCarryIn と同じ起動の中で戻すと同じ頁のほかのスレッドが飛ばす)。
+- 起動の数は今のまま(歩幅で全部の鍵の番号を回し、印の無い頁は印 1 語を読んで飛ばす)。もっと減らすなら「印の頁の列 + 間接の起動」(費用を見てから)。
+- 試験: gpu_cascade_tree_grid の 4(GPU の持ち越しを葉へ畳む: 0.5 m の木で CPU の StepCascadeLightOnLeaves とビット一致・どの木でも帳簿・受けのあった枠)。
+  gpu_cascade_light(_warp)・gpu_radiation_cost・probe_radiation は今とビット一致の確かめ。
+
+## T-1228 段 1 の残り(RadiationGrid を変わった印で飛ばす。次の作業役。読んだ所の要点)
+- RadiationGrid(probe_radiation.hlsl の頭。1 スレッド = 1 セル・`LINEAR_CELL_GROUPS` で起動。記録は probe_sim.cpp の `ProbeSim::RecordRadiation`):
+  刻みの初めのセル(`cells[GenerationBase(tick) + cell]`)と熱のキャッシュの温度 → 作業の `workLights`(RcCellLight 24 B)・`workTemperatures`。
+  参照の温度の形では負の側の作業(u16)へも同じ値と `RC_GPU_WORK_EMITTERS`(側の放つセルの印。RcPlanTick が読んで 0 に)。
+- 変わった印: `blockSchedule` の `PROBE_SCHEDULE_CHANGED_WORD + block * 2`(64bit = `LoadBlockMark`。probe_bindings.hlsli)。値は
+  「最後に変わった刻みの印」(ProbeChangeMark(t) = t + 1)。書く所: 伝導(probe_conduct.hlsl。変わったら ProbeChangeMark(tick))・
+  気体/液体/放射の当てる段/コマンド(ProbeChangeMark(tick) − 1)・表の差し替え(RefreshTable が全部のブロックを ProbeChangeMark(tick) − 1)。
+  ブロックは 4³(PROBE_BLOCK_SIZE)・ProbeBlockOfCell。
+- 案: 作業のバッファの頭に「最後に写した刻みの印」を 1 語(RcGpuParams の 256 B の中・RC_GPU_WORK_EMITTERS(248)の手前の空き)。
+  写すのはブロックの印 > それのブロックだけ・写し終えたら(次の段の 1 スレッドが)今の刻みの印に。
+  注意 1: 放つセルの印(RC_GPU_WORK_EMITTERS)は今は写した全部のセルで立てるので、飛ばすと「変わっていないが放つセル」で立たなくなる →
+  印は飛ばしたセルでも温度・光の値(作業にある前の値)から立てる(作業を読むだけ)か、放つセルの数を作業に持つ。
+  注意 2: 作業は保存点に入らない(PersistentStateBytes は状態のバッファの頭だけ)ので、巻き戻し・写しの早送り・表の差し替え・初めのフレームの後は
+  「最後に写した刻み」を 0 に(RecordRadiationInitialization・RecordRadiationTableSwap・RecordRestore・RecordAdopt)。
+  注意 3: 熱のキャッシュの温度だけ変わってセルが変わらない道が無いか(RefreshTable は全部変わった扱いなので可)。
+  確かめ: gpu_radiation_cost に「印を全部変わったにした時」の場面(刻みごとの世界のハッシュが全部一致)・費用を perf.md に(Grid 83 µs)。
+- RcSources の放つセルの一覧を印で直す分も同じ印で(T-1228 の完了条件)。
+
 ## 段 2 に要るもの(T-1252 段 2 の後)
 - 登録に持ち越しの欄(セル・12 値・SF_SCALE_OWNER の光の配り・保存量の列)。SF_MAX_COMPONENTS 12(T-1252)。
 - 配り手の関数 2 つ: 木の段ごとの細かく(面 f の側の子 4 つへ同じ重み・反対は 0)/ 粗く(面 f の側の子 4 つの和)。上の升目への広げ(一度に 4^−L)とは端数の置き場が違うので別の関数。
@@ -73,3 +108,5 @@ RC の持ち越し(今は (セル・面・帯) の鍵の密な表を刻みの偶
   ブランチ t-1227-rc-carry-leaf。
 - 2026-10-29(wt4 2 本目): t-1227-rc-carry-leaf を渡す形に(release 警告 0・cascade_light・cascade_light_swing・cascade_tree_grid・probe_radiation・dxil_alloca_check)。
   GPU の頁の表と印(段 1 の残り)は時間切れで未着手。案を「段 1 の残り」の引き継ぎに書いた。
+- 2026-10-29(wt4 3 本目): 段 1 の残りの GPU のうち頁の印(AddCarry が立てる・RcCarryIn と RadiationHash は印の頁だけ・RcLevel0Prepare が 0 に)。
+  試験は上。T-1228 段 1 の RadiationGrid を印で飛ばす分は未着手(T-1228 と下の「T-1228 段 1 の残り」に読んだ所の要点)。ブランチ t-1227-gpu-carry。

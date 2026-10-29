@@ -191,8 +191,13 @@ int64_t RadiationRoundedNet(uint64_t gain, uint64_t loss) {
         DEBUG_ASSERT(overflow == 0, DebugFormat::ProbeRadiationOverflow, overflow);
     }
 
+    // 印の無い頁(cascade_light.hlsl の AddCarry が立てる。T-1227 段 1)の鍵はいつも 0 なので読まない
+    const uint32_t marks = outTable == 0 ? params.stateCarryMarks0 : params.stateCarryMarks1;
     uint64_t hash = 0;
     for (uint32_t key = dispatchThreadId.x; key < params.carryKeys; key += stride) {
+        if (rcSecond.Load(marks + ((key / RC_GPU_CARRY_PAGE_KEYS) * 4)) == 0u)
+            continue;
+
         const uint64_t amount = rcSecond.Load<uint64_t>(carryTable + (key * 8));
         if (amount == 0)
             continue;

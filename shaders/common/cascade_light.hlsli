@@ -1095,7 +1095,7 @@ FX_FN void RcPassToNextLevel(FX_IN(RcStepConstants) constants, FX_IN(RcLevelRay)
 // --- GPU 版の置き場(shaders/sim/cascade_light.hlsl・sim/gpu_cascade_light.cpp。T-0959)----------------------------------------
 // 作業のバッファ(u4。CPU が書いて既定のヒープへ写す。読むだけ)= [RcGpuParams][升目の表][セルの光の値][セルの温度][初めの持ち越し]
 // 状態のバッファ(u5。uint64 の語)= [頭の語][放った][吸った][持ち越しの表 × 2][放つ面の量][放つ面の列][面ごとの分け方]
-//   [袋の表 × 2][袋の列 × 2]。持ち越しの表は (セル・面・帯) の鍵で引く密な表(セル × 12 語)を刻みの偶奇で 2 つ持つので、溢れない
+//   [袋の表 × 2][袋の列 × 2]。持ち越しの表の後ろに表ごとの頁の印(T-1227 段 1。保存点と読み戻しに入る)。持ち越しの表は (セル・面・帯) の鍵で引く密な表(セル × 12 語)を刻みの偶奇で 2 つ持つので、溢れない
 //   (T-1164・ADR-0484。前は鍵を並べる疎な表で、溢れると取り合いの順で結果が変わった)。袋の表は開いた番地の hash(鍵の CAS + 量の 64bit の atomic の足し算・溜めの atomic min)。
 //   どれも可換な整数の足し算か min なので、光線と袋の処理の順によらず CPU リファレンスとビット一致する(R3・R4)。
 // 位置はすべてバイト(< 2^32)。
@@ -1139,6 +1139,12 @@ struct RcGpuParams {
     uint32_t thermalInSlots;
     uint32_t stateFaceFlags;  // 放つ面の列に入れた印(セル × 6 の uint32。T-1010)
     uint32_t referenceWord;   // 参照の温度と負の側の印(RcFaceEmissionRelative。0 = 今のまま。T-1102)
+    // --- 持ち越しの表の頁の印(T-1227 段 1・ADR-0500)---
+    // 頁 = 鍵の連続 RC_GPU_CARRY_PAGE_KEYS 個(セル 512 個の連続 × 面 6 × 帯 2)。印は表ごとに頁 1 語の uint32(0 でない = その頁に
+    // 0 でない鍵があるかもしれない。多めに立ってよい・落とさない)。RcCarryIn と RadiationHash は印の頁だけ読む
+    uint32_t carryPages;
+    uint32_t stateCarryMarks0;
+    uint32_t stateCarryMarks1;
 };
 
 // 頭の語(uint64 の番号)
@@ -1175,6 +1181,9 @@ FX_CONST uint32_t RC_GPU_CARRY_WORDS = 2;                                  // �
 FX_CONST uint64_t RC_GPU_CHOSEN_EMPTY = FX_U64(0x7FFFFFFFu, 0xFFFFFFFFu);  // 溜めの空(詰めた語は 2^63 未満)
 FX_CONST uint32_t RC_GPU_TEXEL_LIMIT = 512;                                // 袋の鍵に升目を 9bit で詰める
 FX_CONST uint32_t RC_GPU_BLOCK_BITS = 14;
+// 持ち越しの表の頁(T-1227 段 1): セル 512 個の連続 × 面 6 × 帯 2 = 鍵 6144 個 = 48 KiB(段 2 の欄の頁と同じ大きさ。ADR-0500)
+FX_CONST uint32_t RC_GPU_CARRY_PAGE_CELLS = 512;
+FX_CONST uint32_t RC_GPU_CARRY_PAGE_KEYS = RC_GPU_CARRY_PAGE_CELLS * RC_FACES * LT_BANDS;
 
 RX_NAMESPACE_END
 
