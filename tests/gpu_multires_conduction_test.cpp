@@ -723,7 +723,9 @@ namespace {
         Log(Channel::Gpu, Level::Info, "gpu_multires_conduction_test: adapter {}, queue {}{}",
             gpu::AdapterKindName(options->gpu.adapter), test::QueueTypeName(options->gpu.queueType),
             options->subcycle ? "、小刻み" : "");
-        const auto table = sim::BakeReactionTable(sim::MakeCombustionTestTable());
+        // 許容差つきで畳む鎖は、鎖が静かになるまでの伝導の速さを前の倍率に頼る(現実の伝導率では 4000 刻みで畳めない。T-1250)
+        const auto table = sim::BakeReactionTable(options->nearFold ? sim::MakeFastConductionTestTable()
+                                                                    : sim::MakeCombustionTestTable());
         const auto device = gpu::Device::Create(options->gpu.adapter, test::TestDeviceOptions(options->gpu));
         if (!table || !device) {
             Log(Channel::Gpu, Level::Error, "gpu_multires_conduction_test: FAILED(表かデバイスを作れない)");

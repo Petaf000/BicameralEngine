@@ -584,6 +584,10 @@ namespace {
     }
 
     std::expected<void, std::string> MeasureScene(const Context& context, const BuildScene& scene) {
+        // 刻みが無いと下の back() が空の列を読む(T-1250 の SegFault。確かめる前の計測でも落ちずに理由を返す)
+        if (scene.ticks.empty())
+            return std::unexpected(std::format("{}: 陰解法の刻みが無い", scene.name));
+
         auto multires = MakeMultires(context, scene);
         if (!multires)
             return std::unexpected(multires.error());
@@ -652,7 +656,8 @@ namespace {
 
         Log(Channel::Gpu, Level::Info, "gpu_multires_implicit_build_test: adapter {}, queue {}",
             gpu::AdapterKindName(options->adapter), test::QueueTypeName(options->queueType));
-        const auto table = sim::BakeReactionTable(sim::MakeCombustionTestTable());
+        // 解き方の試験なので、基準のレベルが場面の中にある前の倍率の表で(T-1250。reaction_test_table.h)
+        const auto table = sim::BakeReactionTable(sim::MakeFastConductionTestTable());
         const auto device = gpu::Device::Create(options->adapter, test::TestDeviceOptions(*options));
         if (!table || !device) {
             Log(Channel::Gpu, Level::Error, "gpu_multires_implicit_build_test: FAILED(表かデバイスを作れない)");

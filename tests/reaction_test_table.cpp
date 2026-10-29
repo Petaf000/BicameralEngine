@@ -91,6 +91,16 @@ namespace bicameral::sim {
             templates.editor.labFill.clear();
     }
 
+    ReactionTableDefinition MakeFastConductionTestTable() {
+        constexpr uint32_t CONDENSED_SCALE = 20000;  // T-1066 の前の units.luau の固体(凝縮相)の倍率
+        constexpr uint32_t GAS_SCALE = 5000;         // 同じく気体の倍率
+        ReactionTableDefinition definition = MakeCombustionTestTable();
+        for (SpeciesDefinition& species : definition.species)
+            species.thermalConductivity *= species.phase == SpeciesPhase::Gas ? GAS_SCALE : CONDENSED_SCALE;
+
+        return definition;
+    }
+
     ReactionTableDefinition MakeSpeciesChangedTestTable() {
         ReactionTableDefinition definition = MakeCombustionTestTable();
         definition.species.push_back({.name = "hydrogen",

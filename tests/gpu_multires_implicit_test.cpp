@@ -488,7 +488,8 @@ namespace {
 
         Log(Channel::Gpu, Level::Info, "gpu_multires_implicit_test: adapter {}, queue {}",
             gpu::AdapterKindName(options->adapter), test::QueueTypeName(options->queueType));
-        const auto table = sim::BakeReactionTable(sim::MakeCombustionTestTable());
+        // 解き方の試験なので、基準のレベルが場面の中にある前の倍率の表で(T-1250。reaction_test_table.h)
+        const auto table = sim::BakeReactionTable(sim::MakeFastConductionTestTable());
         const auto device = gpu::Device::Create(options->adapter, test::TestDeviceOptions(*options));
         if (!table || !device) {
             Log(Channel::Gpu, Level::Error, "gpu_multires_implicit_test: FAILED(表かデバイスを作れない)");

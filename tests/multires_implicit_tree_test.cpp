@@ -335,7 +335,8 @@ namespace {
     }
 
     int Run() {
-        const auto table = BakeReactionTable(MakeCombustionTestTable());
+        // 解き方の試験なので、基準のレベルが場面の中にある前の倍率の表で(T-1250。reaction_test_table.h)
+        const auto table = BakeReactionTable(MakeFastConductionTestTable());
         if (!table) {
             Log(Channel::Sim, Level::Error, "multires_implicit_tree_test: FAILED(表を作れない)");
             return 1;
