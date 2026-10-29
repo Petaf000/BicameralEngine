@@ -483,6 +483,10 @@ namespace {
 
     std::expected<void, std::string> MeasureScene(const SolveSetup& setup, const TreeScene& scene,
                                                   const MeasureCase& measure) {
+        // 刻みが無いと下の back() が空の列を読む(T-1250 の SegFault。計測でも落ちずに理由を返す)
+        if (scene.ticks.empty())
+            return std::unexpected(std::format("{}: 陰解法の系が無い(場面が試験になっていない)", scene.name));
+
         sim::ImplicitOptions options = scene.options;
         options.cycles = measure.maxCycles;
         const auto results = RunScene(setup, scene, options, measure.tuning, REPEATS, measure.shape);
@@ -547,7 +551,8 @@ namespace {
 
         Log(Channel::Gpu, Level::Info, "gpu_multires_implicit_tree_test: adapter {}, queue {}",
             gpu::AdapterKindName(options->adapter), test::QueueTypeName(options->queueType));
-        const auto table = sim::BakeReactionTable(sim::MakeCombustionTestTable());
+        // 解き方の試験なので、基準のレベルが場面の中にある前の倍率の表で(T-1250。reaction_test_table.h)
+        const auto table = sim::BakeReactionTable(sim::MakeFastConductionTestTable());
         const auto device = gpu::Device::Create(options->adapter, test::TestDeviceOptions(*options));
         if (!table || !device) {
             Log(Channel::Gpu, Level::Error, "gpu_multires_implicit_tree_test: FAILED(表かデバイスを作れない)");
