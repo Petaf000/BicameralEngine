@@ -242,6 +242,13 @@ namespace bicameral::sim {
             std::vector<uint8_t> grain;  // [物質] 粒の物質なら 1
         } cellLayers;
 
+        // --- 相の層のエネルギー Ec(T-1230・T-1231。ADR-0486・ADR-0500・ADR-0512。状態に入らない)。EnablePhaseLayerEnergy で
+        //     欄(相の層の配り手 SF_OWNER_PHASE_LAYER)を登録し、配りが読む物質の表を持たせる。無い世界は欄も配りも無い(今とビット単位で同じ)---
+        struct PhaseLayer {
+            uint32_t field = UINT32_MAX;  // 欄の番号(無ければ MULTIRES_NO_FIELD と同じ値)
+            std::vector<reaction::RxSpecies> species;
+        } phaseLayer;
+
         // --- 活性の種(T-0100)。次の StepActive で刻むブロックの元(世界の枠ごとに 0 / 1)。
         //     GPU は順の決まらない一覧で持つので、集合として比べる(状態の要約に入れない)---
         std::vector<uint8_t> seeds;
@@ -463,6 +470,15 @@ namespace bicameral::sim {
 
     // 物質の表を持たせ、細かくする時のセルの中身と置かれ方の印の欄(refinePlacement)を同じ置かれ方で配るようにする
     void EnableRefineCellPlacement(MultiresNest& nest, const BakedReactionTable& table);
+
+    // --- 相の層のエネルギー Ec(T-1230・T-1231。ADR-0512 の 1。engine/src/sim/multires_phase_layer.cpp)---
+
+    // 欄「phase_layer_energy」(セル・I64・真実・ハッシュに入る・保存量でない・配り手 = 相の層)を登録し、配りが読む物質の表を持たせる。
+    // 作った直後・根を置く前に呼ぶ(欄の登録と同じ)。返すのは欄の番号(登録できなければ MULTIRES_NO_FIELD と同じ値)
+    uint32_t EnablePhaseLayerEnergy(MultiresNest& nest, const BakedReactionTable& table);
+
+    // 枠 slot のセル index の Ec(mJ。そのブロックのレベルの単位。欄が無い・混ざらないセルは 0)
+    [[nodiscard]] int64_t LoadNestPhaseLayerEnergy(const MultiresNest& nest, uint32_t slot, uint32_t index);
 
     // 頁を持つ親のセル 1 つの置かれ方(数の空間。子の器 = MR_CELL_VOLUME_MM3・量 = 親の数 × 8・並びは親の成分の順。
     // 層を持つ成分・層を使う世界の粒は「層の分・残り」の 2 つの物質に分けて並ぶ。T-1220)。

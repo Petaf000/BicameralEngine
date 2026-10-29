@@ -12,6 +12,8 @@
 
 using namespace bicameral::multires;
 using namespace bicameral::state_field;
+using bicameral::reaction::RxCell;
+using bicameral::reaction::RxSpecies;
 
 namespace bicameral::sim {
 
@@ -758,6 +760,50 @@ namespace bicameral::sim {
             return rng::any_of(nest.fields, [](const MultiresField& field) { return SfOwned(field.desc); });
         }
 
+        // 相の層の配り(細かくする): 親の八分の一のセルごとに、セルの中身を配った後の子 8 つを読んで子の Ec と(混ざった親なら)子のエネルギーを書く。
+        // セルの中身の配り(置かれ方・SAME)の後・親を覆う前に呼ばれる(Refine の終わり)。子の層は成分が同じなので付け替えで残る
+        void RefinePhaseLayerOctant(MultiresNest& nest, MultiresField& field, const MrBlock& parent, uint32_t octant,
+                                    uint32_t childPage) {
+            const std::span<const RxSpecies> species = nest.phaseLayer.species;
+            for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
+                const uint32_t parentCell = MrOctantCell(octant, local);
+                const RxCell parentCellValue = nest_detail::LoadPageCell(nest, parent.page, parentCell);
+                std::array<RxCell, MR_CHILDREN_PER_CELL> children{};
+                std::array<int64_t, MR_CHILDREN_PER_CELL> energies{};
+                for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j)
+                    children[j] = nest_detail::LoadPageCell(nest, childPage, MrChildCell(local, j));
+
+                nest_detail::RefinePhaseLayerCell(
+                    species, parentCellValue, LoadPage(field.store, parent.page, parentCell, 0), children, energies);
+                for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
+                    const uint32_t index = MrChildCell(local, j);
+                    nest_detail::StorePageCell(nest, childPage, index, children[j]);
+                    StorePage(field.store, childPage, index, 0, energies[j]);
+                }
+            }
+        }
+
+        // 相の層の配り(粗くする): 粗くした親のセル(頁を持つ親)と子 8 つから親の Ec。保存量でないので余りは無い
+        void CoarsenPhaseLayerOctant(MultiresNest& nest, uint32_t f, uint32_t childSlot) {
+            const MrBlock& child = nest.blocks[childSlot];
+            const MrBlock& parent = nest.blocks[child.parent];
+            const std::span<const RxSpecies> species = nest.phaseLayer.species;
+            for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
+                const uint32_t parentCell = MrOctantCell(child.parentOctant, local);
+                std::array<RxCell, MR_CHILDREN_PER_CELL> children{};
+                std::array<int64_t, MR_CHILDREN_PER_CELL> energies{};
+                for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
+                    const uint32_t index = MrChildCell(local, j);
+                    children[j] = LoadNestCell(nest, childSlot, index);
+                    energies[j] = LoadNestField(nest, f, childSlot, index, 0);
+                }
+
+                const RxCell parentCellValue = nest_detail::LoadPageCell(nest, parent.page, parentCell);
+                StorePage(nest.fields[f].store, parent.page, parentCell, 0,
+                          nest_detail::CoarsenPhaseLayerCell(species, parentCellValue, children, energies));
+            }
+        }
+
         void RefineOwners(MultiresNest& nest, uint32_t parentSlot, uint32_t octant, uint32_t childSlot,
                           uint32_t childPage) {
             if (!AnyOwned(nest))
@@ -780,8 +826,14 @@ namespace bicameral::sim {
                     continue;
                 }
 
-                // --- 頁を持つ親: 親のセルごとに子 2³ へ配り手の関数で ---
+                // --- 頁を持つ親: 親のセルごとに子 2³ へ配り手の関数で(相の層の配りはセルを読む。ADR-0512 の 1)---
                 StartPage(store, childPage);
+                if (owner == SF_OWNER_PHASE_LAYER && !nest.wideCells) {
+                    RefinePhaseLayerOctant(nest, field, parent, octant, childPage);
+                    CoverParentOctant(store, components, parent.page, octant);
+                    continue;
+                }
+
                 for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
                     const uint32_t parentCell = MrOctantCell(octant, local);
                     for (uint32_t c = 0; c < components; ++c) {
@@ -803,6 +855,12 @@ namespace bicameral::sim {
                 MultiresField& field = nest.fields[f];
                 if (!SfOwned(field.desc))
                     continue;
+
+                // 相の層の配り: 頁を持つ親はセルを読む(一様な親は一様のまま = 一般の形。ADR-0512 の 1)
+                if (field.desc.owner == SF_OWNER_PHASE_LAYER && !nest.wideCells && !MrIsUniform(parent)) {
+                    CoarsenPhaseLayerOctant(nest, f, childSlot);
+                    continue;
+                }
 
                 const bool conserved = SfConserved(field.desc);
                 const uint32_t column = conserved ? NestFieldLedgerBase(nest) + NestConservedIndex(nest, f) : 0;

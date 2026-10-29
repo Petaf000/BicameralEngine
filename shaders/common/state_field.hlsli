@@ -97,9 +97,13 @@ FX_CONST uint32_t SF_FLAG_MASK = 511u;
 FX_CONST uint32_t SF_NO_PARENT = 0xFFFFFFFFu;  // 内訳でない欄の親(SfFieldDesc::parent)
 
 // --- 配り手の表(T-1252。SF_SCALE_OWNER の欄の SfFieldDesc::owner。GPU は決まった数の回しで選ぶ = T-0397)---
-// 使い手が足す: 相の層の配り(Ec。T-1230)・光の配り(放射の持ち越し。T-1227)。今は試験用の 1 つだけ
+// 使い手が足す: 光の配り(放射の持ち越し。T-1227)
 FX_CONST uint32_t SF_OWNER_TEST = 0;  // 試験用(子 j の重み j + 1 で配る・粗く = 和 ÷ 8 + 端数。レベルの単位)
-FX_CONST uint32_t SF_OWNER_COUNT = 1;
+// 相の層の配り(Ec。T-1230・T-1231・ADR-0512 の 1): セルの中身を読む配り手。頁を持つ親の細かく/粗くは、セルの配りの口が
+// 親と子のセルを読んで書く(sim の multires_phase_layer。式は phase_layer.hlsli)。この表の関数はセルを読まない一般の形
+// (子は親と同じ数・粗く = 和 ÷ 8 の床。余りは捨てる = 保存量でない)で、一様な親・影・一様のままの見比べに使う
+FX_CONST uint32_t SF_OWNER_PHASE_LAYER = 1;
+FX_CONST uint32_t SF_OWNER_COUNT = 2;
 FX_CONST uint32_t SF_NO_OWNER = 0xFFFFFFFFu;  // 配り手でない欄(SfFieldDesc::owner)
 
 // --- 細かくする時の配り方(印から決まる。SfRefinePlacement)---
@@ -709,7 +713,8 @@ FX_FN int64_t SfPullBackChild(int64_t parentValue, SfFamily family, uint32_t chi
 // 細かくする: 頁を持つ親のセルの値 → 子 child(子の番号は MrChildCell の j)。一様な親 → 一様な子の値 1 つ(子 8 つが同じ値)。
 // 粗くする:   子 8 つ → 親の値と余り(SfCoarsenSum の形。保存量の欄の余りは一般の段と同じく帳簿の「粗くした端数・出」へ)。
 // 保存量の配り手は「子の和 = 親 × 8(子のレベルの単位)」と「粗く = 和 ÷ 8 + 余り」で和をビット単位で保つ。
-// セルの中身を読む配り手(相の層の配り。T-1230)は、引数に子の重みを足す(この形を広げる。使い手の作業)
+// セルの中身を読む配り手(相の層の配り。T-1230)は、頁を持つ親の時だけセルの配りの口がセルを読んで書く(ADR-0512 の 1)。
+// ここの関数はその配り手の一般の形(子が親の写しの時の値)
 
 // 試験用の配り手の重み: 子 j は j + 1(和 36)。子 7 が残り(SfPlacedLastValue)
 FX_CONST uint64_t SF_OWNER_TEST_WEIGHT_SUM = 36;
@@ -730,11 +735,14 @@ FX_FN int64_t SfOwnerRefineChild(uint32_t owner, int64_t parentValue, uint32_t c
     if (owner == SF_OWNER_TEST)
         return SfOwnerTestChild(parentValue, child);
 
+    if (owner == SF_OWNER_PHASE_LAYER)
+        return parentValue;  // 子が親の写し(セルを読む配りは頁を持つ親の時にセルの配りの口が)
+
     return 0;
 }
 
 FX_FN int64_t SfOwnerRefineUniform(uint32_t owner, int64_t parentValue) {
-    if (owner == SF_OWNER_TEST)
+    if (owner == SF_OWNER_TEST || owner == SF_OWNER_PHASE_LAYER)
         return parentValue;  // 一様な親の子は親と同じ数(子の和 = 親 × 8)
 
     return 0;
@@ -742,7 +750,7 @@ FX_FN int64_t SfOwnerRefineUniform(uint32_t owner, int64_t parentValue) {
 
 FX_FN SfCoarsenSum SfOwnerCoarsen(uint32_t owner, SfFamily family) {
     SfCoarsenSum sum = SfMakeCoarsenSum();
-    if (owner != SF_OWNER_TEST)
+    if (owner != SF_OWNER_TEST && owner != SF_OWNER_PHASE_LAYER)
         return sum;
 
     FX_UNROLL
@@ -756,7 +764,7 @@ FX_FN SfCoarsenSum SfOwnerCoarsen(uint32_t owner, SfFamily family) {
 // 粗く = 和 ÷ 8 の配り手(試験用・相の層の配り)では ADR-0361 の「子の和 = 親 × 8」と同じ(SfPullBackChild)。
 // 粗く = 面の側の子の和の配り手(光の配り。T-1227)は「面の側の子の和 = 親」に合わせる関数を足す(使い手の作業)
 FX_FN int64_t SfOwnerPullBackChild(uint32_t owner, int64_t parentValue, SfFamily family, uint32_t child) {
-    if (owner == SF_OWNER_TEST)
+    if (owner == SF_OWNER_TEST || owner == SF_OWNER_PHASE_LAYER)
         return SfPullBackChild(parentValue, family, child);
 
     return 0;

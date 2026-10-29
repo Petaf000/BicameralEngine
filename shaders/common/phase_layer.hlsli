@@ -424,6 +424,114 @@ FX_FN int64_t PlRemixCondensedEnergy(Table table, Cell before, Cell after, int64
     return condensedEnergy;
 }
 
+// --- 細かく/粗くする時の配り(相の層の配り手 SF_OWNER_PHASE_LAYER。ADR-0512 の 1・D-674・T-1231)----------------------------
+// セルの配りの口(CPU: sim の multires_phase_layer.cpp。GPU は T-1252 段 2 の後)が、頁を持つ親のセルごとに呼ぶ。子の番号ごとの関数にして
+// あるので、GPU は 1 スレッド = 子 1 つで、子 8 つの熱容量の和をグループ共有で集めて同じ関数を呼べる(T-1188 の ChildEnergies と同じ形)。
+// 単位: 親は親のレベルの単位、子は子のレベルの単位(子 8 つの和 = 親 × 8。T-1176 と同じ)。
+//   細かく: 親が混ざったセルなら、層の熱 8 × (1000 Ec − 化学_凝縮) を子の凝縮相の熱容量の重みで・気体の熱 8 × (1000 (E − Ec) − 化学_気体) を
+//           子の気体の熱容量の重みで配り(D-674 を 2 回)、子のエネルギー = 子の層 + 子の気体(最後の重みのある子が残り = 和はビット単位)。
+//           子が親の写し(置かれ方が一様・SAME)なら子の層 = Ec・子の気体 = E − Ec(今とビット単位で同じ)
+//   粗く:   親の Ec = Σ 子の凝縮相の分 ÷ 8 の床(PlCondensedPartOf)を、層の熱 ≥ 0・気体の熱 ≥ 0 に収める(混ざらない親は 0)
+
+// 子 1 つの部分ごとの化学のエネルギー(µJ)と熱容量(nJ/K)
+struct PlPartSums {
+    int64_t condensedChemical;
+    int64_t gasChemical;
+    uint64_t condensedCapacity;
+    uint64_t gasCapacity;
+};
+
+template <typename Table, typename Cell>
+FX_FN PlPartSums PlPartSumsOf(Table table, Cell cell) {
+    PlPartSums sums;
+    sums.condensedChemical = PlPartChemical(table, cell, 0u);
+    sums.gasChemical = PlPartChemical(table, cell, 1u);
+    sums.condensedCapacity = 0;
+    sums.gasCapacity = 0;
+    for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+        const RxSpecies entry = table.Species(RX_SPECIES_AT(cell, i));
+        const uint64_t capacity = RX_AMOUNT_AT(cell, i) * (uint64_t)entry.heatCapacity;
+        if (PlIsGas(entry))
+            sums.gasCapacity += capacity;
+        else
+            sums.condensedCapacity += capacity;
+    }
+
+    return sums;
+}
+
+// 親の 2 つの部分の熱(µJ。子のレベルの単位 = × 8)。mixed = 0 なら配りはセルの中身の配りのまま(子の Ec は PlEvenCondensedEnergy)
+struct PlRefineHeats {
+    int64_t condensedHeat;
+    int64_t gasHeat;
+    int64_t condensedEnergy;  // 子 8 つの層の和(mJ。8 × Ec)
+    int64_t gasEnergy;        // 子 8 つの気体の和(mJ。8 × (E − Ec))
+    uint32_t mixed;
+};
+
+template <typename Table, typename Cell>
+FX_FN PlRefineHeats PlRefineHeatsOf(Table table, Cell parent, int64_t condensedEnergy) {
+    PlRefineHeats heats;
+    heats.mixed = PlLayerOf(table, parent).mixed;
+    heats.condensedEnergy = condensedEnergy * 8;
+    heats.gasEnergy = (parent.energy - condensedEnergy) * 8;
+    const int64_t micro = (int64_t)RX_MICROJOULES_PER_MILLIJOULE;
+    heats.condensedHeat = (condensedEnergy * micro - PlPartChemical(table, parent, 0u)) * 8;
+    heats.gasHeat = ((parent.energy - condensedEnergy) * micro - PlPartChemical(table, parent, 1u)) * 8;
+
+    return heats;
+}
+
+// 子 1 つの部分のエネルギー(mJ。最後の重みのある子でない子)。熱の分 share = 熱 × 熱容量 ÷ 熱容量の和 を PlEvenCondensedEnergy と同じ丸めで
+// mJ に(化学は切り上げ・熱は切り捨て = 部分の熱は 0〜share。share が 1 mJ 未満なら化学の切り上げだけ)。残りは最後の子が持つ。
+// 子が親の写し(熱容量が親と同じ・和が 8 倍)なら share は親の部分の熱そのもので、値は親の部分のエネルギーと同じ(今とビット単位で同じ)。
+// 余りは 32bit で比べる(64bit の差を 0 で止めない。CLAUDE.md §4)
+FX_FN int64_t PlRefinePartEnergy(int64_t heat, int64_t childChemical, uint64_t childCapacity, uint64_t capacitySum) {
+    const int64_t share = capacitySum == 0 ? 0 : FxMulDivS64(heat, childCapacity, capacitySum);
+    const int64_t micro = (int64_t)RX_MICROJOULES_PER_MILLIJOULE;
+    const int64_t chemicalMj = -PlFloorDivS64(-childChemical, RX_MICROJOULES_PER_MILLIJOULE);
+    const uint32_t slack = (uint32_t)(chemicalMj * micro - childChemical);
+    const int64_t shareMj = PlFloorDivS64(share, RX_MICROJOULES_PER_MILLIJOULE);
+    const uint32_t shareRest = (uint32_t)(share - shareMj * micro);
+    const int64_t borrow = shareRest < slack ? 1 : 0;
+    const int64_t extra = shareMj == 0 ? 0 : shareMj - borrow;
+
+    return chemicalMj + extra;
+}
+
+// セルの凝縮相の分(mJ。粗くする時の和の項): 混ざったセルは Ec・気体だけは 0・凝縮相だけはセルのエネルギー・
+// 満ちたセル(孔の気体)は温度の揃う分け方の層の分
+template <typename Table, typename Cell>
+FX_FN int64_t PlCondensedPartOf(Table table, Cell cell, int64_t condensedEnergy) {
+    const PlLayer layer = PlLayerOf(table, cell);
+    if (layer.mixed != 0)
+        return condensedEnergy;
+
+    if (layer.condensedAmount == 0)
+        return 0;
+
+    if (layer.gasAmount == 0)
+        return cell.energy;
+
+    return PlEvenCondensedEnergy(table, cell);
+}
+
+// 粗くした親の Ec: 子の凝縮相の分の和 condensedSum(子のレベルの単位)÷ 8 の床を、層の熱 ≥ 0(化学の切り上げ以上)・
+// 気体の熱 ≥ 0(E − 気体の化学の切り上げ以下)に収める。混ざらない親は 0。小さい方は符号を返して PlAtLeastS64 で(CLAUDE.md §4)
+template <typename Table, typename Cell>
+FX_FN int64_t PlCoarsenCondensedEnergy(Table table, Cell parent, int64_t condensedSum) {
+    if (PlLayerOf(table, parent).mixed == 0)
+        return 0;
+
+    const int64_t micro = (int64_t)RX_MICROJOULES_PER_MILLIJOULE;
+    const int64_t lowest = -PlFloorDivS64(-PlPartChemical(table, parent, 0u), (uint64_t)micro);
+    const int64_t highest = parent.energy + PlFloorDivS64(-PlPartChemical(table, parent, 1u), (uint64_t)micro);
+    const int64_t average = PlFloorDivS64(condensedSum, 8u);
+    const int64_t below = -PlAtLeastS64(-average, -highest);
+
+    return PlAtLeastS64(below, lowest);
+}
+
 // --- 規則の振り分けと 2 回の反応(ADR-0486 の 5。T-1211)-------------------------------------------------------------
 // 凝縮相の項(反応物か生成物に気体でない物質)を 1 つでも持つ規則 = 接する面の規則で、混ざったセルでは層の温度で回す。
 // ほかの規則(気体だけの規則。気体の燃焼など)は気体の部分の温度で回す。混ざらないセルはすべての規則を 1 回(今と同じ)。
