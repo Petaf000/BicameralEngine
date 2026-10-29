@@ -7,7 +7,9 @@
 // 2. 成分の数 k = 1・2・3・6 の箱(一辺 8。軸の面の k × k の結合・下の面を固定・区分的に一定の延ばし方)を 5 刻み、同じく比べる。
 //    違うレベルの節が混ざる系(T-1104・ADR-0462): equilibrium_block_test の箱(k = 1・3。真ん中 2 × 2 × 2 をレベル 1)を V 2 回・
 //    V 4 回 + 共役勾配・V 2 回 + 刻みをまたぐ共役勾配(D-649)で 12 刻み、節と面の並びを逆にした系も。支えの違う大きさのセルの場面
-//    (support_mixed_test の場面。0.5 m と 0.25 m。支えの既定 = V 2 回 + 刻みをまたぐ共役勾配)を --ticks 刻み。
+//    (support_mixed_test の場面。0.5 m と 0.25 m。支えの既定 = V 2 回 + 刻みをまたぐ共役勾配)を --ticks 刻み。違う大きさの面の対の負の項は
+//    今の形(None)と、粗いセルの隣から読む一様な歪みを目標に材料の硬さを残す形(NeighborStrain。ADR-0509 形 A・T-1279)の両方
+//    (形 A は C の隣と対の細かいセルの間に斜めの面を足すので、壁と梁の根の線の両側の 2 場面も)。
 // 3. 決定性(R3): 色の一覧・行・子・固定した面の順を逆に積んだ GPU と 2 回目の GPU が、最後の値のハッシュで一致。
 // 4. 費用(--measure): k ごとの箱(一辺 32。64 は k = 1・3)の 1 回の解き(V 2 回)の時間(暖機の後 8 回の最小)・段を作る時間・VRAM・Dispatch の数。
 //    支えの洞窟 0.25 m の 1 回の解きも。値は比べない(1 と 2 で比べてある)。
@@ -204,6 +206,9 @@ namespace {
             {.name = "片持ち梁 8 × 1 m の上の段だけ 0.25 m", .scene = test::Marked(cantilever, 0, 16, 1, 2)},
             {.name = "両端を固定した梁 8 × 1 m の真ん中 3 m を 0.25 m", .scene = test::Marked(clamped, 5, 11, 0, 2)},
             {.name = "洞窟の天井(と空洞の縁)を 0.25 m", .scene = test::Marked(test::Cave(500), 14, 34, 6, 20)},
+            // 壁と梁の根の線の両側(T-1260・T-1278。粗いセルの隣の片側が固定した面・片側が粗いセル・両側とも読めない対がある)
+            {.name = "壁と梁の根の線の両側を 0.25 m", .scene = test::Marked(test::WallBeam(), 1, 3, 2, 4)},
+            {.name = "壁と梁の根の線の両側と梁の 2 列目を 0.25 m", .scene = test::Marked(test::WallBeam(), 1, 4, 2, 4)},
         };
     }
 
@@ -226,13 +231,20 @@ namespace {
         return CompareRuns(context, name, law.BlockSystem(), law.BlockGrid(), options.blocks, warm, cpuTicks);
     }
 
+    // 違う大きさの面の対の負の項の形ごと(今の形と ADR-0509 の形 A。どちらが既定でも両方を確かめる。T-1279)
     std::expected<void, std::string> TestMixedSupport(Context& context, const sim::SupportOptions& options,
                                                       uint32_t ticks) {
-        for (const SupportCase& each : MixedSupportCases()) {
-            sim::SupportLaw law(each.scene, options);
-            const auto compared = CompareSupport(context, each.name, law, options, ticks);
-            if (!compared)
-                return compared;
+        for (const sim::MixedPairMaterial pair :
+             {sim::MixedPairMaterial::None, sim::MixedPairMaterial::NeighborStrain}) {
+            sim::SupportOptions each = options;
+            each.mixedPairMaterial = pair;
+            const char* form = pair == sim::MixedPairMaterial::None ? "" : "・隣から読む歪み";
+            for (const SupportCase& scene : MixedSupportCases()) {
+                sim::SupportLaw law(scene.scene, each);
+                const auto compared = CompareSupport(context, std::format("{}{}", scene.name, form), law, each, ticks);
+                if (!compared)
+                    return compared;
+            }
         }
 
         return {};
@@ -526,6 +538,17 @@ namespace {
         for (const sim::EquilibriumBlockOptions& solve : {sim::EquilibriumBlockOptions{}, support.blocks}) {
             const auto measured = MeasureOne(context, "支えの洞窟 500 mm の天井を 250 mm・k = 3",
                                              mixedCave.BlockSystem(), mixedCave.BlockGrid(), false, solve);
+            if (!measured)
+                return measured;
+        }
+
+        // 同じ洞窟で、違う大きさの面の対に粗いセルの隣から読む歪みの項を足す形(ADR-0509 形 A。面が増える分の費用。T-1279)
+        sim::SupportOptions neighborStrain = support;
+        neighborStrain.mixedPairMaterial = sim::MixedPairMaterial::NeighborStrain;
+        const sim::SupportLaw strainCave(test::Marked(test::Cave(500), 14, 34, 6, 20), neighborStrain);
+        for (const sim::EquilibriumBlockOptions& solve : {sim::EquilibriumBlockOptions{}, support.blocks}) {
+            const auto measured = MeasureOne(context, "支えの洞窟 500 mm の天井を 250 mm・隣から読む歪み・k = 3",
+                                             strainCave.BlockSystem(), strainCave.BlockGrid(), false, solve);
             if (!measured)
                 return measured;
         }

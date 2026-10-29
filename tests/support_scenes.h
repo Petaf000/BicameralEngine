@@ -1,5 +1,5 @@
 // support_scenes.h — 支えの法則(sim/support_law)の試験の場面(石の張り出し・梁・アーチ・洞窟)。support_law_test(CPU。T-0871・T-0919)と
-// gpu_equilibrium_block_test(成分を持つ節の GPU 版と CPU のビット一致。T-0970・T-1104)・support_mixed_test(T-1120)が同じ場面を使う。縦の面・奥行 1 セル。
+// gpu_equilibrium_block_test(成分を持つ節の GPU 版と CPU のビット一致。T-0970・T-1104・T-1279)・support_mixed_test(T-1120)が同じ場面を使う。縦の面・奥行 1 セル。
 #pragma once
 
 #include <cstdint>
@@ -64,6 +64,23 @@ namespace bicameral::test {
                 const bool hollow = cx > 16000 && cx < 32000 && cy > 8000 && cy < 16000;
                 scene.solid[x + (size_t)width * up] = hollow ? 0 : 1;
                 scene.clamps[x + (size_t)width * up] = !hollow && up == 0 ? sim::SUPPORT_CLAMP_BOTTOM : 0;
+            }
+        }
+
+        return scene;
+    }
+
+    // 壁(0.5 m のセル 2 × 6 = 幅 1 m・高さ 3 m。左と下を固定)から出た片持ち梁(長さ 4 m・厚さ 1 m = 列 2〜9・段 2〜3)。
+    // 壁と梁の角は 2 つ(上の角 = 壁 (1, 4) と梁 (2, 3)・下の角 = 壁 (1, 1) と梁 (2, 2))で、どちらも段の斜めの棒が立つ(T-1133)
+    inline sim::SupportScene WallBeam(uint32_t wallColumns = 2, uint64_t cellMm = 500) {
+        sim::SupportScene scene = Beam(wallColumns + 8, 6, cellMm, false);
+        for (uint32_t up = 0; up < scene.height; ++up) {
+            for (uint32_t x = 0; x < scene.width; ++x) {
+                const size_t at = x + (size_t)scene.width * up;
+                const bool wall = x < wallColumns;
+                scene.solid[at] = wall || up == 2 || up == 3 ? 1 : 0;
+                scene.clamps[at] = (uint8_t)((x == 0 ? sim::SUPPORT_CLAMP_LEFT : 0) |
+                                             (wall && up == 0 ? sim::SUPPORT_CLAMP_BOTTOM : 0));
             }
         }
 
