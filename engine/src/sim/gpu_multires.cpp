@@ -1016,6 +1016,12 @@ namespace bicameral::sim {
         //     GPU の入力の見出しの入口の番号も、使うプログラムの番号(g_graphEntries)
         const bool place = !nest.refineCells.species.empty() && !nest.wideCells && m_graphs[GraphPlace].graph;
         m_activeGraph = place ? GraphPlace : GraphPlain;
+        if (place && m_layerUsed > 0) {
+            // 置かれ方の段はまだ層を配らない(子の層を層の分で配るのは T-1240 の 4 段目。写すと CPU とずれるので断る)
+            Log(Channel::Gpu, Level::Error, "層を GPU に写せない: 置かれ方で細かくする世界の層はまだ(T-1240)");
+            return false;
+        }
+
         const auto& entries = m_graphs[m_activeGraph].entries;
         m_constants.graphEntries = entries[EntryRefine] | (entries[EntryCoarsenRequest] << 16);
 
@@ -1306,7 +1312,9 @@ namespace bicameral::sim {
                                   .levelsLeft = levelCount,
                                   .kind = MR_BLOCK_SHADOW,
                                   .depth = 0};
+        const ExternalBinding saved = BindLayers();  // 影の子の頁へ層を写す(T-1240)
         DispatchGraph(list, debugRing, EntryRefine, &record, sizeof(record));
+        RestoreExternal(saved);
     }
 
     void GpuMultires::RecordRemoveShadow(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
@@ -1319,6 +1327,7 @@ namespace bicameral::sim {
                                      uint32_t firstShadowSlot, uint32_t levelCount) {
         const ChainRecord record{.slot = firstShadowSlot, .levelsLeft = levelCount};
         DispatchGraph(list, debugRing, EntryPullBack, &record, sizeof(record));
+        RecordLayerReconcile(list, debugRing);  // 影のセルを書き直した後(CPU の StoreCellAt の付け替え。T-1240)
     }
 
     void GpuMultires::SetTick(uint64_t worldSeed, uint64_t tick) {
@@ -1855,6 +1864,17 @@ namespace bicameral::sim {
 
         list->EndQuery(m_timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, index);
         m_timestampCount = std::max(m_timestampCount, index + 1);
+    }
+
+    std::optional<uint32_t> GpuMultires::ReadLayerShortage() const {
+        if (m_layerCapacity == 0)
+            return 0u;
+
+        std::vector<uint32_t> layerWords(MrLayerStoreWords(static_cast<uint32_t>(PageCount()), m_layerCapacity));
+        if (!gpu::ReadBuffer(m_layerReadback.Get(), std::as_writable_bytes(std::span(layerWords))))
+            return std::nullopt;
+
+        return layerWords[MrLayerShortageAddress(static_cast<uint32_t>(PageCount()), m_layerCapacity)];
     }
 
     std::vector<uint64_t> GpuMultires::ReadTimestamps(uint32_t count) const {

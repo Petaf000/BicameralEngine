@@ -1,5 +1,6 @@
 // multires_layer_access.hlsli — 層の置き場(u4。並びは common/multires_layers.hlsli)を読み書きする段の道具(T-1240。20 §10.5)。
-// 層を合わせる段(multires_layers.hlsl)・木の段(multires_tree.hlsl。頁を返す・畳む・層の頁を配る)・細かくする鎖(multires_graph.hlsl)が include する。
+// 層を合わせる段(multires_layers.hlsl)・木の段(multires_tree.hlsl。頁を返す・畳む・細かくする要求に層の頁を割り当てる)・
+// 細かくする鎖(multires_graph.hlsl。子の頁へ層を写す)が include する。
 // 木の段の間は u4 に層の置き場を結び、g_external0 = 層の頁の数(0 = 層を持たない世界: u4 は代わりのバッファなので読まない)・
 // g_external1 = セルの頁の数(gpu_multires.cpp の BindLayers)。木の段のシェーダーはほかに u4・g_external* を使わない(2026-10-29 確かめた)。
 // 頁を返す段は、その頁の層の頁も返す(頁を配ったら層は空。返す層の頁は中身を 0 にしてから積む = 取る側は 0 を前提にできる)。
@@ -49,20 +50,9 @@ void CountLayerShortage(uint32_t count) {
 groupshared uint32_t gs_layerScan[MR_MAX_REQUESTS];
 groupshared uint32_t gs_layerFreeTop;
 
-// 1 グループ(MR_MAX_REQUESTS スレッド。全部のスレッドが呼ぶ)で、スレッド i の頁 page(返さないなら MR_NO_PAGE)の層の頁を
-// スレッドの番号の順に空きのスタックへ積む(CPU は頁を返す順に ClearPageLayers。層の頁の番号は CPU に無いので順は結果に効かないが、
-// 決まった順にする)。頁の索引・持ち主を外し、返した層の頁の中身を 0 にする
-void ReleaseLayerPages(uint32_t i, uint32_t page) {
-    const uint32_t layerPage = page != MR_NO_PAGE ? LayerPageOf(page) : MR_LAYER_NO_PAGE;
-    const bool give = layerPage != MR_LAYER_NO_PAGE;
-    const uint32_t pageCount = LayerPageCount();
-    const uint32_t capacity = LayerCapacity();
-
-    // --- 返す数の累積和(含む)と、今の空きの数 ---
-    gs_layerScan[i] = give ? 1u : 0u;
-    if (i == 0)
-        gs_layerFreeTop = capacity > 0 ? g_layers[MrLayerFreeCountAddress(pageCount, capacity)] : 0u;
-
+// 1 グループ(MR_MAX_REQUESTS スレッド。全部のスレッドが呼ぶ)で value の累積和(含む)を gs_layerScan に
+void LayerInclusiveScan(uint32_t i, uint32_t value) {
+    gs_layerScan[i] = value;
     GroupMemoryBarrierWithGroupSync();
     for (uint32_t offset = 1; offset < MR_MAX_REQUESTS; offset <<= 1) {
         uint32_t sum = gs_layerScan[i];
@@ -73,6 +63,36 @@ void ReleaseLayerPages(uint32_t i, uint32_t page) {
         gs_layerScan[i] = sum;
         GroupMemoryBarrierWithGroupSync();
     }
+}
+
+// セルの頁 page に層の頁 layerPage を結ぶ(頁の索引と持ち主)
+void AttachLayerPage(uint32_t page, uint32_t layerPage) {
+    g_layers[MrLayerIndexAddress(page)] = layerPage;
+    g_layers[MrLayerOwnerAddress(LayerPageCount(), layerPage)] = page;
+}
+
+// 層の頁のセル from の組を全部、層の頁のセル to へ写す(組は物質で結ぶので、同じ値のセルへはそのまま写せる)
+void CopyLayerCell(uint32_t fromLayerPage, uint32_t fromIndex, uint32_t toLayerPage, uint32_t toIndex) {
+    const uint32_t from = MrLayerEntryAddress(LayerPageCount(), LayerCapacity(), fromLayerPage, fromIndex, 0);
+    const uint32_t to = MrLayerEntryAddress(LayerPageCount(), LayerCapacity(), toLayerPage, toIndex, 0);
+    for (uint32_t word = 0; word < RX_MAX_CELL_SPECIES * MR_LAYER_ENTRY_WORDS; ++word)
+        g_layers[to + word] = g_layers[from + word];
+}
+
+// 1 グループ(MR_MAX_REQUESTS スレッド。全部のスレッドが呼ぶ)で、スレッド i の頁 page(返さないなら MR_NO_PAGE)の層の頁を
+// スレッドの番号の順に空きのスタックへ積む(CPU は頁を返す順に ClearPageLayers。層の頁の番号は CPU に無いので順は結果に効かないが、
+// 決まった順にする)。頁の索引・持ち主を外し、返した層の頁の中身を 0 にする
+void ReleaseLayerPages(uint32_t i, uint32_t page) {
+    const uint32_t layerPage = page != MR_NO_PAGE ? LayerPageOf(page) : MR_LAYER_NO_PAGE;
+    const bool give = layerPage != MR_LAYER_NO_PAGE;
+    const uint32_t pageCount = LayerPageCount();
+    const uint32_t capacity = LayerCapacity();
+
+    // --- 返す数の累積和(含む)と、今の空きの数 ---
+    if (i == 0)
+        gs_layerFreeTop = capacity > 0 ? g_layers[MrLayerFreeCountAddress(pageCount, capacity)] : 0u;
+
+    LayerInclusiveScan(i, give ? 1u : 0u);
 
     const uint32_t top = gs_layerFreeTop;
     const uint32_t total = gs_layerScan[MR_MAX_REQUESTS - 1];

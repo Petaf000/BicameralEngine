@@ -30,6 +30,7 @@ groupshared uint32_t gs_grantedFractions;
 groupshared uint32_t gs_grantedPages;
 groupshared uint32_t gs_refineCount;
 groupshared uint32_t gs_coarsenCount;
+groupshared uint32_t gs_grantedLayers;
 
 uint32_t RequestCount() {
     return g_counters[MR_COUNTER_REQUESTS];
@@ -282,6 +283,19 @@ void StoreGraphHeader(uint32_t header, uint32_t entry, uint32_t recordCount, uin
     g_graphInput.Store4(header + 8, uint4((uint32_t)records, (uint32_t)(records >> 32), strideBytes, 0));
 }
 
+// 細かくする要求 i(待ちのもの)が要る層の頁の数(T-1240): 親(鎖の最初の段)の頁が層の頁を持てば鎖の段の全部(どの段も親から写す)。
+// 一様な親は頁も層の頁も持たない(一様の枠の層は T-1240 の続き)。層を持たない世界は 0
+uint32_t RefineLayerNeed(uint32_t i, MrRequestState state) {
+    if (LayerCapacity() == 0 || g_requests[i].op != MR_REQUEST_REFINE)
+        return 0;
+
+    const MrBlock target = g_blocks[state.target];
+    if (MrIsUniform(target) || LayerPageOf(target.page) == MR_LAYER_NO_PAGE)
+        return 0;
+
+    return state.levels;
+}
+
 void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot, uint32_t levels) {
     const uint32_t address = MR_GRAPH_INPUT_REFINE_RECORDS + position * MR_REFINE_RECORD_BYTES;
     g_graphInput.Store3(address, uint3(request, parentSlot, 0));
@@ -299,21 +313,45 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
         state = g_states[i];
 
     const bool pending = i < count && state.status == MR_STATUS_PENDING;
+    const uint32_t layerCapacity = LayerCapacity();
+    const uint32_t layerPageCount = LayerPageCount();
+    uint32_t freeLayers = 0;  // 層を持たない世界は u4 を読まない(?: は両側を読む)
+    if (layerCapacity > 0)
+        freeLayers = g_layers[MrLayerFreeCountAddress(layerPageCount, layerCapacity)];
+
+    uint32_t layerNeed = 0;
+    if (pending)
+        layerNeed = RefineLayerNeed(i, state);
+
     if (i == 0) {
         gs_grantedBlocks = 0;
         gs_grantedFractions = 0;
         gs_grantedPages = 0;
+        gs_grantedLayers = 0;
         gs_refineCount = 0;
         gs_coarsenCount = 0;
     }
 
     InclusiveScan(i, pending ? state.blockNeed : 0u, pending ? state.fractionNeed : 0u, pending ? state.pageNeed : 0u);
+    LayerInclusiveScan(i, layerNeed);  // 層の頁(4 つ目の値。要求の順のプレフィックス和。T-1240)
 
-    // --- 許可: 累積和が空きの数以下(許可は一覧の前から続く)---
+    // --- 許可: 累積和が空きの数以下(許可は一覧の前から続く)。層の頁が尽きたら細かくしない(GPU だけ。仮【エンジン】T-1240)---
     const uint32_t blockSum = gs_blockScan[i];
     const uint32_t fractionSum = gs_fractionScan[i];
     const uint32_t pageSum = gs_pageScan[i];
-    const bool granted = pending && blockSum <= freeBlocks && fractionSum <= freeFractions && pageSum <= freePages;
+    const uint32_t layerSum = gs_layerScan[i];
+    const bool fits = pending && blockSum <= freeBlocks && fractionSum <= freeFractions && pageSum <= freePages;
+    const bool granted = fits && layerSum <= freeLayers;
+    if (fits && !granted)
+        CountLayerShortage(1);
+
+    if (i < count && layerCapacity > 0) {
+        const bool layered = granted && layerNeed > 0;
+        g_layers[MrLayerRequestAddress(layerPageCount, layerCapacity, i)] = layered
+                                                                                ? freeLayers - (layerSum - layerNeed)
+                                                                                : MR_LAYER_NO_PAGE;
+    }
+
     if (granted) {
         state.status = MR_STATUS_GRANTED;
         state.blockBase = freeBlocks - (blockSum - state.blockNeed);
@@ -322,6 +360,7 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
         InterlockedMax(gs_grantedBlocks, blockSum);
         InterlockedMax(gs_grantedFractions, fractionSum);
         InterlockedMax(gs_grantedPages, pageSum);
+        InterlockedMax(gs_grantedLayers, layerSum);
     } else if (pending) {
         state.status = MR_STATUS_NO_SPACE;
     }
@@ -348,6 +387,8 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
     g_counters[MR_COUNTER_FREE_BLOCKS] = freeBlocks - gs_grantedBlocks;
     g_counters[MR_COUNTER_FREE_FRACTIONS] = freeFractions - gs_grantedFractions;
     g_counters[MR_COUNTER_FREE_PAGES] = freePages - gs_grantedPages;
+    if (layerCapacity > 0)
+        g_layers[MrLayerFreeCountAddress(layerPageCount, layerCapacity)] = freeLayers - gs_grantedLayers;
 
     // レコードを 0 件にしない(WARP が固まる。何もしないレコードを 1 件)
     if (gs_refineCount == 0)
