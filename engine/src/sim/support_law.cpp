@@ -10,6 +10,8 @@
 //   PerComponent: 面ごとに伸び縮み ka とずれ ka/2 のばね(回りなし)。固定した面は 2ka と ka。
 //   段の斜めの棒(stairBraces。T-0944): 下のセル a → 斜め上のセル c(横の向き s = ±1)に ½ (ka/24) (s Δx + Δup)²
 //     (斜めの長さ √2 dx・軸の硬さ ka/12 の棒。Δ = c − a)。x と上の面に ka/24・x ⇄ 上の結合は遅らせる。
+//     違う大きさのセルが絡む段(T-1133・ADR-0504): 細かい格子で段を探し、端はセルの中心・係数は ka/24 × 細かい中心の間 ÷ 中心の間
+//     (片方の端が粗いセル 2/3・両端が粗いセル 1/2。一様な歪みで全部細かい場面の段の角の棒と同じ力)
 // Lagged: 成分ごとの式の対角と負の非対角(C-0 が解く形)は面と固定した面に、成分の間の項と φ どうしの正の非対角は遅らせて右辺の項へ。
 // Coupled(T-0919): 同じエネルギーの各項 ½ c (g · [x_a; x_b])² を 3 × 3 の面のブロック c g gᵀ にそのまま入れ(成分の間の項も面の中)、
 //   成分を持つ節の C-0(equilibrium_block)で 1 つの系として解く。延ばし方は剛体の動き(RigidProlongation)。
@@ -246,7 +248,7 @@ namespace bicameral::sim {
                 if (diagonal == NO_CELL || side == above)
                     continue;
 
-                // 段の斜めの棒は同じ大きさのセルの間だけ(細かいセルどうしは AddFineBraces。違う大きさの段は T-1133)
+                // ここは同じ大きさのセルの間だけ(細かいセルどうしは AddFineBraces。分けたセルが絡む段は AddMixedBraces)
                 if (diagonal == SPLIT_CELL || sideCell == SPLIT_CELL || aboveCell == SPLIT_CELL)
                     continue;
 
@@ -377,10 +379,11 @@ namespace bicameral::sim {
         }
 
         BuildMixedPairs();
+        AddMixedBraces();
     }
 
     // 細かいセルどうしの段の斜めの棒(T-1067): 細かい格子で、斜め上の隣が細かいセル・間の 2 つの場所(横・上)の片方だけにセルがある所。
-    // 棒の硬さは大きさによらない(軸の硬さ E A ÷ L の A ∝ 一辺 × D・L ∝ 一辺)ので粗いセルと同じ m_brace。違う大きさのセルの段は置かない(T-1133)
+    // 棒の硬さは大きさによらない(軸の硬さ E A ÷ L の A ∝ 一辺 × D・L ∝ 一辺)ので粗いセルと同じ m_brace。違う大きさのセルの段は AddMixedBraces
     void SupportLaw::AddFineBraces(uint32_t cell) {
         const uint32_t fineWidth = 2 * m_scene.width;
         const auto [fx, fup] = m_cells[cell];
@@ -408,6 +411,78 @@ namespace bicameral::sim {
             if (intact != 0)
                 AddBrace({.low = cell, .high = diagonal, .across = across, .unit = Scaled(m_brace, intact)});
         }
+    }
+
+    // 違う大きさのセルが絡む段の斜めの棒(T-1133・ADR-0504): 細かい格子で段を探す(分けていないセルは 4 つの場所を持つ = 全部細かい
+    // 場面の段と同じ場所)。端の片方が分けていないセルの所と、両端が分けていないセルで間の場所の元のセルが分けたセルの所(Build は飛ばす)
+    void SupportLaw::AddMixedBraces() {
+        if (!m_options.stairBraces || m_options.mixedBrace == MixedBrace::None)
+            return;
+
+        for (uint32_t fup = 0; fup + 1 < 2 * m_scene.height; ++fup) {
+            for (uint32_t fx = 0; fx < 2 * m_scene.width; ++fx) {
+                AddMixedBrace(fx, fup, -1);
+                AddMixedBrace(fx, fup, 1);
+            }
+        }
+    }
+
+    // 細かい場所 (fx, fup) → 斜め上 (fx + across, fup + 1) の段。分けていないセルの端は、その場所が段の角の側の角の場所の時だけ
+    // (棒が 45° = 端の中心の差が横と上で同じ。割れて細かいセルが欠けた所で角でない場所が段になる時は置かない)
+    void SupportLaw::AddMixedBrace(uint32_t fx, uint32_t fup, int32_t across) {
+        const uint32_t fineWidth = 2 * m_scene.width;
+        const int64_t sideX = (int64_t)fx + across;
+        if (sideX < 0 || sideX >= (int64_t)fineWidth)
+            return;
+
+        const auto occupant = [&](uint32_t x, uint32_t up) {
+            const uint32_t fine = m_fineIndex[x + (size_t)fineWidth * up];
+            if (fine != NO_CELL)
+                return fine;
+
+            const uint32_t coarse = m_index[x / 2 + (size_t)m_scene.width * (up / 2)];
+
+            return coarse < SPLIT_CELL ? coarse : (uint32_t)NO_CELL;
+        };
+        const auto split = [&](uint32_t x, uint32_t up) {
+            return m_index[x / 2 + (size_t)m_scene.width * (up / 2)] == SPLIT_CELL;
+        };
+
+        const auto sx = (uint32_t)sideX;
+        const uint32_t low = occupant(fx, fup);
+        const uint32_t high = occupant(sx, fup + 1);
+        const bool side = occupant(sx, fup) != NO_CELL;
+        if (low == NO_CELL || high == NO_CELL || low == high || side == (occupant(fx, fup + 1) != NO_CELL))
+            return;
+
+        const bool coarseLow = m_cellFine[low] == 0;
+        const bool coarseHigh = m_cellFine[high] == 0;
+        if (!coarseLow && !coarseHigh)
+            return;  // 細かいセルどうし(AddFineBraces)
+
+        if (coarseLow && coarseHigh && !split(sx, fup) && !split(fx, fup + 1))
+            return;  // 粗いセルどうしで間も粗いセル(Build)
+
+        // 角の場所: 下の粗いセルは上の段・段の側の列、上の粗いセルは下の段・段の側の列
+        const bool rightColumn = across > 0;
+        if (coarseLow && ((fup & 1) == 0 || ((fx & 1) != 0) != rightColumn))
+            return;
+
+        if (coarseHigh && ((fup & 1) == 0 || ((sx & 1) == 0) != rightColumn))
+            return;
+
+        const uint32_t lowX = std::min(fx, sx);
+        const uint32_t intact = side ? std::min(FineIntact(lowX, fup, 0), FineIntact(sx, fup, 1))
+                                     : std::min(FineIntact(fx, fup, 1), FineIntact(lowX, fup + 1, 0));
+        if (intact == 0)
+            return;
+
+        // 硬さ(MixedBrace): ① 中心の間の長さは片方の端が粗いセルで細かいセルの 1.5 倍・両端で 2 倍
+        uint64_t unit = m_brace;
+        if (m_options.mixedBrace == MixedBrace::Center)
+            unit = coarseLow && coarseHigh ? m_brace / 2 : m_brace * 2 / 3;
+
+        AddBrace({.low = low, .high = high, .across = across, .unit = Scaled(unit, intact)});
     }
 
     // 分けたセルの固定した面は、向きの側の細かいセルへ(面の点の式は大きさによらず同じ = 冒頭。T-1206)

@@ -64,6 +64,17 @@ namespace bicameral::sim {
         FacePairShear,  // ④' 対のずれだけ(曲げは面ごと。T-1191〜T-1206 の既定・T-1207 の比べ用)
     };
 
+    // 違う大きさのセルが絡む段の斜めの棒の硬さ(T-1133・ADR-0504)。棒は段の角を挟む 2 つのセル(違う大きさ)の間に 1 本・向きは 45°。
+    // 棒の端を粗いセルの中心に置く(①)か、粗いセルの角に近い細かい場所(剛体の動き)に置く(②)かは、その場所が中心から棒の向きに
+    // ずれるだけなので回りは伸びに入らず、違うのは長さ = 硬さだけ(E A ÷ L。A = 一番細かいセルの棒の断面)
+    enum class MixedBrace : uint8_t {
+        // ① 既定: 端はセルの中心。硬さ = 同じ大きさの棒 × 細かいセルの中心の間 ÷ 中心の間(片方の端が粗いセル 2/3・両端が粗いセル 1/2)。
+        //   一様な歪みで、全部細かい場面の段の角の棒と同じ力
+        Center,
+        Corner,  // ② 端は粗いセルの角に近い細かい場所: 長さ = 細かいセルの棒なので同じ係数(一様な歪みで力が 1.5・2 倍)
+        None,    // 比べ用: 置かない(T-1133 の前とビット一致)
+    };
+
     enum class SupportSolve : uint8_t {
         Coupled,  // 成分を持つ節で 1 つの系(T-0919。BeamLattice だけ。PerComponent は結合が無いので Lagged と同じ)
         Lagged,   // 成分ごと + 結合を遅らせる(T-0871)
@@ -116,6 +127,7 @@ namespace bicameral::sim {
         // 棒の硬さ = ka × braceNumerator ÷ braceDenominator(既定 1/12。T-0919 で測り直す値)
         uint64_t braceNumerator = 1;
         uint64_t braceDenominator = 12;
+        MixedBrace mixedBrace = MixedBrace::Center;  // 違う大きさのセルが絡む段の棒(T-1133)
 
         // --- 解き方(T-0919)---
         SupportSolve solve = SupportSolve::Coupled;
@@ -280,6 +292,8 @@ namespace bicameral::sim {
         void BuildMixedBonds();
         void AddFineClamps(uint32_t cell);
         void AddFineBraces(uint32_t cell);
+        void AddMixedBraces();
+        void AddMixedBrace(uint32_t fx, uint32_t fup, int32_t across);
         void AddMixedBond(uint32_t coarse, uint32_t fine, uint32_t axis, bool coarseLow, int64_t offset,
                           uint32_t intact, uint32_t beta);
         uint32_t PairBeta(uint32_t fine, uint32_t axis, uint32_t faceX, uint32_t faceUp) const;
