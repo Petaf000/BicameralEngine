@@ -149,8 +149,11 @@ struct RxCandidates {
 };
 
 // 候補の欄を読む・書く(T-1233)。C++ は配列をそのまま。GPU は候補の回し(候補の数まで)の中の動的な添字でも配列を動的な添字で
-// 読み書きしないよう、決まった数の回しで一致する欄だけを選ぶ・書く(下の成分の道具と同じ考え。T-0397・CLAUDE.md §4)
-#ifdef __cplusplus
+// 読み書きしないよう、決まった数の回しで一致する欄だけを選ぶ・書く(下の成分の道具と同じ考え。T-0397・CLAUDE.md §4)。
+// RX_DIRECT_CANDIDATES を定義したシェーダー(物の熱の反応の段 object_heat_react だけ。Compute で Work Graph ではない)は配列をそのまま
+// 読み書きする: 候補を集める回しの中で候補 1 つごとに 16 個から選ぶ形が重く、燃え始めの重い場面で反応の段が遅くなった
+// (薪 100 本・5 刻み目 3.35 → 3.85 ms。そのままなら 3.02 ms。局所の配列は 0 → 15。T-1234)。多重解像度の段は選ぶ形の方が速い
+#if defined(__cplusplus) || defined(RX_DIRECT_CANDIDATES)
 #define RX_CANDIDATE_RULE(candidates, c) (candidates).rules[c]
 #define RX_CANDIDATE_EXTENT(candidates, c) (candidates).extents[c]
 #define RX_SET_CANDIDATE_EXTENT(candidates, c, value) (candidates).extents[c] = value
@@ -384,8 +387,11 @@ FX_FN uint32_t RxSpeciesLoopEnd(RxCell cell) {
 #endif
 
 // 規則の反応物の欄を読む(T-1233)。反応物の数までの回し(動的な添字)の中で使う。C++ は配列をそのまま、GPU は決まった数から選ぶ
-// (規則は表から写した局所の値なので、欄を動的な添字で読むと局所の配列になる。T-0397。回しを開くより命令が少ない)
-#ifdef __cplusplus
+// (規則は表から写した局所の値なので、欄を動的な添字で読むと局所の配列になる。T-0397。回しを開くより命令が少ない)。
+// 溢れの世界のシェーダー(MR_WIDE_CELLS)は配列をそのまま読む: 規則は書き換えない写しなので CLAUDE.md §4 の禁止には当たらず、速い形の
+// セル(32 種)の回しの中で選ぶと成分の多いセルで遅くなった(上限の種のセル 伝導なし 905 → 1159 ns/セル。そのまま読むと 826〜849。
+// 反応物の回しを開く形は 1001〜1090 でかえって遅い。T-1234)。ほかのシェーダーは選ぶ形のまま(物の熱の段は速さが変わらず局所の配列が増えるだけ)
+#if defined(__cplusplus) || defined(MR_WIDE_CELLS)
 #define RX_REACTANT_AT(rule, i) (rule).reactants[i]
 #define RX_REACTANT_COEFFICIENT_AT(rule, i) (rule).reactantCoefficients[i]
 #else
