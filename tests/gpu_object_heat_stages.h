@@ -218,8 +218,11 @@ namespace bicameral::test::object_heat_gpu {
         if (list == nullptr)
             return false;
 
+        // 写し元は 256 バイト以上に切り上がる(CreateFilledUpload)ので、CopyResource(同じ大きさの 2 つの間だけ)ではなく UAV の大きさだけ写す
+        // (大きさが食い違うと HW は通るが WARP はデバイスを失う。T-1284・T-1286)
         for (size_t i = 0; i < world.uavs.size(); ++i)
-            list->CopyResource(world.uavs[i].Get(), world.uavUploads[i].Get());
+            list->CopyBufferRegion(world.uavs[i].Get(), 0, world.uavUploads[i].Get(), 0,
+                                   world.uavs[i]->GetDesc().Width);
 
         gpu::RecordResidentUploads(list, world.tables);
 
@@ -446,19 +449,25 @@ namespace bicameral::test::object_heat_gpu {
         return total;
     }
 
-    // UAV の中身を読み戻す(前のリストの終わりで COMMON に戻っているので、UAV に上げてから写す)
+    // UAV の中身の前の count 個を読み戻す(前のリストの終わりで COMMON に戻っているので、写し元に上げてから写す)
     template <typename T>
     inline std::expected<std::vector<T>, std::string> ReadUav(ID3D12Device5* device, gpu::ImmediateQueue& queue,
                                                               ID3D12Resource* resource, size_t count) {
-        const ComPtr<ID3D12Resource> readback = gpu::CreateBuffer(device, count * sizeof(T), gpu::BufferKind::Readback);
+        // 読む数は UAV の前の部分だけのことがある(口の後ろの部分を足したセルなど)ので、CopyResource(同じ大きさの 2 つの間だけ)ではなく
+        // 読む大きさだけ写す(大きさが食い違うと WARP はデバイスを失う。T-1284・T-1286)
+        const uint64_t readBytes = count * sizeof(T);
+        if (readBytes > resource->GetDesc().Width)
+            return std::unexpected("読む数が UAV より大きい");
+
+        const ComPtr<ID3D12Resource> readback = gpu::CreateBuffer(device, readBytes, gpu::BufferKind::Readback);
         ID3D12GraphicsCommandList10* list = queue.Begin();
         if (!readback || list == nullptr)
             return std::unexpected("読み戻しを作れない");
 
-        const D3D12_RESOURCE_BARRIER toUav = gpu::Transition(resource, D3D12_RESOURCE_STATE_COMMON,
-                                                             D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
-        list->ResourceBarrier(1, &toUav);
-        gpu::RecordCopyToReadback(list, resource, readback.Get());
+        const D3D12_RESOURCE_BARRIER toCopySource = gpu::Transition(resource, D3D12_RESOURCE_STATE_COMMON,
+                                                                    D3D12_RESOURCE_STATE_COPY_SOURCE);
+        list->ResourceBarrier(1, &toCopySource);
+        list->CopyBufferRegion(readback.Get(), 0, resource, 0, readBytes);
         std::vector<T> values(count);
         if (!queue.ExecuteAndWait() || !gpu::ReadBuffer(readback.Get(), std::as_writable_bytes(std::span(values))))
             return std::unexpected("読み戻せない");
