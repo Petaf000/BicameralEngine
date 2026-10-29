@@ -1,6 +1,16 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-29(本体の作業役 16 回目・設計: ADR-0500 改訂 = 土台の 3 件〔Ec の欄・T-1227・T-1228〕を 1 つの形に)
+最終更新: 2026-10-29(本体の作業役 17 回目・wt4 T-1250・wt3 T-1133・wt6 T-1117 の 1 本目を main へ・ADR-0500 Accepted = D-683・Q178)
+
+## この仕事でしたこと(2026-10-29・本体の作業役・17 回目: t-1250・t-1133・t-1117 の 1 本目のマージ)
+- **マージ(--no-ff・3 本とも衝突なし)**: wt4 fc58c4ce(t-1250-implicit-fold-regression)→ 35597282。**T-1250 Done・ADR-0505 Proposed のまま**(残る問い = 現実の伝導率では陰解法が約 2 mm より細かいセルだけで働く。境目の表は wt4 T-1263)。
+  wt3 6bc89872(t-1133-mixed-size-diagonal)→ ccc99db4。**T-1133 Done・ADR-0504 Proposed(Q178・仮で既定 ①)**。T-1260(研究・wt3)を ROADMAP に。T-1067 のチケットの「下りる・周りなし」を 93 → 96 kN/m(+2.1 %・比べ用)に。
+  wt6 8312073b(t-1117-rc-multires-tree の 1 本目。先頭 091eb31a = T-1212 は含めない)→ 1d92802f。ROADMAP の T-1117 を「1 本目 main・続きは T-1227・T-1228」。
+- **ADR-0500 → Accepted(D-683・司令塔の一旦の決定・作り手から見た違いなし)**。QUESTIONS に **Q178**(支えの違う大きさのセルが絡む段の角の斜めの棒)。COMMANDER の番号の配り方に 1 行(**司令塔の次は T-1275・ADR-0508**)。
+- 試験(release・警告 0): CPU multires_implicit・multires_implicit_tree・support_mixed(309 s)・support_law・support_fracture_refine・support_fracture_refine_scenes・support_fracture_thick(860 s)・support_cost・cascade_tree_grid・cascade_light(10 本 1962 s)+ HW gpu_multires_implicit・_tree・_build・gpu_multires_near_fold・gpu_equilibrium_block(5 本)+ gpu_cascade_tree_grid・_warp・gpu_cascade_light・gpu_radiation_cost(4 本)合格
+- archmap --check OK(227 本・写しの上で)。clang-format --dry-run --Werror を変わった C++ 16 ファイルに: ずれ無し。→ push
+- 次の番号は **D-684・ADR-0479・Q179**(本体)。T は T-1272〜1274 が本体(この仕事では使っていない)。
+
 
 ## この仕事でしたこと(2026-10-29・本体の作業役・16 回目〔設計〕: 司令塔が預かった土台の 3 件)
 - **ADR-0500 を改訂(Proposed・Claude の一旦の決定・作り手から見た違い無し = 問いにしない)**: 根は「登録が欄の書き手と寿命を 1 通りしか知らない」。
