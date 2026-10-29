@@ -17,7 +17,9 @@
   **試験の保存点を 10 に(8f483c47)**。T-1272 は作っていない(小さい直しで済んだ)。
 - **マージ(--no-ff)**: 本体 t-1252-registry-owner(rebase main 52ad8d27 → 47be5612。T-1252 段 1 の主な形・残りは T-1228 段 2 と一緒に)/ wt2 t-1189-refine-neighbors ddcef068 → cb50f590(perf の行の衝突は両方残した)/
   wt3 t-1261-pair-series 7338c4ab(t-1260 を含む)→ 801d1599 / wt4 t-1263-implicit-reach 34e029b5 → fcf4a7bc・t-1227-rc-carry-leaf f3f8cde3 → 7be5aa33(cascade_light.hlsli は T-1117 の印を残したまま関数 1 つを足しただけ)/
-  wt6 t-1269-boundary-error e840b65f(T-1212 を含む)→ 4c2750c9 / wt5 t-1222-multigrid-gpu 6a77691b。印は runner/ready/done/ へ。
+  wt6 t-1269-boundary-error e840b65f(T-1212 を含む)→ 4c2750c9 / wt5 t-1222-multigrid-gpu 6a77691b。続けて wt6 t-1270-border-default-cost 964bac5c(T-1270 測り・T-1271 GPU の (c) の表)→ c40e8aa8。印は runner/ready/done/ へ。
+  試験(release・警告 0): CPU 27 本(object_shell・cascade_light・_swing・cascade_tree_grid・probe_radiation・warm_start_save・support_law・support_mixed・support_cost・multires 系・field_owner・time_step 系・float_check・dxil_alloca_check)+ GPU HW 8 本(gpu_multires・gpu_cascade_light・gpu_cascade_tree_grid・gpu_placement_refine・gpu_tree_refine_placement・gpu_time_step_span・_event・_choose)。t-1270 の後に time_step 系・gpu_time_step_choose(+_coupling・_night)。
+  dxil_alloca_check は本体のビルドに残っていた古い asm 24 本(今のビルドが作らない名前)で落ちた → _to_delete/stale_asm_main_20261029 へ移して合格。
 - ROADMAP: T-1189・T-1260・T-1261・T-1139・T-1212 Done・T-1222(2 本目)・T-1227/T-1228 段 1・T-1252 段 1・T-1269 を main へ・T-1278(wt3 の次の研究)・T-1284・T-1285 の行。
 - 司令塔の仮(続き): **T-1222 の合格の読み方 = T-1200 の 3.83 ms 以下**(3.78 ms。同じ回の決まった 24 回 3.46 ms とは 9 % 遅い。並ぶのは T-1285)。
 - 運転メモ: configure が vcpkg の段(「Detecting compiler hash」)で止まることがある。中で起動された vcpkg の pwsh(vcpkg-init・`--version`)や 7z の展開が戻らない。ほかの作業ツリーのランナーから `raw` で該当の pwsh を止めると続く(cmd の vcvarsall を止めると configure が cl.exe 無しで落ちるので止めない)。
