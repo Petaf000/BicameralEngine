@@ -175,13 +175,8 @@ namespace bicameral::sim {
         if (!shader)
             return std::unexpected(shader.error());
 
-        const auto cellsShader = gpu::LoadShader("sim/cascade_light_tree_grid_cells.cso");
-        if (!cellsShader)
-            return std::unexpected(cellsShader.error());
-
         result->m_treeGrid = gpu::CreateComputePipeline(device, nest.RootSignature(), *shader);
-        result->m_treeGridCells = gpu::CreateComputePipeline(device, nest.RootSignature(), *cellsShader);
-        if (!result->m_treeGrid || !result->m_treeGridCells)
+        if (!result->m_treeGrid)
             return std::unexpected("木を読む写しのパイプラインを作れない");
 
         result->m_treeWorldBlocks = shape.capacity.worldBlocks;
@@ -424,18 +419,14 @@ namespace bicameral::sim {
         if (!m_treeGrid)
             return false;
 
-        // 1 スレッド = 葉のセル 1 つ(世界の枠 × 512)か升目のセル 1 つ。歩幅で回す(ほかの段と同じ)。
-        // g_external0 は葉ごとの形では世界の枠の数・升目ごとの形では升目のセルの数
-        const uint64_t gridCells = static_cast<uint64_t>(m_params.sizeX) * static_cast<uint64_t>(m_params.sizeY) *
-                                   static_cast<uint64_t>(m_params.sizeZ);
-        const uint64_t items = m_treeGridPerGridCell ? gridCells
-                                                     : uint64_t{m_treeWorldBlocks} * multires::MR_BLOCK_CELLS;
+        // 1 スレッド = 葉のセル 1 つ(世界の枠 × 512)。歩幅で回す(ほかの段と同じ)。
+        // 1 スレッド = 升目のセル 1 つ(索引で葉を引く)の形と比べて、こちらが速かった(docs/perf.md 2026-10-29)
+        const uint64_t items = uint64_t{m_treeWorldBlocks} * multires::MR_BLOCK_CELLS;
         const uint64_t groups = std::clamp<uint64_t>((items + RC_GROUP_THREADS - 1) / RC_GROUP_THREADS, 1, MAX_GROUPS);
         nest.SetExternalViews(m_work->GetGPUVirtualAddress(), m_state->GetGPUVirtualAddress());
-        nest.RecordExternalDispatch(list, debugRing, m_treeGridPerGridCell ? m_treeGridCells.Get() : m_treeGrid.Get(),
-                                    static_cast<uint32_t>(groups),
-                                    {m_treeGridPerGridCell ? static_cast<uint32_t>(gridCells) : m_treeWorldBlocks,
-                                     m_treeLightsOffset, static_cast<uint32_t>(groups * RC_GROUP_THREADS), 0});
+        nest.RecordExternalDispatch(
+            list, debugRing, m_treeGrid.Get(), static_cast<uint32_t>(groups),
+            {m_treeWorldBlocks, m_treeLightsOffset, static_cast<uint32_t>(groups * RC_GROUP_THREADS), 0});
         nest.SetExternalViews(0, 0);
 
         return true;

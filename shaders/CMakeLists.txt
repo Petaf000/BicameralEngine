@@ -218,7 +218,6 @@ bicameral_add_shader(sim/cascade_light.hlsl PROFILE cs_6_8 ENTRY RcClearBags NAM
 bicameral_add_shader(sim/cascade_light.hlsl PROFILE cs_6_8 ENTRY RcResetBags NAME cascade_light_reset_bags)  # 距離ごとの段の GPU: 袋の数を 0 に(T-0959)
 bicameral_add_shader(sim/cascade_light.hlsl PROFILE cs_6_8 ENTRY RcPlanTick NAME cascade_light_plan_tick)  # 距離ごとの段の GPU: この刻みを流すかの印(起動の予告。T-1229)
 bicameral_add_shader(sim/cascade_light.hlsl PROFILE cs_6_8 ENTRY RcTreeGrid NAME cascade_light_tree_grid)  # 距離ごとの段の GPU: 木の葉を 0.5 m の升目へ写す(T-1117)
-bicameral_add_shader(sim/cascade_light.hlsl PROFILE cs_6_8 ENTRY RcTreeGridCells NAME cascade_light_tree_grid_cells)  # 同じ写しを 1 スレッド = 升目のセル 1 つで(T-1117 の比べ)
 bicameral_add_shader(sim/probe_radiation.hlsl PROFILE cs_6_8 ENTRY RadiationGrid NAME probe_radiation_grid)  # 仮の世界の GPU の放射: セル → 光の値・温度(T-1154)
 bicameral_add_shader(sim/probe_radiation.hlsl PROFILE cs_6_8 ENTRY RadiationApply NAME probe_radiation_apply)  # 仮の世界の GPU の放射: セルへ当てる(T-1154)
 bicameral_add_shader(sim/probe_radiation.hlsl PROFILE cs_6_8 ENTRY RadiationHash NAME probe_radiation_hash)  # 仮の世界の GPU の放射: 持ち越しのハッシュ(T-1154)

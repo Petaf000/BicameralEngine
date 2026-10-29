@@ -7,10 +7,12 @@
 //   1. 刻みごとに GPU が木から写しを作って RC を流した結果(セルごとの吸った・放った・帳簿・光線・持ち越し)が、
 //      CPU の MakeCascadeTreeGrid の写しで StepCascadeLight を流した結果と全部の刻みでビット単位で同じ
 //   2. 0.5 m より細かい葉のある木は、GPU が溢れの印 4 を立てる(CPU は誤り。細かい葉へ配る規則は土台)
-// 1・2 を写しの 2 つの形(1 スレッド = 葉のセル 1 つ / 升目のセル 1 つ)の両方で確かめ、写しの段の費用を並べて出す。
+//   3. 費用(HW の時だけ): CPU を挟まず続けて流した刻みの写しの段と RC の GPU 時間(docs/perf.md)
 // 引数は gpu_test_options.h。
+#include <algorithm>
 #include <array>
 #include <bit>
+#include <cstdint>
 #include <format>
 #include <span>
 #include <string>
@@ -150,7 +152,7 @@ namespace {
     };
 
     std::expected<WorldRun, std::string> PrepareWorld(const GpuContext& context, const sim::BakedReactionTable& table,
-                                                      const World& world, bool perGridCell) {
+                                                      const World& world) {
         auto nest = sim::GpuMultires::Create(context.device, table, world.nest.capacity);
         if (!nest)
             return std::unexpected(nest.error());
@@ -164,7 +166,6 @@ namespace {
         if (!light)
             return std::unexpected(light.error());
 
-        light->SetTreeGridPerGridCell(perGridCell);
         list = context.queue->Begin();
         if (list == nullptr || !light->RecordUpload(list, *nest, context.ring->GpuAddress(), {}) ||
             !context.queue->ExecuteAndWait())
@@ -205,23 +206,31 @@ namespace {
 
     // 1. 刻みごとに CPU の写しの結果とビット一致(比べた刻みの数を返す)
     std::expected<uint64_t, std::string> CompareWorld(const GpuContext& context, const sim::BakedReactionTable& table,
-                                                      const World& world, bool perGridCell) {
+                                                      const World& world) {
         const auto tree = sim::MakeCascadeTreeGrid(world.nest, table);
         if (!tree)
             return std::unexpected(tree.error());
 
-        auto run = PrepareWorld(context, table, world, perGridCell);
+        auto run = PrepareWorld(context, table, world);
         if (!run)
             return std::unexpected(run.error());
 
         sim::CascadeCarry carry;
         uint64_t emitting = 0;
+        // 刻みごとの最小(GPU は刻みのたびに CPU のリファレンスを待つので、クロックが落ちた刻みの値は大きく揺れる)
+        std::array<uint64_t, StageCount> fastest{};
+        fastest.fill(UINT64_MAX);
         context.stamps->Reset();
         for (uint64_t tick = 0; tick < TICKS; ++tick) {
             const sim::CascadeTickResult cpu = sim::StepCascadeLight(tree->grid, carry, {}, tick);
+            std::array<uint64_t, StageCount> before{};
+            std::ranges::copy(context.stamps->Ticks().first(StageCount), before.begin());
             const auto gpu = TickOnGpu(context, *run, tick);
             if (!gpu)
                 return std::unexpected(gpu.error());
+
+            for (size_t stage = 0; stage < StageCount; ++stage)
+                fastest[stage] = std::min(fastest[stage], context.stamps->Ticks()[stage] - before[stage]);
 
             if (gpu->overflow != 0)
                 return std::unexpected(std::format("刻み {}: 溢れの印 {}", tick, gpu->overflow));
@@ -248,22 +257,77 @@ namespace {
             return frequency > 0 ? static_cast<double>(ticks[stage]) * 1e6 / frequency / static_cast<double>(TICKS)
                                  : 0.0;
         };
+        const auto fastestUs = [&](Stage stage) {
+            return frequency > 0 ? static_cast<double>(fastest[stage]) * 1e6 / frequency : 0.0;
+        };
         Log(Channel::Gpu, Level::Info,
-            "{}({}): 升目 {} セル・葉の枠 {}・{} 刻み GPU の木を読む写しと CPU がビット一致(放った刻み {})。"
-            "1 刻みの GPU 時間: 木を読む写し {:.1f} µs・RC {:.1f} µs",
-            world.name, perGridCell ? "1 スレッド = 升目のセル" : "1 スレッド = 葉のセル", tree->grid.CellCount(),
-            world.nest.capacity.worldBlocks, TICKS, emitting, averageUs(StageTreeGrid), averageUs(StageTick));
+            "{}: 升目 {} セル・葉の枠 {}・{} 刻み GPU の木を読む写しと CPU がビット一致(放った刻み {})。"
+            "1 刻みの GPU 時間(平均 / 最小): 木を読む写し {:.1f} / {:.1f} µs・RC {:.1f} / {:.1f} µs",
+            world.name, tree->grid.CellCount(), world.nest.capacity.worldBlocks, TICKS, emitting,
+            averageUs(StageTreeGrid), fastestUs(StageTreeGrid), averageUs(StageTick), fastestUs(StageTick));
 
         return TICKS;
     }
 
+    // 3. 費用(HW の時だけ): CPU のリファレンスを挟まず、温めの刻みの後に続けて流した刻みの GPU 時間(平均 / 最小)。
+    // 1・2 は刻みのたびに CPU を待つので GPU のクロックが落ち、同じ場面でも 10 倍ほど揺れた(2026-10-29)。
+    // 1 スレッド = 升目のセル 1 つ(索引で葉を引く)の写しの形もこの測りで比べ、葉ごとの形を残した(docs/perf.md)
+    constexpr uint64_t WARM_TICKS = 32;
+    constexpr uint64_t MEASURE_TICKS = 64;
+
+    std::expected<void, std::string> MeasureWorld(const GpuContext& context, const sim::BakedReactionTable& table,
+                                                  const World& world) {
+        auto run = PrepareWorld(context, table, world);
+        if (!run)
+            return std::unexpected(run.error());
+
+        std::array<uint64_t, StageCount> fastest{};
+        fastest.fill(UINT64_MAX);
+        for (uint64_t tick = 0; tick < WARM_TICKS + MEASURE_TICKS; ++tick) {
+            if (tick == WARM_TICKS)
+                context.stamps->Reset();
+
+            std::array<uint64_t, StageCount> before{};
+            std::ranges::copy(context.stamps->Ticks().first(StageCount), before.begin());
+            const auto gpu = TickOnGpu(context, *run, tick);
+            if (!gpu)
+                return std::unexpected(gpu.error());
+
+            if (tick < WARM_TICKS)
+                continue;
+
+            for (size_t stage = 0; stage < StageCount; ++stage)
+                fastest[stage] = std::min(fastest[stage], context.stamps->Ticks()[stage] - before[stage]);
+        }
+
+        uint64_t frequencyHz = 0;
+        if (FAILED(context.queue->Native()->GetTimestampFrequency(&frequencyHz)) || frequencyHz == 0)
+            return std::unexpected("タイムスタンプの周波数を読めない");
+
+        const auto frequency = static_cast<double>(frequencyHz);
+        const auto averageUs = [&](Stage stage) {
+            return static_cast<double>(context.stamps->Ticks()[stage]) * 1e6 / frequency /
+                   static_cast<double>(MEASURE_TICKS);
+        };
+        const auto fastestUs = [&](Stage stage) {
+            return static_cast<double>(fastest[stage]) * 1e6 / frequency;
+        };
+        Log(Channel::Gpu, Level::Info,
+            "測り {}: 続けて {} 刻み(温め {})の GPU 時間(平均 / 最小): 木を読む写し {:.1f} / {:.1f} µs・"
+            "RC {:.1f} / {:.1f} µs",
+            world.name, MEASURE_TICKS, WARM_TICKS, averageUs(StageTreeGrid), fastestUs(StageTreeGrid),
+            averageUs(StageTick), fastestUs(StageTick));
+
+        return {};
+    }
+
     // 2. 0.5 m より細かい葉: CPU は誤り・GPU は溢れの印 4
     std::expected<void, std::string> CheckFineLeaves(const GpuContext& context, const sim::BakedReactionTable& table,
-                                                     const World& world, bool perGridCell) {
+                                                     const World& world) {
         if (sim::MakeCascadeTreeGrid(world.nest, table))
             return std::unexpected("CPU が細かい葉の木を誤りにしない");
 
-        auto run = PrepareWorld(context, table, world, perGridCell);
+        auto run = PrepareWorld(context, table, world);
         if (!run)
             return std::unexpected(run.error());
 
@@ -317,22 +381,29 @@ namespace {
 
         uint64_t compared = 0;
         const World fine = MakeWorld(table, "0.5 m の根の一部を 0.25 m に", 0, {4, 2, 4}, true);
-        for (const bool perGridCell : {false, true}) {
-            for (const World& world : worlds) {
-                const auto ticks = CompareWorld(context, table, world, perGridCell);
-                if (!ticks) {
-                    Log(Channel::Gpu, Level::Error, "gpu_cascade_tree_grid_test: FAILED({}: {})", world.name,
-                        ticks.error());
-                    return 1;
-                }
-
-                compared += *ticks;
+        for (const World& world : worlds) {
+            const auto ticks = CompareWorld(context, table, world);
+            if (!ticks) {
+                Log(Channel::Gpu, Level::Error, "gpu_cascade_tree_grid_test: FAILED({}: {})", world.name,
+                    ticks.error());
+                return 1;
             }
 
-            if (auto checked = CheckFineLeaves(context, table, fine, perGridCell); !checked) {
-                Log(Channel::Gpu, Level::Error, "gpu_cascade_tree_grid_test: FAILED({}: {})", fine.name,
-                    checked.error());
-                return 1;
+            compared += *ticks;
+        }
+
+        if (auto checked = CheckFineLeaves(context, table, fine); !checked) {
+            Log(Channel::Gpu, Level::Error, "gpu_cascade_tree_grid_test: FAILED({}: {})", fine.name, checked.error());
+            return 1;
+        }
+
+        if (options->adapter == gpu::AdapterKind::Hardware) {
+            for (const World& world : worlds) {
+                if (auto measured = MeasureWorld(context, table, world); !measured) {
+                    Log(Channel::Gpu, Level::Error, "gpu_cascade_tree_grid_test: FAILED(測り {}: {})", world.name,
+                        measured.error());
+                    return 1;
+                }
             }
         }
 
