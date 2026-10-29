@@ -207,8 +207,13 @@ FX_FN uint32_t HcConductanceFromSums(HcConductivitySums sums, uint32_t temperatu
 template <typename Table, typename Cell>
 FX_FN uint64_t HcCellConductivity(Table table, Cell cell, uint32_t temperatureMk) {
     HcConductivitySums sums = HcMakeConductivitySums();
-    for (uint32_t i = 0; i < cell.speciesCount; ++i)
-        sums = HcAddConductivity(sums, table.Species(cell.species[i]), cell.amounts[i]);
+    // 成分の配列を動的な添字で読まない(reaction.hlsli の成分の回し。T-1233)
+    for (uint32_t i = 0; i < RX_SPECIES_END(cell); ++i) {
+        if (i >= cell.speciesCount)
+            break;
+
+        sums = HcAddConductivity(sums, table.Species(RX_SPECIES_AT(cell, i)), RX_AMOUNT_AT(cell, i));
+    }
 
     return HcConductivityFromSums(sums, temperatureMk);
 }
@@ -218,8 +223,13 @@ FX_FN uint64_t HcCellConductivity(Table table, Cell cell, uint32_t temperatureMk
 template <typename Table, typename Cell>
 FX_FN uint32_t HcCellConductance(Table table, Cell cell, uint32_t temperatureMk) {
     HcConductivitySums sums = HcMakeConductivitySums();
-    for (uint32_t i = 0; i < cell.speciesCount; ++i)
-        sums = HcAddConductivity(sums, table.Species(cell.species[i]), cell.amounts[i]);
+    // 成分の配列を動的な添字で読まない(reaction.hlsli の成分の回し。T-1233)
+    for (uint32_t i = 0; i < RX_SPECIES_END(cell); ++i) {
+        if (i >= cell.speciesCount)
+            break;
+
+        sums = HcAddConductivity(sums, table.Species(RX_SPECIES_AT(cell, i)), RX_AMOUNT_AT(cell, i));
+    }
 
     return HcConductanceFromSums(sums, temperatureMk);
 }

@@ -156,6 +156,46 @@ struct RxCandidates {
     uint64_t extents[RX_MAX_CANDIDATES];
 };
 
+// 候補の欄を読む・書く(T-1233)。C++ は配列をそのまま。GPU は候補の回し(候補の数まで)の中の動的な添字でも配列を動的な添字で
+// 読み書きしないよう、決まった数の回しで一致する欄だけを選ぶ・書く(下の成分の道具と同じ考え。T-0397・CLAUDE.md §4)
+#ifdef __cplusplus
+#define RX_CANDIDATE_RULE(candidates, c) (candidates).rules[c]
+#define RX_CANDIDATE_EXTENT(candidates, c) (candidates).extents[c]
+#define RX_SET_CANDIDATE_EXTENT(candidates, c, value) (candidates).extents[c] = value
+#define RX_SET_CANDIDATE(candidates, c, ruleId, value) \
+    (candidates).rules[c] = ruleId;                    \
+    (candidates).extents[c] = value
+#else
+FX_FN uint32_t RxPickCandidateRule(uint32_t rules[RX_MAX_CANDIDATES], uint32_t index) {
+    uint32_t value = 0;
+    FX_UNROLL for (uint32_t k = 0; k < RX_MAX_CANDIDATES; ++k) value = k == index ? rules[k] : value;
+
+    return value;
+}
+
+FX_FN uint64_t RxPickCandidateExtent(uint64_t extents[RX_MAX_CANDIDATES], uint32_t index) {
+    uint64_t value = 0;
+    FX_UNROLL for (uint32_t k = 0; k < RX_MAX_CANDIDATES; ++k) value = k == index ? extents[k] : value;
+
+    return value;
+}
+
+FX_FN void RxPutCandidateRule(inout uint32_t rules[RX_MAX_CANDIDATES], uint32_t index, uint32_t value) {
+    FX_UNROLL for (uint32_t k = 0; k < RX_MAX_CANDIDATES; ++k) rules[k] = k == index ? value : rules[k];
+}
+
+FX_FN void RxPutCandidateExtent(inout uint64_t extents[RX_MAX_CANDIDATES], uint32_t index, uint64_t value) {
+    FX_UNROLL for (uint32_t k = 0; k < RX_MAX_CANDIDATES; ++k) extents[k] = k == index ? value : extents[k];
+}
+
+#define RX_CANDIDATE_RULE(candidates, c) RxPickCandidateRule((candidates).rules, c)
+#define RX_CANDIDATE_EXTENT(candidates, c) RxPickCandidateExtent((candidates).extents, c)
+#define RX_SET_CANDIDATE_EXTENT(candidates, c, value) RxPutCandidateExtent((candidates).extents, c, value)
+#define RX_SET_CANDIDATE(candidates, c, ruleId, value) \
+    RxPutCandidateRule((candidates).rules, c, ruleId); \
+    RxPutCandidateExtent((candidates).extents, c, value)
+#endif
+
 // --- 小さな道具 --------------------------------------------------------------------------------
 
 FX_FN RxCell RxMakeEmptyCell(int64_t energy) {
@@ -256,7 +296,7 @@ FX_FN Usage RxWithUsage(Usage usage, uint32_t i, uint64_t amount) {
 #define RX_SET_ENTRY(cell, i, speciesId, amount) cell = RxWithEntry(cell, i, speciesId, amount)
 #define RX_ADD_USAGE(usage, i, amount) usage = RxWithUsage(usage, i, RxUsageAt(usage, i) + (amount))
 #define RX_MAKE_WRITABLE(cell) cell = RxWritableCell(cell)
-#else
+#elif defined(__cplusplus)
 #define RX_SPECIES_AT(cell, i) cell.species[i]
 #define RX_AMOUNT_AT(cell, i) cell.amounts[i]
 #define RX_USAGE_AT(usage, i) usage.amounts[i]
@@ -267,17 +307,120 @@ FX_FN Usage RxWithUsage(Usage usage, uint32_t i, uint64_t amount) {
     cell.amounts[i] = amount
 #define RX_ADD_USAGE(usage, i, amount) usage.amounts[i] += amount
 #define RX_MAKE_WRITABLE(cell)
+#else
+// GPU の既定(RxCell・RxUsage の RX_MAX_CELL_SPECIES 個の配列。T-1233): 添字が動的でも配列を動的な添字で読み書きしない。
+// 決まった数の回しで「添字が一致する欄だけ」を選ぶ・書く(T-0397・CLAUDE.md §4。動的な添字で読むと 1 スレッドの局所の配列になり、
+// 局所メモリへ出る)。回しの中で添字が決まる所(下の決まった数の回し)では、開いた後に 1 つの欄の読み書きに畳まれる。
+// 範囲の外の添字(RX_NO_SLOT など)は 0 を読み、何も書かない(前は未定義。核は範囲の外を読み書きしない)
+FX_FN uint32_t RxPickU32(uint32_t values[RX_MAX_CELL_SPECIES], uint32_t index) {
+    uint32_t value = 0;
+    FX_UNROLL for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES; ++k) value = k == index ? values[k] : value;
+
+    return value;
+}
+
+FX_FN uint64_t RxPickU64(uint64_t values[RX_MAX_CELL_SPECIES], uint32_t index) {
+    uint64_t value = 0;
+    FX_UNROLL for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES; ++k) value = k == index ? values[k] : value;
+
+    return value;
+}
+
+FX_FN void RxPutU32(inout uint32_t values[RX_MAX_CELL_SPECIES], uint32_t index, uint32_t value) {
+    FX_UNROLL for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES; ++k) values[k] = k == index ? value : values[k];
+}
+
+FX_FN void RxPutU64(inout uint64_t values[RX_MAX_CELL_SPECIES], uint32_t index, uint64_t value) {
+    FX_UNROLL for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES; ++k) values[k] = k == index ? value : values[k];
+}
+
+// 足す・引く(符号なしの剰余。添字が一致しない欄には 0 を足す)
+FX_FN void RxAddAtU64(inout uint64_t values[RX_MAX_CELL_SPECIES], uint32_t index, uint64_t amount) {
+    FX_UNROLL for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES; ++k) values[k] += k == index ? amount : (uint64_t)0;
+}
+
+FX_FN void RxSubAtU64(inout uint64_t values[RX_MAX_CELL_SPECIES], uint32_t index, uint64_t amount) {
+    FX_UNROLL for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES; ++k) values[k] -= k == index ? amount : (uint64_t)0;
+}
+
+// セルの形ごとの道具(RxCell の版。速い形 RxGpuMidCell の版は shaders/sim/multires_wide_step.hlsli に同じ名前で〔配列をそのまま〕)
+FX_FN uint32_t RxSpeciesOf(RxCell cell, uint32_t i) {
+    return RxPickU32(cell.species, i);
+}
+
+FX_FN uint64_t RxAmountOf(RxCell cell, uint32_t i) {
+    return RxPickU64(cell.amounts, i);
+}
+
+FX_FN void RxAddAmountAt(inout RxCell cell, uint32_t i, uint64_t amount) {
+    RxAddAtU64(cell.amounts, i, amount);
+}
+
+FX_FN void RxSubAmountAt(inout RxCell cell, uint32_t i, uint64_t amount) {
+    RxSubAtU64(cell.amounts, i, amount);
+}
+
+FX_FN void RxSetEntryAt(inout RxCell cell, uint32_t i, uint32_t speciesId, uint64_t amount) {
+    RxPutU32(cell.species, i, speciesId);
+    RxPutU64(cell.amounts, i, amount);
+}
+
+#define RX_SPECIES_AT(cell, i) RxSpeciesOf(cell, i)
+#define RX_AMOUNT_AT(cell, i) RxAmountOf(cell, i)
+#define RX_USAGE_AT(usage, i) RxUsageOf(usage, i)
+#define RX_ADD_AMOUNT(cell, i, amount) RxAddAmountAt(cell, i, amount)
+#define RX_SUB_AMOUNT(cell, i, amount) RxSubAmountAt(cell, i, amount)
+#define RX_SET_ENTRY(cell, i, speciesId, amount) RxSetEntryAt(cell, i, speciesId, amount)
+#define RX_ADD_USAGE(usage, i, amount) RxAddUsageAt(usage, i, amount)
+#define RX_MAKE_WRITABLE(cell)
+#endif
+
+// 成分を順に見る回し(T-1233): GPU の RxCell は決まった数(RX_MAX_CELL_SPECIES)まで回して成分の数で抜ける(回しの数が定数なので
+// コンパイラが開き、添字が定数になって上の選ぶ道具が 1 つの欄に畳まれる)。回しの終わりはセルの形ごとの道具 RxSpeciesLoopEnd
+// (速い形・作業場の形は成分の数。[unroll(N)] は N 回で打ち切るので使わない)。C++ は成分の数まで(RxWideCell は上限が無い)。
+// 使い方: for (uint32_t i = 0; i < RX_SPECIES_END(cell); ++i) { if (i >= cell.speciesCount) break; … }
+#ifdef __cplusplus
+#define RX_SPECIES_END(cell) (cell).speciesCount
+#else
+FX_FN uint32_t RxSpeciesLoopEnd(RxCell cell) {
+    RX_UNUSED(cell);
+
+    return RX_MAX_CELL_SPECIES;
+}
+
+#define RX_SPECIES_END(cell) RxSpeciesLoopEnd(cell)
+#endif
+
+// 規則の反応物の欄を読む(T-1233)。反応物の数までの回し(動的な添字)の中で使う。C++ は配列をそのまま、GPU は決まった数から選ぶ
+// (規則は表から写した局所の値なので、欄を動的な添字で読むと局所の配列になる。T-0397。回しを開くより命令が少ない)
+#ifdef __cplusplus
+#define RX_REACTANT_AT(rule, i) (rule).reactants[i]
+#define RX_REACTANT_COEFFICIENT_AT(rule, i) (rule).reactantCoefficients[i]
+#else
+FX_FN uint32_t RxPickReactantField(uint32_t values[RX_MAX_REACTANTS], uint32_t index) {
+    uint32_t value = 0;
+    FX_UNROLL for (uint32_t k = 0; k < RX_MAX_REACTANTS; ++k) value = k == index ? values[k] : value;
+
+    return value;
+}
+
+#define RX_REACTANT_AT(rule, i) RxPickReactantField((rule).reactants, i)
+#define RX_REACTANT_COEFFICIENT_AT(rule, i) RxPickReactantField((rule).reactantCoefficients, i)
 #endif
 
 // 物質 ID の位置(無ければ RX_NO_SLOT)
 template <typename Cell>
 FX_FN uint32_t RxFindSlot(Cell cell, uint32_t speciesId) {
-    for (uint32_t i = 0; i < cell.speciesCount; ++i) {
-        if (RX_SPECIES_AT(cell, i) == speciesId)
-            return i;
+    // 成分の ID は重ならないので、一致は高々 1 つ(回しを return で抜けない。T-1233)
+    uint32_t slot = RX_NO_SLOT;
+    for (uint32_t i = 0; i < RX_SPECIES_END(cell); ++i) {
+        if (i >= cell.speciesCount)
+            break;
+
+        slot = RX_SPECIES_AT(cell, i) == speciesId ? i : slot;
     }
 
-    return RX_NO_SLOT;
+    return slot;
 }
 
 // 符号つきの積が int64 に収まることを確かめて返す(R8)
@@ -305,7 +448,10 @@ FX_FN uint64_t RxShiftRightLow64(FxU128 value, uint32_t shift) {
 template <typename Table, typename Cell>
 FX_FN int64_t RxChemicalEnergy(Table table, Cell cell) {
     int64_t chemical = 0;
-    for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+    for (uint32_t i = 0; i < RX_SPECIES_END(cell); ++i) {
+        if (i >= cell.speciesCount)
+            break;
+
         const int64_t term = RxMulS64Checked((int64_t)RX_AMOUNT_AT(cell, i), table.Species(RX_SPECIES_AT(cell, i)).h0);
         FX_ASSERT(!FxAddOverflowsS64(chemical, term));
         chemical += term;
@@ -318,8 +464,12 @@ FX_FN int64_t RxChemicalEnergy(Table table, Cell cell) {
 template <typename Table, typename Cell>
 FX_FN uint64_t RxHeatCapacity(Table table, Cell cell) {
     uint64_t heatCapacity = 0;
-    for (uint32_t i = 0; i < cell.speciesCount; ++i)
+    for (uint32_t i = 0; i < RX_SPECIES_END(cell); ++i) {
+        if (i >= cell.speciesCount)
+            break;
+
         heatCapacity += RX_AMOUNT_AT(cell, i) * (uint64_t)table.Species(RX_SPECIES_AT(cell, i)).heatCapacity;
+    }
 
     return heatCapacity;
 }
@@ -647,28 +797,36 @@ FX_FN RxRuleRate RxComputeRuleRate(Table table, Cell cell, uint32_t ruleId, RxRu
     result.rate = RxMakeRate(0, 0);
     result.ownLimit = 0;
 
-    uint64_t factors[2];
-    factors[0] = 1;
-    factors[1] = 1;
+    // 次数 1 の反応物の量(2 つまで)。配列にして factorCount で書くと局所の配列になるので 2 つの値で持つ(T-1233)
+    uint64_t firstFactor = 1;
+    uint64_t secondFactor = 1;
     uint32_t factorCount = 0;
     uint64_t ownLimit = RX_EXTENT_SATURATION;
+    bool missing = false;
     for (uint32_t i = 0; i < rule.reactantCount; ++i) {
-        const uint32_t slot = RxFindSlot(cell, rule.reactants[i]);
-        if (slot == RX_NO_SLOT)
-            return result;
+        const uint32_t slot = RxFindSlot(cell, RX_REACTANT_AT(rule, i));
+        if (slot == RX_NO_SLOT) {
+            missing = true;
+            break;
+        }
 
         const uint64_t amount = RX_AMOUNT_AT(cell, slot);
-        const uint64_t limit = amount / (uint64_t)rule.reactantCoefficients[i];
+        const uint64_t limit = amount / (uint64_t)RX_REACTANT_COEFFICIENT_AT(rule, i);
         ownLimit = limit < ownLimit ? limit : ownLimit;
         if (((rule.firstOrderMask >> i) & 1) != 0 && factorCount < 2) {
-            factors[factorCount] = amount;
+            firstFactor = factorCount == 0 ? amount : firstFactor;
+            secondFactor = factorCount == 1 ? amount : secondFactor;
             factorCount += 1;
         }
     }
 
+    if (missing)
+        return result;
+
     const uint64_t packed = table.Rate(ruleId, kelvin);
     if (rule.balanceKelvin == 0 || ownLimit == 0) {
-        result.rate = RxSplitRate(FxMulU64Full(factors[0], factors[1]), RxRateMantissa(packed), RxRateExponent(packed));
+        result.rate = RxSplitRate(FxMulU64Full(firstFactor, secondFactor), RxRateMantissa(packed),
+                                  RxRateExponent(packed));
         result.ownLimit = ownLimit;
 
         return result;
@@ -735,19 +893,19 @@ FX_FN RxCandidates RxReplaceLastCandidate(Table table, RxCandidates candidates, 
     uint32_t last = 0;
     uint64_t lastPriority = 0;
     for (uint32_t c = 0; c < RX_MAX_CANDIDATES; ++c) {
-        const uint64_t priority = RxSelectPriority(selectSeed, table.RateRule(candidates.rules[c]));
-        if (c == 0 || RxSelectBefore(lastPriority, candidates.rules[last], priority, candidates.rules[c])) {
+        const uint64_t priority = RxSelectPriority(selectSeed, table.RateRule(RX_CANDIDATE_RULE(candidates, c)));
+        if (c == 0 || RxSelectBefore(lastPriority, RX_CANDIDATE_RULE(candidates, last), priority,
+                                     RX_CANDIDATE_RULE(candidates, c))) {
             last = c;
             lastPriority = priority;
         }
     }
 
     if (!RxSelectBefore(RxSelectPriority(selectSeed, table.RateRule(ruleId)), ruleId, lastPriority,
-                        candidates.rules[last]))
+                        RX_CANDIDATE_RULE(candidates, last)))
         return candidates;
 
-    candidates.rules[last] = ruleId;
-    candidates.extents[last] = value;
+    RX_SET_CANDIDATE(candidates, last, ruleId, value);
 
     return candidates;
 }
@@ -759,7 +917,7 @@ FX_FN RxWaitCandidates RxCollectCandidatesWait(Table table, Cell cell, uint32_t 
     result.wait = RX_WAIT_NEVER;
     result.offered = 0;
     result.candidates.count = 0;
-    for (uint32_t i = 0; i < RX_MAX_CANDIDATES; ++i) {
+    FX_UNROLL for (uint32_t i = 0; i < RX_MAX_CANDIDATES; ++i) {
         result.candidates.rules[i] = 0;
         result.candidates.extents[i] = 0;
     }
@@ -780,8 +938,7 @@ FX_FN RxWaitCandidates RxCollectCandidatesWait(Table table, Cell cell, uint32_t 
                 continue;
             }
 
-            result.candidates.rules[result.candidates.count] = ruleId;
-            result.candidates.extents[result.candidates.count] = sample.value;
+            RX_SET_CANDIDATE(result.candidates, result.candidates.count, ruleId, sample.value);
             result.candidates.count += 1;
         }
     }
@@ -798,6 +955,17 @@ struct RxUsage {
     uint64_t heat;
     uint64_t gas;  // 気体を増やす規則が増やす気体のぶん(µmol。減らす規則の分は差し引かない)
 };
+
+#if !defined(__cplusplus) && !defined(RX_CELL_ACCESSORS)
+// 使う量を読む・足す(RxUsage の版。上の成分の道具と同じく、添字が一致する欄だけを選ぶ・書く。T-1233)
+FX_FN uint64_t RxUsageOf(RxUsage usage, uint32_t i) {
+    return RxPickU64(usage.amounts, i);
+}
+
+FX_FN void RxAddUsageAt(inout RxUsage usage, uint32_t i, uint64_t amount) {
+    RxAddAtU64(usage.amounts, i, amount);
+}
+#endif
 
 // 0 の使う量(セルの形の道具。RxCell はインラインの数だけ)
 FX_FN RxUsage RxEmptyUsage(RxCell cell) {
@@ -819,24 +987,24 @@ template <typename Table, typename Cell, typename Usage>
 FX_FN Usage RxSumUsage(Table table, Cell cell, RxCandidates candidates, Usage usage) {
     for (uint32_t c = 0; c < candidates.count; ++c) {
         // 反応物は RateRule から、反応熱と気体の増え方だけを Rule から読む(規則の構造体を丸ごと動的な添字で読まない。T-0397)
-        const RxRule rule = table.RateRule(candidates.rules[c]);
-        const int64_t reactionEnthalpy = table.Rule(candidates.rules[c]).reactionEnthalpy;
-        const uint32_t gasGrowth = table.Rule(candidates.rules[c]).gasGrowth;
+        const RxRule rule = table.RateRule(RX_CANDIDATE_RULE(candidates, c));
+        const int64_t reactionEnthalpy = table.Rule(RX_CANDIDATE_RULE(candidates, c)).reactionEnthalpy;
+        const uint32_t gasGrowth = table.Rule(RX_CANDIDATE_RULE(candidates, c)).gasGrowth;
         for (uint32_t i = 0; i < rule.reactantCount; ++i) {
-            const uint32_t slot = RxFindSlot(cell, rule.reactants[i]);
-            const uint64_t amount = candidates.extents[c] * (uint64_t)rule.reactantCoefficients[i];
+            const uint32_t slot = RxFindSlot(cell, RX_REACTANT_AT(rule, i));
+            const uint64_t amount = RX_CANDIDATE_EXTENT(candidates, c) * (uint64_t)RX_REACTANT_COEFFICIENT_AT(rule, i);
             FX_ASSERT(RX_USAGE_AT(usage, slot) + amount >= amount);
             RX_ADD_USAGE(usage, slot, amount);
         }
 
         if (reactionEnthalpy > 0) {
-            const FxU128 heat = FxMulU64Full(candidates.extents[c], (uint64_t)reactionEnthalpy);
+            const FxU128 heat = FxMulU64Full(RX_CANDIDATE_EXTENT(candidates, c), (uint64_t)reactionEnthalpy);
             FX_ASSERT(heat.hi == 0 && usage.heat + heat.lo >= usage.heat);
             usage.heat += heat.lo;
         }
 
         if (gasGrowth > 0) {
-            const FxU128 gas = FxMulU64Full(candidates.extents[c], (uint64_t)gasGrowth);
+            const FxU128 gas = FxMulU64Full(RX_CANDIDATE_EXTENT(candidates, c), (uint64_t)gasGrowth);
             FX_ASSERT(gas.hi == 0 && usage.gas + gas.lo >= usage.gas);
             usage.gas += gas.lo;
         }
@@ -884,7 +1052,10 @@ struct RxAvailable {
 template <typename Table, typename Cell>
 FX_FN uint64_t RxGasRoom(Table table, Cell cell) {
     uint64_t gas = 0;
-    for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+    for (uint32_t i = 0; i < RX_SPECIES_END(cell); ++i) {
+        if (i >= cell.speciesCount)
+            break;
+
         const bool counted = (table.Species(RX_SPECIES_AT(cell, i)).flags & RX_SPECIES_GAS) != 0;
         const uint64_t amount = counted ? RX_AMOUNT_AT(cell, i) : (uint64_t)0;
         gas = amount < CELL_GAS_AMOUNT_LIMIT_MICROMOLES - gas ? gas + amount : CELL_GAS_AMOUNT_LIMIT_MICROMOLES;
@@ -898,13 +1069,14 @@ FX_FN uint64_t RxGasRoom(Table table, Cell cell) {
 template <typename Cell, typename Usage>
 FX_FN bool RxOverdraws(RxRule rule, int64_t reactionEnthalpy, uint32_t gasGrowth, Cell cell, Usage used,
                        RxAvailable available) {
+    bool overdrawn = false;
     for (uint32_t i = 0; i < rule.reactantCount; ++i) {
-        const uint32_t slot = RxFindSlot(cell, rule.reactants[i]);
-        if (RX_USAGE_AT(used, slot) > RX_AMOUNT_AT(cell, slot))
-            return true;
+        const uint32_t slot = RxFindSlot(cell, RX_REACTANT_AT(rule, i));
+        overdrawn = overdrawn || RX_USAGE_AT(used, slot) > RX_AMOUNT_AT(cell, slot);
     }
 
-    return (reactionEnthalpy > 0 && used.heat > available.heat) || (gasGrowth > 0 && used.gas > available.gas);
+    return overdrawn || (reactionEnthalpy > 0 && used.heat > available.heat) ||
+           (gasGrowth > 0 && used.gas > available.gas);
 }
 
 // 丸め上げた規則(roundedUp のビット)のせいで足りなくなった資源があれば、その資源を使う丸め上げた規則のうち
@@ -918,14 +1090,16 @@ FX_FN RxCandidates RxRevokeRoundUps(Table table, Cell cell, RxCandidates resolve
         uint32_t pick = RX_NO_SLOT;
         uint64_t pickKey = 0;
         for (uint32_t c = 0; c < resolved.count; ++c) {
-            const RxRule rule = table.RateRule(resolved.rules[c]);
-            const int64_t reactionEnthalpy = table.Rule(resolved.rules[c]).reactionEnthalpy;
-            const uint32_t gasGrowth = table.Rule(resolved.rules[c]).gasGrowth;
+            const RxRule rule = table.RateRule(RX_CANDIDATE_RULE(resolved, c));
+            const int64_t reactionEnthalpy = table.Rule(RX_CANDIDATE_RULE(resolved, c)).reactionEnthalpy;
+            const uint32_t gasGrowth = table.Rule(RX_CANDIDATE_RULE(resolved, c)).gasGrowth;
             if (((roundedUp >> c) & 1) == 0 || !RxOverdraws(rule, reactionEnthalpy, gasGrowth, cell, used, available))
                 continue;
 
-            const bool larger = pick == RX_NO_SLOT || resolved.extents[c] > resolved.extents[pick] ||
-                                (resolved.extents[c] == resolved.extents[pick] && rule.key < pickKey);
+            const bool larger = pick == RX_NO_SLOT ||
+                                RX_CANDIDATE_EXTENT(resolved, c) > RX_CANDIDATE_EXTENT(resolved, pick) ||
+                                (RX_CANDIDATE_EXTENT(resolved, c) == RX_CANDIDATE_EXTENT(resolved, pick) &&
+                                 rule.key < pickKey);
             if (!larger)
                 continue;
 
@@ -936,7 +1110,7 @@ FX_FN RxCandidates RxRevokeRoundUps(Table table, Cell cell, RxCandidates resolve
         if (pick == RX_NO_SLOT)
             break;
 
-        resolved.extents[pick] -= 1;
+        RX_SET_CANDIDATE_EXTENT(resolved, pick, RX_CANDIDATE_EXTENT(resolved, pick) - 1);
         roundedUp &= ~(1u << pick);
         used = RxSumUsage(table, cell, resolved, RxEmptyUsage(cell));
     }
@@ -962,15 +1136,15 @@ FX_FN RxCandidates RxShrinkToDemand(Table table, Cell cell, RxThermal thermal, R
     RxCandidates resolved = candidates;
     uint32_t roundedUp = 0;
     for (uint32_t c = 0; c < candidates.count; ++c) {
-        const RxRule rule = table.RateRule(candidates.rules[c]);  // 反応物と鍵
-        const int64_t reactionEnthalpy = table.Rule(candidates.rules[c]).reactionEnthalpy;
-        const uint32_t gasGrowth = table.Rule(candidates.rules[c]).gasGrowth;
-        const uint64_t extent = candidates.extents[c];
+        const RxRule rule = table.RateRule(RX_CANDIDATE_RULE(candidates, c));  // 反応物と鍵
+        const int64_t reactionEnthalpy = table.Rule(RX_CANDIDATE_RULE(candidates, c)).reactionEnthalpy;
+        const uint32_t gasGrowth = table.Rule(RX_CANDIDATE_RULE(candidates, c)).gasGrowth;
+        const uint64_t extent = RX_CANDIDATE_EXTENT(candidates, c);
         const uint32_t random = RxShrinkRandom(randomSeed, rule);
         uint64_t result = extent;
         uint64_t truncated = extent;
         for (uint32_t i = 0; i < rule.reactantCount; ++i) {
-            const uint32_t slot = RxFindSlot(cell, rule.reactants[i]);
+            const uint32_t slot = RxFindSlot(cell, RX_REACTANT_AT(rule, i));
             if (RX_USAGE_AT(demand, slot) <= RX_AMOUNT_AT(cell, slot))
                 continue;
 
@@ -991,7 +1165,7 @@ FX_FN RxCandidates RxShrinkToDemand(Table table, Cell cell, RxThermal thermal, R
             truncated = shrunk.truncated < truncated ? shrunk.truncated : truncated;
         }
 
-        resolved.extents[c] = result;
+        RX_SET_CANDIDATE_EXTENT(resolved, c, result);
         roundedUp |= result > truncated ? (1u << c) : 0u;
     }
 
@@ -1015,7 +1189,10 @@ FX_FN RxCandidates RxResolveContention(Table table, Cell cell, RxThermal thermal
 template <typename Cell>
 FX_FN Cell RxCompactCell(Cell cell) {
     Cell result = RxEmptyCellLike(cell, cell.energy);
-    for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+    for (uint32_t i = 0; i < RX_SPECIES_END(cell); ++i) {
+        if (i >= cell.speciesCount)
+            break;
+
         if (RX_AMOUNT_AT(cell, i) == 0)
             continue;
 
@@ -1088,10 +1265,10 @@ FX_FN RxAddedOf<Cell> RxApplyExtentsChecked(Table table, Cell cell, RxCandidates
     // --- 反応物を引く(差し込みで位置がずれる前に。呼ぶ側の cell は残す)---
     RX_MAKE_WRITABLE(cell);
     for (uint32_t c = 0; c < resolved.count; ++c) {
-        const RxRule rule = table.RateRule(resolved.rules[c]);  // 反応物
+        const RxRule rule = table.RateRule(RX_CANDIDATE_RULE(resolved, c));  // 反応物
         for (uint32_t i = 0; i < rule.reactantCount; ++i) {
-            const uint32_t slot = RxFindSlot(cell, rule.reactants[i]);
-            const uint64_t amount = resolved.extents[c] * (uint64_t)rule.reactantCoefficients[i];
+            const uint32_t slot = RxFindSlot(cell, RX_REACTANT_AT(rule, i));
+            const uint64_t amount = RX_CANDIDATE_EXTENT(resolved, c) * (uint64_t)RX_REACTANT_COEFFICIENT_AT(rule, i);
             FX_ASSERT(amount <= RX_AMOUNT_AT(cell, slot));
             RX_SUB_AMOUNT(cell, slot, amount);
         }
@@ -1103,12 +1280,12 @@ FX_FN RxAddedOf<Cell> RxApplyExtentsChecked(Table table, Cell cell, RxCandidates
     result.overflowed = 0;
     for (uint32_t c = 0; c < resolved.count; ++c) {
         // 生成物の欄は決まった数だけ回す(規則を動的な添字で読むと、GPU でローカルの配列になる。T-0397)
-        const RxRule rule = table.Rule(resolved.rules[c]);
+        const RxRule rule = table.Rule(RX_CANDIDATE_RULE(resolved, c));
         FX_UNROLL for (uint32_t i = 0; i < RX_MAX_PRODUCTS; ++i) {
             if (i >= rule.productCount)
                 break;
 
-            const uint64_t amount = resolved.extents[c] * (uint64_t)rule.productCoefficients[i];
+            const uint64_t amount = RX_CANDIDATE_EXTENT(resolved, c) * (uint64_t)rule.productCoefficients[i];
             const RxAddedOf<Cell> added = RxTryAddSpecies(result.cell, rule.products[i], amount);
             result.cell = added.cell;
             result.overflowed |= added.overflowed;
@@ -1123,13 +1300,13 @@ FX_FN RxAddedOf<Cell> RxApplyExtentsChecked(Table table, Cell cell, RxCandidates
 template <typename Table, typename Cell>
 FX_FN RxCandidates RxHoldNewSpeciesRules(Table table, Cell cell, RxCandidates resolved) {
     for (uint32_t c = 0; c < resolved.count; ++c) {
-        const RxRule rule = table.Rule(resolved.rules[c]);
+        const RxRule rule = table.Rule(RX_CANDIDATE_RULE(resolved, c));
         bool makesNew = false;
         FX_UNROLL for (uint32_t i = 0; i < RX_MAX_PRODUCTS; ++i)  // 決まった数だけ回す(上と同じ。T-0397)
             makesNew = makesNew || (i < rule.productCount && RxFindSlot(cell, rule.products[i]) == RX_NO_SLOT);
 
         if (makesNew)
-            resolved.extents[c] = 0;
+            RX_SET_CANDIDATE_EXTENT(resolved, c, 0);
     }
 
     return resolved;

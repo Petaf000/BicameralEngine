@@ -406,7 +406,10 @@ FX_FN int64_t OhPairRadiation(Table table, OhObject object, uint32_t exposedFace
     FxU128 sum;
     sum.hi = 0;
     sum.lo = 0;
-    for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+    for (uint32_t i = 0; i < RX_SPECIES_END(cell); ++i) {  // 成分の回し(reaction.hlsli。T-1233)
+        if (i >= cell.speciesCount)
+            break;
+
         const uint32_t absorption = table.ObjectSpecies(RX_SPECIES_AT(cell, i)).absorptionLongMm2PerMol;
         sum = RdAddAbsorption(sum, absorption, RX_AMOUNT_AT(cell, i));
     }
@@ -702,8 +705,12 @@ FX_FN OhShellFill OhShellVoxelOf(Table table, GasList gases, RxCell air, int32_t
 template <typename Table>
 FX_FN bool OhShellReturnable(Table table, RxCell cell) {
     bool returnable = true;
-    for (uint32_t i = 0; i < cell.speciesCount; ++i)
+    for (uint32_t i = 0; i < RX_SPECIES_END(cell); ++i) {  // 成分の回し(reaction.hlsli。T-1233)
+        if (i >= cell.speciesCount)
+            break;
+
         returnable = returnable && table.ObjectSpecies(RX_SPECIES_AT(cell, i)).gasIndex != OH_NO_GAS;
+    }
 
     return returnable;
 }

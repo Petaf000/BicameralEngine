@@ -1279,6 +1279,13 @@ add_test(NAME float_check_source_accepts
          COMMAND ${Python3_EXECUTABLE} ${FLOAT_CHECK_DIR}/source_float_check.py
                  ${FLOAT_CHECK_FIXTURES}/accept_source.hlsli)
 
+# --- シミュのシェーダーの局所の配列(DXIL の alloca)を増やさない(T-1233。CLAUDE.md §4・T-0397)---
+# 上限の表は tools/dxil_alloca/limits.txt(release の dxc の数)。減らしたら --update で下げる。release 以外は数えずに通す
+add_test(NAME dxil_alloca_check
+         COMMAND ${Python3_EXECUTABLE} ${PROJECT_SOURCE_DIR}/tools/dxil_alloca/dxil_alloca_check.py
+                 ${CMAKE_BINARY_DIR}/shaders/asm/sim --limits ${PROJECT_SOURCE_DIR}/tools/dxil_alloca/limits.txt
+                 --config $<CONFIG>)
+
 # --- 試験の反応表(パッケージ)を使うテスト(T-0169。ファイルの先頭の bicameral_test_reaction_table)---
 foreach(_name IN ITEMS
     reaction_package_test reaction_package_scene_test reaction_species_remap_test reaction_test reaction_contention_test

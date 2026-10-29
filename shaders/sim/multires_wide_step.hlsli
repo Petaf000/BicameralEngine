@@ -83,6 +83,43 @@ RxGpuMidUsage RxEmptyUsage(RxGpuMidCell cell) {
     return usage;
 }
 
+// 成分の回しの終わりと、成分・使う量を読む・書く道具(reaction.hlsli の RxCell の版と同じ名前。T-1233)。
+// 速い形は成分の数まで回し、配列をそのまま読み書きする(32 種を決まった数で開くと命令が増えすぎる。動的な添字のまま = 今までと同じ)
+uint32_t RxSpeciesLoopEnd(RxGpuMidCell cell) {
+    return cell.speciesCount;
+}
+
+#ifndef RX_CELL_ACCESSORS
+uint32_t RxSpeciesOf(RxGpuMidCell cell, uint32_t i) {
+    return cell.species[i];
+}
+
+uint64_t RxAmountOf(RxGpuMidCell cell, uint32_t i) {
+    return cell.amounts[i];
+}
+
+void RxAddAmountAt(inout RxGpuMidCell cell, uint32_t i, uint64_t amount) {
+    cell.amounts[i] += amount;
+}
+
+void RxSubAmountAt(inout RxGpuMidCell cell, uint32_t i, uint64_t amount) {
+    cell.amounts[i] -= amount;
+}
+
+void RxSetEntryAt(inout RxGpuMidCell cell, uint32_t i, uint32_t speciesId, uint64_t amount) {
+    cell.species[i] = speciesId;
+    cell.amounts[i] = amount;
+}
+
+uint64_t RxUsageOf(RxGpuMidUsage usage, uint32_t i) {
+    return usage.amounts[i];
+}
+
+void RxAddUsageAt(inout RxGpuMidUsage usage, uint32_t i, uint64_t amount) {
+    usage.amounts[i] += amount;
+}
+#endif
+
 // 形を選ぶための空のセル(中身は使わない。型だけ)
 RxGpuMidCell MidShape() {
     return RxMakeEmptyGpuMidCell(0);
@@ -231,6 +268,11 @@ RxGpuSpaceCell RxEmptyCellLike(RxGpuSpaceCell cell, int64_t energy) {
 
 uint32_t RxGpuCapacity(RxGpuSpaceCell cell) {
     return SpaceCapacity();
+}
+
+// 成分の回しの終わり(作業場の形は成分の数まで。T-1233)
+uint32_t RxSpeciesLoopEnd(RxGpuSpaceCell cell) {
+    return cell.speciesCount;
 }
 
 bool RxHasRoomForSpecies(RxGpuSpaceCell cell) {
