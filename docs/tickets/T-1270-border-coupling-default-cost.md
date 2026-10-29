@@ -49,6 +49,11 @@ Q181(予算 0.1 K を「どの歩の終わりでも」に読み替えるか)の�
   変わるのは記録の値だけ: forward の 1 通り目の要約・night の差と解き・choose-dump の要約と「隣の差で縮んだ」・gpu_time_step_choose が読むファイル(表が 1 本増える)。
   直す所は `TimeTreeSetup::border` の既定 1 行と、試験の `border=` の既定(none → c0)・perf.md の値。
 
+## Q181 の答えが (c) なら(引き継ぎメモ)
+1. `TimeTreeSetup::border` の既定を `Coupling`(couplingShift 0)に・試験の `borderMode` の既定を "c0" に(time_step_tree_test.cpp)。
+2. 期待の書き直しは無い(固定値を持つ試験が無い)。perf.md の夜の値を (c) の列に。ctest の time_step_choose_dump_coupling* は既定と同じになるので 1 本にまとめてよい。
+3. 残り: 広い 0.5 m の木(bigfine)の fire-cost を 1 本ずつ・上限 3 時間で(今回は 2 時間で切れた)。GPU の区画をまたぐ (c)(bigfine の choose-dump → gpu_time_step_choose)。
+
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-10-29(wt6・t-1270-border-default-cost): 試験に border= を足し、night・fire(3 つの木)・forward・choose-dump・forward-estimate・fire-cost(big)を none と c0 で測った。
   夜は解き 0.46〜0.73 倍・出来事 51・打ち切り 0、写しの刻みの差は 5〜6 → 11 mK(どちらも予算の内。歩の終わりはどこでも 11 mK)。火事・広い木は同じ値(× 1.001 以下)。
