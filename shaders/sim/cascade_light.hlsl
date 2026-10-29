@@ -11,6 +11,8 @@
 // GPU が起動の予告で全部の段を飛ばす。仮の世界の段 1 からは、前の段が書いた袋の数で要るだけ起動する(間接の起動。T-1235)。
 // 持ち越しは (セル・面・帯) の鍵で引く密な表を刻みの偶奇で 2 つ持つ(AddCarry が足し、次の刻みの RcCarryIn が全部の鍵を掃いて読み、0 に戻す)。
 // 鍵の数だけ置き場があるので溢れない(T-1164・ADR-0484。前の疎な表は溢れると取り合いの順で結果が変わった)。
+// 表ごとに頁(セル 512 個 × 12 の鍵)の印を持ち、0 から増やした鍵の頁に立てる。RcCarryIn は印の頁だけ読み、印は次の起動
+// (RcLevel0Prepare)が 0 に戻す(T-1227 段 1・ADR-0500。読む鍵が光の当たった頁だけになる。結果は全部を掃くのと同じ)。
 // 足し算と min はすべて 64bit の atomic で可換なので、光線の処理の順によらず CPU とビット一致する(R3・R4)。
 // 帳簿・本数は波の和にしてから足す(同じ語への atomic を減らす)。どのカーネルも 1 スレッドが番号を歩幅 g_external2 で回す。
 #include "common/cascade_light.hlsli"
@@ -135,8 +137,20 @@ uint32_t CarryTableOf(RcGpuParams params, uint32_t parity) {
     return parity == 0 ? params.stateCarry0 : params.stateCarry1;
 }
 
+// 持ち越しの表 parity の頁 page の印(uint32)のバイトの位置
+uint32_t CarryMarkOf(RcGpuParams params, uint32_t parity, uint32_t page) {
+    return (parity == 0 ? params.stateCarryMarks0 : params.stateCarryMarks1) + (page * 4);
+}
+
+// 鍵 key の頁に印を立てる(冪等の OR。順によらない)
+void MarkCarryPage(RcGpuParams params, uint32_t parity, uint32_t key) {
+    uint32_t marked;
+    g_rcState.InterlockedOr(CarryMarkOf(params, parity, key / RC_GPU_CARRY_PAGE_KEYS), 1u, marked);
+}
+
 // 次の刻みの持ち越しの表(outParity。鍵 = セル × 12 + 面 × 2 + 帯 で引く密な表)へ足す。表は鍵の数だけあるので溢れない
-// (T-1164・ADR-0484)。0 から増えた鍵を数える(測りの目安。0 から増やす足し算はちょうど 1 つなので順によらない)
+// (T-1164・ADR-0484)。0 から増えた鍵を数え、その頁に印を立てる(0 から増やす足し算はちょうど 1 つなので順によらない。
+// 0 でない鍵は、表が最後に読まれて 0 に戻った後に必ず 0 から増えているので、印の無い頁の鍵はいつも 0 = 印で飛ばしても落とさない)
 void AddCarry(RcGpuParams params, uint32_t outParity, uint64_t key, uint64_t amount) {
     if (amount == 0)
         return;
@@ -147,6 +161,7 @@ void AddCarry(RcGpuParams params, uint32_t outParity, uint64_t key, uint64_t amo
         return;
 
     g_rcState.InterlockedAdd(HeaderOffset(RC_GPU_CARRY_COUNT + outParity), 1u);
+    MarkCarryPage(params, outParity, (uint32_t)key);
 }
 
 // 放つ面を列に足す(印が 0 の面だけ。印は RcClearFaces が 0 に戻す)
@@ -426,11 +441,16 @@ void WalkAndPass(RcGpuParams params, RcStepConstants constants, RcLevelRay level
     }
 }
 
-    // --- 前の刻みの持ち越し(g_external1 の表)を放つ面へ足し、表を 0 に戻す(鍵ごとに 1 スレッド。表の全部の鍵を掃く)---
+    // --- 前の刻みの持ち越し(g_external1 の表)を放つ面へ足し、表を 0 に戻す(鍵ごとに 1 スレッド。印の頁の鍵だけ読む。T-1227)---
+    // 頁の鍵の数(6144)は波の幅の倍数なので、波の中は同じ頁 = 印で飛ばす分かれは波ごとに揃う。印はここでは 0 に戻さない
+    // (同じ頁のほかのスレッドがまだ読む)。0 に戻すのは次の起動の RcLevel0Prepare
     [numthreads(RC_GROUP_THREADS, 1, 1)] void RcCarryIn(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const RcGpuParams params = LoadParams();
     const uint32_t table = CarryTableOf(params, g_external1);
     for (uint32_t keyIndex = dispatchThreadId.x; keyIndex < params.carryKeys; keyIndex += g_external2) {
+        if (g_rcState.Load(CarryMarkOf(params, g_external1, keyIndex / RC_GPU_CARRY_PAGE_KEYS)) == 0u)
+            continue;
+
         const uint64_t key = (uint64_t)keyIndex;
         const uint64_t amount = LoadWord(table + (keyIndex * 8));
         if (amount == 0)
@@ -534,6 +554,10 @@ uint64_t Level0WeightOf(RcGpuParams params, RcStepConstants constants, uint32_t 
 // --- 段 0: 放つ面ごとに升目の重みの和・余りの升目・余り(CPU の EmitFace の前半)---
 [numthreads(RC_GROUP_THREADS, 1, 1)] void RcLevel0Prepare(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const RcGpuParams params = LoadParams();
+    // 読み終えた持ち越しの表(g_external1)の頁の印を 0 に(RcCarryIn が表を 0 に戻してある。この刻みで表 g_external1 へ足す段は無い)
+    for (uint32_t page = dispatchThreadId.x; page < params.carryPages; page += g_external2)
+        g_rcState.Store(CarryMarkOf(params, g_external1, page), 0u);
+
     const RcStepConstants constants = ConstantsOf(params);
     const uint32_t count = FaceCountOf(params);
     for (uint32_t face = dispatchThreadId.x; face < count; face += g_external2) {
@@ -672,6 +696,7 @@ uint64_t Level0WeightOf(RcGpuParams params, RcStepConstants constants, uint32_t 
         const uint64_t key = g_rcWork.Load<uint64_t>(params.workCarry + (entry * 16));
         StoreWord(params.stateCarry0 + (uint32_t)(key * 8),
                   g_rcWork.Load<uint64_t>(params.workCarry + (entry * 16) + 8));
+        MarkCarryPage(params, 0, (uint32_t)key);
     }
 
     if (dispatchThreadId.x == 0)

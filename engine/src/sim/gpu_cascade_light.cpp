@@ -2,7 +2,8 @@
 // 置き場の並びは shaders/common/cascade_light.hlsli の RcGpuParams。1 刻み = 6 + 3 × (段 − 1) 回の起動(間に UAV のバリア)。
 // 自分のルート署名(仮の世界)では、段 1 からの歩く・袋を空にするを、前の段が GPU の上で書いた袋の数で要るだけ起動する
 // (間接の起動。T-1235・ADR-0495。袋が無い段はグループ 0 で、置いた数を超えないので結果は直の起動と同じ)。
-// 世界の全部を掃くのは RcSources の読みと、RcCarryIn の持ち越しの表(鍵で引く密な表。溢れない。T-1164・ADR-0484)の読み。
+// 世界の全部を掃くのは RcSources の読み。RcCarryIn の持ち越しの表(鍵で引く密な表。溢れない。T-1164・ADR-0484)は
+// 印の立った頁(セル 512 個 × 12 の鍵)だけ読む(T-1227 段 1)。
 #include "sim/gpu_cascade_light.h"
 
 #include <algorithm>
@@ -111,6 +112,11 @@ namespace bicameral::sim {
             // 持ち越しの表 2 つ(鍵 = (セル × 6 + 面) × 2 + 帯 で引く 64bit の語。溢れない。T-1164・ADR-0484)
             place(params.stateCarry0, cells * rx::RC_FACES * rx::LT_BANDS * WORD_BYTES);
             place(params.stateCarry1, cells * rx::RC_FACES * rx::LT_BANDS * WORD_BYTES);
+            // 表ごとの頁の印(T-1227 段 1。頁 1 語の uint32)。刻みをまたぐ状態なので読み戻しと保存点の範囲に入れる
+            params.carryPages = static_cast<uint32_t>((cells + rx::RC_GPU_CARRY_PAGE_CELLS - 1) /
+                                                      rx::RC_GPU_CARRY_PAGE_CELLS);
+            place(params.stateCarryMarks0, uint64_t{params.carryPages} * 4);
+            place(params.stateCarryMarks1, uint64_t{params.carryPages} * 4);
             readbackBytes = at;
             place(params.stateSources, cells * rx::RC_FACES * 16);
             place(params.stateFaces, uint64_t{capacity.faces} * 4);
