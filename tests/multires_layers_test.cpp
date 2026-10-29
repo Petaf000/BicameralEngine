@@ -806,6 +806,40 @@ namespace {
         Expect(CountLayerMisfits(nest) == 0, "費用: 書いた後も 0 ≤ 層 ≤ 量");
     }
 
+    // 一様の枠の層の置き場(T-1238): 層の無い枠は番号だけ・層のある枠だけ組を持つ・書き直しは同じ組・空いた組は使い回す
+    void TestUniformLayerStore() {
+        MultiresUniformLayerStore store;
+        store.Reset(8);
+        Expect(store.Empty() && store.entries.empty() && store.Find(3) == nullptr, "置き場: 初めは組なし");
+
+        store.Set(3, MultiresUniformLayers{.species = {2}, .layers = {50}});
+        store.Set(5, MultiresUniformLayers{.species = {1, 4}, .layers = {7, 9}});
+        const MultiresUniformLayers* five = store.Find(5);
+        Expect(!store.Empty() && store.entries.size() == 2 && five != nullptr &&
+                   five->layers == std::vector<uint64_t>{7, 9},
+               "置き場: 層のある枠だけ組を持ち、枠で引く");
+
+        store.Set(5, MultiresUniformLayers{.species = {1}, .layers = {3}});
+        Expect(store.entries.size() == 2 && store.Find(5)->layers == std::vector<uint64_t>{3},
+               "置き場: 書き直しは同じ組");
+
+        store.Clear(3);
+        store.Set(6, MultiresUniformLayers{});  // 物質が空なら Clear と同じ
+        Expect(store.Find(3) == nullptr && store.Find(6) == nullptr && store.freeEntries.size() == 1,
+               "置き場: 消すと組が空く");
+
+        store.Set(7, MultiresUniformLayers{.species = {2}, .layers = {1}});
+        Expect(store.entries.size() == 2 && store.freeEntries.empty() && store.Find(7)->layers[0] == 1,
+               "置き場: 空いた組を使い回す");
+
+        store.Clear(5);
+        store.Clear(7);
+        Expect(store.Empty(), "置き場: 全部消すと空");
+
+        Log(Channel::Sim, Level::Info, "費用: 一様の枠の層の置き場 層の無い枠 1 つ {} B(前は {} B)", sizeof(uint32_t),
+            sizeof(MultiresUniformLayers));
+    }
+
     int Run() {
         const auto table = BakeReactionTable(MakeCombustionTestTable());
         if (!table) {
@@ -825,6 +859,7 @@ namespace {
         TestUniformLayers(inert, true);
         TestOverflowRebind(inert);
         TestFloatingGrainStaysAwake();
+        TestUniformLayerStore();
         for (const bool wide : {false, true}) {
             TestPlaceZeroLayers(*table, wide);
             TestPlaceLayeredRoot(*table, wide);

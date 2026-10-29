@@ -328,7 +328,7 @@ namespace bicameral::sim {
                 }
             }
 
-            for (uint32_t slot = 0; slot < cells.uniformLayers.size(); ++slot)
+            for (uint32_t slot = 0; slot < cells.uniformLayers.entryOfSlot.size(); ++slot)
                 hash = nest_detail::HashUniformLayers(hash, nest, slot, UNIFORM_LAYER_ADDRESS | slot);
 
             return hash;
@@ -718,7 +718,7 @@ namespace bicameral::sim {
         nest.capacity = capacity;
         nest.blocks.assign(blockCount, MrMakeUnusedBlock());
         nest.cells.uniform.assign(blockCount, RxMakeEmptyCell(0));
-        nest.cells.uniformLayers.assign(blockCount, MultiresUniformLayers{});
+        nest.cells.uniformLayers.Reset(blockCount);
         nest.cells.pages.assign(pageCount, MultiresCellPage{});
         nest.fractions.assign(size_t{capacity.fractions} * MR_BLOCK_CELLS, MrMakeEmptyFraction());
         nest.ledger.assign(WlLedgerWords(capacity.ledgerColumns), 0);

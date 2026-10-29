@@ -378,8 +378,11 @@ namespace bicameral::sim {
                 UniformAt(nest, childSlot) = UniformAt(nest, parentSlot);
 
             // 一様な子の層は親と同じ(子の層の和 = 親の層 × 8。頁の子は下で写す。T-1220)
-            nest.cells.uniformLayers[childSlot] = uniform ? nest.cells.uniformLayers[parentSlot]
-                                                          : MultiresUniformLayers{};
+            const MultiresUniformLayers* parentLayers = nest.cells.uniformLayers.Find(parentSlot);
+            if (uniform && parentLayers != nullptr)
+                nest.cells.uniformLayers.Set(childSlot, *parentLayers);
+            else
+                nest.cells.uniformLayers.Clear(childSlot);
 
             if (nest.wideCells) {
                 CopyWideToChild(nest, parentSlot, octant, childPage, childFraction);

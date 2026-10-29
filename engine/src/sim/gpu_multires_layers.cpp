@@ -78,10 +78,7 @@ namespace bicameral::sim {
             image.words[MrLayerHeaderAddress(layerPage)] = MR_LAYER_NO_PAGE;
 
         // --- 1 段目の限り: 一様の枠の層は写さない(T-1240)---
-        const auto hasUniformLayers = [](const MultiresUniformLayers& stored) {
-            return !stored.species.empty();
-        };
-        if (std::ranges::any_of(nest.cells.uniformLayers, hasUniformLayers))
+        if (!nest.cells.uniformLayers.Empty())
             return std::unexpected("一様の枠の層はまだ GPU に写せない(T-1240)");
 
         for (uint32_t page = 0; page < nest.cells.pages.size(); ++page) {

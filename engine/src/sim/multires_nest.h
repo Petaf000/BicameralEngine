@@ -96,12 +96,35 @@ namespace bicameral::sim {
         std::vector<uint64_t> layers;
     };
 
+    inline constexpr uint32_t MULTIRES_NO_UNIFORM_LAYERS = UINT32_MAX;
+
+    // 一様の枠の層の置き場(T-1238): 枠ごとの番号(4 B)+ 層のある枠だけの組の表。層の無い世界の費用は 4 B × 枠
+    // (前は枠ごとに MultiresUniformLayers〔vector 2 つ・48 B〕)。読む口は枠で引くので、組の並び(空いた組の使い回し)は要約・保存点に効かない
+    struct MultiresUniformLayerStore {
+        std::vector<uint32_t> entryOfSlot;           // [枠] 組の番号(MULTIRES_NO_UNIFORM_LAYERS = 層は全部 0)
+        std::vector<MultiresUniformLayers> entries;  // 層のある枠の組(空いた組は中身なし)
+        std::vector<uint32_t> freeEntries;           // 空いた組の番号
+
+        // 枠 slot の層(無ければ nullptr)
+        [[nodiscard]] const MultiresUniformLayers* Find(uint32_t slot) const {
+            const uint32_t entry = entryOfSlot[slot];
+            return entry == MULTIRES_NO_UNIFORM_LAYERS ? nullptr : &entries[entry];
+        }
+
+        // 層のある枠が 1 つも無いか
+        [[nodiscard]] bool Empty() const { return entries.size() == freeEntries.size(); }
+
+        void Reset(size_t slotCount);                           // 枠の数 slotCount・層は全部 0
+        void Set(uint32_t slot, MultiresUniformLayers layers);  // 物質が空なら Clear と同じ
+        void Clear(uint32_t slot);
+    };
+
     // セルの置き場(T-0931): 一様の値(枠ごと。GPU と同じ RxCell)+ セルの頁(観察の枠の頁 + 世界の頁)。
     // GPU と同じ並びの列(DenseCellImage)は [一様の値 × 枠][頁 × MR_BLOCK_CELLS]。状態の要約・保存点はこの列の順・同じ値
     struct MultiresCellStore {
         std::vector<reaction::RxCell> uniform;
         std::vector<MultiresCellPage> pages;
-        std::vector<MultiresUniformLayers> uniformLayers;  // [枠] 一様の値の層(T-1220。層のある枠だけ中身を持つ)
+        MultiresUniformLayerStore uniformLayers;  // 一様の値の層(T-1220。層のある枠だけ組を持つ。T-1238)
     };
 
     inline constexpr uint32_t MULTIRES_NO_FIELD_PAGE = UINT32_MAX;
