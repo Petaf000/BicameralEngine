@@ -154,6 +154,25 @@ namespace {
     // 燃える物を置く所(T-1153。空 = どこにも置く。x〔m〕→ 置くか)
     std::function<bool(double)> fuelAt;
 
+    // 境の面の扱い(border=。T-1270: 案 (c) を既定にした時の差を測る。none・mismatch・restart・gap0・c<n>。既定 none = 今の既定)
+    std::string borderMode = "none";
+
+    // 境の面の扱いを名前から(T-1269 の border-trace の modes= と同じ名前。none は今の形に戻す)
+    void ApplyBorder(TimeTreeSetup& setup, std::string_view mode) {
+        setup.border = TimeTreeBorder::None;
+        setup.couplingShift = 0;
+        if (mode == "mismatch")
+            setup.border = TimeTreeBorder::Mismatch;
+        else if (mode == "restart")
+            setup.border = TimeTreeBorder::Restart;
+        else if (mode == "gap0")
+            setup.border = TimeTreeBorder::Gap0;
+        else if (mode.starts_with("c")) {
+            setup.border = TimeTreeBorder::Coupling;
+            setup.couplingShift = std::atoi(std::string(mode.substr(1)).c_str());
+        }
+    }
+
     TimeTreeSetup MakeSetup(const Material& material, TimeStepRule rule) {
         TimeTreeSetup setup;
         setup.cycles = rule == TimeStepRule::Fixed ? solverCycles : longCycles;
@@ -185,6 +204,8 @@ namespace {
         setup.unitByLength = unitByLength && windowMeters <= 0.0;
         setup.windowLevel0Cells = static_cast<uint32_t>(std::llround(windowMeters / 0.5));  // レベル 0 のセルは 0.5 m
         setup.unitEdgeCells = unitEdgeCells;
+        if (rule != TimeStepRule::Fixed)
+            ApplyBorder(setup, borderMode);
 
         return setup;
     }
@@ -592,11 +613,12 @@ namespace {
         if (bufferUnits > 0)
             buffer = std::format("・前線の緩衝 {} 単位", bufferUnits);
 
-        return std::format("{} 通り目{}・予算 {}・木 {}・揃える段 {}・V {}(1 刻み {})・単位 {}",
+        return std::format("{} 通り目{}・予算 {}・木 {}・揃える段 {}・V {}(1 刻み {})・単位 {}・境 {}",
                            selectRule == TimeTreeSelect::Retake ? 2 : 1, buffer, BudgetText(), shapeName, groupShift,
                            trialCycles != 0 ? trialCycles : longCycles, zeroCycles,
                            windowMeters > 0.0 ? std::format("窓 {:g} m・{} セル角", windowMeters, unitEdgeCells)
-                                              : std::string(unitByLength ? "4 m" : "ブロック"));
+                                              : std::string(unitByLength ? "4 m" : "ブロック"),
+                           borderMode);
     }
 
     void LogRun(std::string_view scene, std::string_view name, const TimeTreeWorld& world, const RunResult& run,
@@ -1782,16 +1804,7 @@ namespace {
 
     TimeTreeSetup BorderSetup(const TimeTreeSetup& base, std::string_view mode) {
         TimeTreeSetup setup = base;
-        if (mode == "mismatch")
-            setup.border = TimeTreeBorder::Mismatch;
-        else if (mode == "restart")
-            setup.border = TimeTreeBorder::Restart;
-        else if (mode == "gap0")
-            setup.border = TimeTreeBorder::Gap0;
-        else if (mode.starts_with("c")) {
-            setup.border = TimeTreeBorder::Coupling;
-            setup.couplingShift = std::atoi(std::string(mode.substr(1)).c_str());
-        }
+        ApplyBorder(setup, mode);
 
         return setup;
     }
@@ -2008,6 +2021,8 @@ namespace {
                 traceLockstep = std::strtoull(value.c_str(), nullptr, 10);
             else if (key == "modes")
                 borderModes = value;
+            else if (key == "border")
+                borderMode = value;
         }
 
         const bool all = part == "all";
