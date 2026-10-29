@@ -695,9 +695,10 @@ bicameral_add_gpu_test_case(gpu_object_heat_nest gpu_object_heat_nest_test gpu -
 bicameral_add_gpu_test(gpu_object_shell_flow_test)  # 物のまわりの空気の層の流れ(物 1 つ = 1 グループ)の GPU と CPU のビット一致・費用(T-1200)
 target_link_libraries(gpu_object_shell_flow_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_object_shell_flow gpu_object_shell_flow_test gpu --queue compute)
-# WARP(T-1284): 写し元(256 バイト以上に切り上がる)と UAV の大きさの食い違いで CopyResource がデバイスを失っていた。比べ 16 本で約 275 秒なので上限を延ばす
+# WARP(T-1284): 写し元(256 バイト以上に切り上がる)と UAV の大きさの食い違いで CopyResource がデバイスを失っていた。
+# 比べ 16 本は 1 つで走ると約 275 秒だが、ほかの作業ツリーのビルドと重なると 900 秒を超えた(T-1286: 16 本目の途中で 900 秒)ので上限を延ばす
 bicameral_add_gpu_test_case(gpu_object_shell_flow_warp gpu_object_shell_flow_test warp --warp --queue compute)
-set_tests_properties(gpu_object_shell_flow_warp PROPERTIES TIMEOUT 900)
+set_tests_properties(gpu_object_shell_flow_warp PROPERTIES TIMEOUT 1800)
 
 bicameral_add_gpu_test(gpu_multires_layers_test)  # セルの成分ごとの層の量の GPU と CPU のビット一致(T-1221)
 target_link_libraries(gpu_multires_layers_test PRIVATE bicameral_sim)
