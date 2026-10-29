@@ -11,14 +11,14 @@ namespace bicameral::sim {
     namespace {
 
         constexpr uint32_t THREADS_PER_GROUP = 64;  // time_tree_choose.hlsl の TtcWindow* の numthreads
-        constexpr uint32_t ROOT_CONSTANT_COUNT = 9;
+        constexpr uint32_t ROOT_CONSTANT_COUNT = 10;
         constexpr uint32_t STATE_EXPONENT_MASK = 0xFFu;  // time_tree_choose.hlsl の TTC_STATE_*
         constexpr uint32_t STATE_MIDSTEP = 1u << 8;
 
         // u0 窓の上限・u1 今の e・u2 後の記録・u3 掃く回の印・u4/u5 窓の格子・u6 区画の変わった回 / b0 / デバッグのリング /
-        // t0 選ぶ前の記録・t1 格子の単位・t2 隣の始まり・t3 隣・t4 区画の隣の始まり・t5 区画の隣
+        // t0 選ぶ前の記録・t1 格子の単位・t2 隣の始まり・t3 隣・t4 区画の隣の始まり・t5 区画の隣・t6 隣の差 1 段を許す e(案 (c))
         constexpr uint32_t UAV_COUNT = 7;
-        constexpr uint32_t SRV_COUNT = 6;
+        constexpr uint32_t SRV_COUNT = 7;
         constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
             .uavCount = UAV_COUNT, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = SRV_COUNT};
 
@@ -33,6 +33,7 @@ namespace bicameral::sim {
             uint32_t cap = 0;
             uint32_t pass = 0;
             uint32_t beforeWord = 0;
+            uint32_t coupled = 0;
         };
 
         enum Stage : uint32_t { STAGE_WINDOW_X, STAGE_WINDOW_Y, STAGE_WINDOW_Z, STAGE_SWEEP, STAGE_FIXUP, STAGES };
@@ -92,7 +93,8 @@ namespace bicameral::sim {
     std::expected<GpuTimeTreeChoose, std::string> GpuTimeTreeChoose::Create(ID3D12Device5* device,
                                                                             const TimeTreeChooseTables& tables,
                                                                             std::span<const uint16_t> befores) {
-        if (!tables.supported || tables.units == 0 || befores.size() % tables.units != 0)
+        const bool looseShaped = tables.looseExponents.empty() || tables.looseExponents.size() == tables.units;
+        if (!tables.supported || tables.units == 0 || befores.size() % tables.units != 0 || !looseShaped)
             return std::unexpected(
                 "刻みを選ぶ段の GPU 版の範囲の外(窓・隣の差 1 段だけ)か、記録の数が単位の倍数でない");
 
@@ -108,6 +110,7 @@ namespace bicameral::sim {
         result.m_shape.gridSize = tables.gridSize;
         result.m_shape.radius = tables.radius;
         result.m_shape.maxExponent = tables.maxExponent;
+        result.m_coupled = !tables.looseExponents.empty();
 
         // --- 選ぶ前の記録: 出来事ごとに 2 単位で 1 語(単位の数が奇数なら最後の上半分は 0)---
         std::vector<uint32_t> words(size_t{result.m_wordsPerEvent} * result.m_events, 0);
@@ -143,6 +146,11 @@ namespace bicameral::sim {
         MakeTileNeighbors(tables, result.m_tiles, tileStarts, tileNeighbors);
         result.m_tileNeighborStarts = MakeTable(device, tileStarts);
         result.m_tileNeighbors = MakeTable(device, tileNeighbors);
+        std::vector<uint32_t> loose;
+        for (const int32_t exponent : tables.looseExponents)
+            loose.push_back(static_cast<uint32_t>(std::max(exponent, 0)));
+
+        result.m_loose = MakeTable(device, loose);
         const uint64_t unitBytes = uint64_t{tables.units} * sizeof(uint32_t);
         const uint64_t afterBytes = uint64_t{result.m_wordsPerEvent} * sizeof(uint32_t);
         const uint64_t counterBytes = uint64_t{COUNTERS} * sizeof(uint32_t);
@@ -165,7 +173,8 @@ namespace bicameral::sim {
             .Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP, .Count = MAX_TIMESTAMPS, .NodeMask = 0};
         const bool tablesMade = result.m_before.Valid() && result.m_gridUnits.Valid() &&
                                 result.m_neighborStarts.Valid() && result.m_neighbors.Valid() &&
-                                result.m_tileNeighborStarts.Valid() && result.m_tileNeighbors.Valid();
+                                result.m_tileNeighborStarts.Valid() && result.m_tileNeighbors.Valid() &&
+                                result.m_loose.Valid();
         const bool buffersMade = result.m_caps && result.m_state && result.m_after && result.m_counters &&
                                  result.m_tileChanged && result.m_windowA && result.m_windowB &&
                                  result.m_capsReadback && result.m_stateReadback && result.m_afterReadback &&
@@ -178,8 +187,8 @@ namespace bicameral::sim {
     }
 
     void GpuTimeTreeChoose::RecordUpload(ID3D12GraphicsCommandList* list) const {
-        const std::array<gpu::ResidentBuffer, SRV_COUNT> tables = {m_before,    m_gridUnits,          m_neighborStarts,
-                                                                   m_neighbors, m_tileNeighborStarts, m_tileNeighbors};
+        const std::array<gpu::ResidentBuffer, SRV_COUNT> tables = {
+            m_before, m_gridUnits, m_neighborStarts, m_neighbors, m_tileNeighborStarts, m_tileNeighbors, m_loose};
         gpu::RecordResidentUploads(list, tables);
     }
 
@@ -194,7 +203,8 @@ namespace bicameral::sim {
         list->SetComputeRootUnorderedAccessView(ROOT_LAYOUT.DebugRingIndex(), debugRing);
         const std::array<ID3D12Resource*, SRV_COUNT> tables = {
             m_before.buffer.Get(),    m_gridUnits.buffer.Get(),          m_neighborStarts.buffer.Get(),
-            m_neighbors.buffer.Get(), m_tileNeighborStarts.buffer.Get(), m_tileNeighbors.buffer.Get()};
+            m_neighbors.buffer.Get(), m_tileNeighborStarts.buffer.Get(), m_tileNeighbors.buffer.Get(),
+            m_loose.buffer.Get()};
         for (uint32_t i = 0; i < tables.size(); ++i)
             list->SetComputeRootShaderResourceView(ROOT_LAYOUT.SrvIndex(i), tables[i]->GetGPUVirtualAddress());
     }
@@ -210,7 +220,8 @@ namespace bicameral::sim {
                                   .maxExponent = static_cast<uint32_t>(m_shape.maxExponent),
                                   .cap = static_cast<uint32_t>(cap),
                                   .pass = pass,
-                                  .beforeWord = event * m_wordsPerEvent};
+                                  .beforeWord = event * m_wordsPerEvent,
+                                  .coupled = m_coupled ? 1u : 0u};
         list->SetPipelineState(m_pipelines[pipeline].Get());
         list->SetComputeRoot32BitConstants(ROOT_LAYOUT.RootConstantIndex(), ROOT_CONSTANT_COUNT, &constants, 0);
         list->Dispatch(groups, 1, 1);
@@ -315,7 +326,8 @@ namespace bicameral::sim {
         for (ID3D12Resource* resource :
              {m_before.buffer.Get(), m_gridUnits.buffer.Get(), m_neighborStarts.buffer.Get(), m_neighbors.buffer.Get(),
               m_caps.Get(), m_state.Get(), m_after.Get(), m_counters.Get(), m_windowA.Get(), m_windowB.Get(),
-              m_tileChanged.Get(), m_tileNeighborStarts.buffer.Get(), m_tileNeighbors.buffer.Get()})
+              m_tileChanged.Get(), m_tileNeighborStarts.buffer.Get(), m_tileNeighbors.buffer.Get(),
+              m_loose.buffer.Get()})
             bytes += resource->GetDesc().Width;
 
         return bytes;

@@ -332,6 +332,9 @@ namespace bicameral::sim {
         std::vector<uint32_t> gridUnits;       // 格子のセル(x が最も速い)→ 単位の並びの番号(無ければ NO_TIME_TREE_UNIT)
         std::vector<uint32_t> neighborStarts;  // 単位ごとの隣の始まり(units + 1 個)
         std::vector<uint32_t> neighbors;       // 面でつながる単位の並びの番号
+        // 単位ごとの隣の差 1 段を許す最も長い e(境の面の案 (c)・T-1271。TimeTreeLayout::looseExponent を並びの番号で)。
+        // 空 = どの単位も maxExponent(border = None の今の形。隣の差はいつも 1 段)
+        std::vector<int32_t> looseExponents;
     };
 
     TimeTreeChooseTables MakeTimeTreeChooseTables(const TimeTreeSetup& setup, const TimeTreeLayout& layout);

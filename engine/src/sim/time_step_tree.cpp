@@ -1450,7 +1450,7 @@ namespace bicameral::sim {
                                                    [&](uint32_t unit) { return layout.mates[unit].empty(); });
         tables.supported = setup.windowLevel0Cells > 0 && setup.select == TimeTreeSelect::Previous &&
                            !setup.frontBuffer && setup.frontBufferUnits == 0 && setup.maxExponent <= 14 && matesFree &&
-                           setup.border == TimeTreeBorder::None;
+                           (setup.border == TimeTreeBorder::None || setup.border == TimeTreeBorder::Coupling);
         tables.units = static_cast<uint32_t>(layout.units.size());
         tables.gridSize = layout.window.size;
         tables.radius = layout.window.radius;
@@ -1470,6 +1470,12 @@ namespace bicameral::sim {
                 tables.neighbors.push_back(order[neighbor]);
 
             tables.neighborStarts.push_back(static_cast<uint32_t>(tables.neighbors.size()));
+        }
+
+        // 案 (c)(T-1271): 隣の差 1 段を許す最も長い e。法則の係数と木の形だけで決まる表(状態を読まない)
+        if (setup.border == TimeTreeBorder::Coupling) {
+            for (const uint32_t unit : layout.units)
+                tables.looseExponents.push_back(layout.looseExponent[unit]);
         }
 
         return tables;

@@ -1900,11 +1900,13 @@ namespace {
         Log(Channel::Sim, Level::Info, "境の比べ: {} 刻み・{} セル・{:.1f} 秒", ticks, cells, seconds);
     }
 
-    void CheckChooseDump(const Material& material, const Ignition& ignition) {
+    // scene=night なら池(静かな夜。結びつきの強い物で案 (c) の隣の差 0 段が効く場面。T-1271)
+    void CheckChooseDump(const Material& material, const Profile& profile, uint64_t defaultTicks,
+                         const Ignition& ignition) {
         TimeTreeSetup setup = MakeSetup(material, TimeStepRule::Change);
         setup.groupShift = groupShift;
-        const TimeTreeWorld world = MakeWorld(setup, material, sceneShape, Ambient(material.groundKelvin));
-        const uint64_t ticks = sceneTicks != 0 ? sceneTicks : ignition.tick + 4096;
+        const TimeTreeWorld world = MakeWorld(setup, material, sceneShape, profile);
+        const uint64_t ticks = sceneTicks != 0 ? sceneTicks : defaultTicks;
         const uint32_t every = mergeDumpEvery != 0 ? mergeDumpEvery : 16;
         ChooseTrace bulk = TraceChoose(setup, material, world, ticks, ticks, ignition, every);
         bulk.file.tables = MakeTimeTreeChooseTables(setup, world.layout);
@@ -1923,6 +1925,11 @@ namespace {
             bulk.file.tables.gridSize[0], bulk.file.tables.gridSize[1], bulk.file.tables.gridSize[2],
             bulk.file.tables.radius, bulk.file.tables.neighbors.size(), bulk.truncated, bulk.truncatedEvents,
             bulk.limited, bulk.limitedEvents, bulk.hash);
+        // 案 (c) の表: 隣の差 1 段を許す e が上限より短い単位の数(0 なら表が効かない場面)
+        const auto tight = std::ranges::count_if(bulk.file.tables.looseExponents,
+                                                 [&](int32_t e) { return e < setup.maxExponent; });
+        Log(Channel::Sim, Level::Info, "刻みを選ぶ段: 境 {}・案 (c) の表 {} 単位・上限より短い {} 単位", borderMode,
+            bulk.file.tables.looseExponents.size(), tight);
         if (!dumpPath.empty())
             Expect(test::WriteTimeStepChoose(dumpPath, bulk.file), "刻みを選ぶ段: ファイルに書けた");
     }
@@ -2054,8 +2061,12 @@ namespace {
         if (part == "span-dump")
             CheckSpanDump(fire, fireIgnition);
 
-        if (part == "choose-dump")
-            CheckChooseDump(fire, fireIgnition);
+        if (part == "choose-dump") {
+            if (mergeNight)
+                CheckChooseDump(pond, PondProfile(WorldLength(sceneShape)), NIGHT_TICKS / 7, {});
+            else
+                CheckChooseDump(fire, Ambient(fire.groundKelvin), FIRE_IGNITION_TICK + 4096, fireIgnition);
+        }
 
         if (part == "night-trace")
             CheckNightTrace(pond);
