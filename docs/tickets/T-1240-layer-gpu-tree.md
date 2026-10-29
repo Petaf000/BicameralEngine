@@ -1,6 +1,6 @@
 # T-1240 GPU の層: 要求の処理(細かくする・粗くする・畳む・広げる)・一様の枠の層・溢れの成分の層
 
-- Status: Todo(T-1221 から分けた。T-1188〔wt2 の multires_tree・gpu_multires〕の後)
+- Status: Doing(7 の 1 まで。T-1221 から分けた。T-1188〔wt2 の multires_tree・gpu_multires〕の後)
 - 種類: 工学
 - PC: 必須(GPU)
 - 見積もり: チャット 2 回分(要求の処理 / 一様の枠と溢れ)
@@ -85,3 +85,19 @@ T-1221 の 1 段目は、層の頁を GPU に置き、刻みの段の後に層�
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-10-29(wt3・T-1221 の作業役): T-1221 から分けた。
 - 2026-10-29 wt2(作業役): 設計の詰め(上の節)。u4 に結ぶ・頁の索引 + 空きのスタック・段ごとの配りの表・尽きた時は断る(仮)・T-1252 段 2 との順。コードは未着手(t-1189 の仕上げに時間を使った)。
+- 2026-10-29 wt2(作業役 2): 7 の 1 を実装(c8b0b91a)。置き場の並びを [頁の索引][層の頁の持ち主][空きのスタック][空きの数][足りなかった数][要求ごとの割り当て][層の頁] に(common/multires_layers.hlsli)。
+  道具は新しい sim/multires_layer_access.hlsli(u4 = g_layers・g_external0 = 層の頁の数・g_external1 = セルの頁の数)。TreeRelease が返す頁の層の頁を返す(中身を 0 にして積む)。
+  TreeFoldCheck は層の頁を持つ頁を畳まない(仮。層ごと畳むのは 7 の 3)。GpuMultires::BindLayers / RestoreExternal で要求の処理・畳むの間は u4 = 層の置き場。
+  層を合わせる段は層の頁の全部に投げ、空いた層の頁は飛ばす。release ビルド警告 0・dxil_alloca_check・multires_layers 合格。GPU の組(下の引き継ぎ)は流した。
+
+## 引き継ぎメモ(2026-10-29 wt2 作業役 2)
+- 済み: 7 の 1(並び・像・層を合わせる段・頁を返す時に層の頁を返す)。**細かくする・粗くする・畳む・広げるはまだ層を配らない**(前と同じ「層が消える」側に倒れる。前は持ち主の印で 0 にしていた)。
+- 次(7 の 2・細かくする): TreeAllocate で、許可した細かくする要求ごとに「層の頁が要る段の数」を層の空きのスタックから要求の順のプレフィックス和で取る
+  (MrLayerRequestAddress に始まりを書く。親の頁が層の頁を持つ時だけ・鎖の段はどれも親から写すので最初の段が層を持てば全部の段が要る)。足りなければ要求を MR_STATUS_NO_SPACE に・
+  MrLayerShortageAddress に数える(仮【エンジン】。TreeAllocate は 1 グループなので頁・枠の許可と同じ累積和に 4 つ目の値を足す。InclusiveScan は 3 つなので groupshared を 1 本足す)。
+  RefineLevel(multires_graph.hlsl): 子の頁の層の頁 = 取った番号・頁の索引と持ち主を書き、スレッド t が親の層の頁のセル MrParentCellOfChild の組 8 つを子のセル t へ写す(CopyLayerEntry)。
+  影の道(RecordRefineShadow)も同じ形(影の頁の古い層は残さない = 影の頁が前に層の頁を持っていれば先に返す)。CPU は CopyCellToPage(multires_cell_store.cpp)。
+  Work Graph の止まり(T-0397・alloca)に注意: 組は g_layers から直に読んで直に書く(構造体の配列に持たない)。
+- 試験は gpu_multires_layers に「本物の鎖で細かくする」場面(test::MultiresRequestsAt の Real・根に層)を足す。CPU は test::StepMultiresScene。
+- GPU の組(release・RTX): gpu_multires・gpu_multires_warp・gpu_multires_quiet・gpu_multires_layers・gpu_multires_layers_warp・gpu_multires_near_fold・gpu_lab_box・gpu_tree_refine_placement の 8 本合格(2026-10-29)。archmap --check OK。
+- t-1189・T-1252 段 1 は main に入った(2026-10-29 確かめた)。このブランチは rebase main 済み。T-1252 段 2(GPU)はまだ始めていない。
