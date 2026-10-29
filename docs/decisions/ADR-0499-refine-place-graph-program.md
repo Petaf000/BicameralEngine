@@ -39,7 +39,10 @@ T-1188 で、木を細かくする段(multires_graph.hlsl の RefineLevel)に「
 ## 結果(数値は docs/perf.md)
 - release・RTX 3070 Ti・HW と WARP: gpu_multires(全部。前からの不具合の implicit 系・near_fold を除く)・gpu_tree_refine_placement・
   gpu_placement_refine・gpu_lab_box が合格。CPU とビット一致。
-- 要求 1 つを処理する段の GPU の時間: (T-1188 の測り。下の perf.md の行)
+- 要求を処理する段の GPU の時間(2026-10-29・main daba09c9 の上に rebase した後・release・RTX 3070 Ti・8 回の最小。perf.md の同じ日の行):
+  置かれ方なし(既定のプログラム)1 段 0.071 ms / 置かれ方 1 段 0.128〜0.137 ms / 置かれ方 2 段の鎖 0.175〜0.219 ms(詰まり 60〜100 %)。
+  置かれ方の段は八分の一 1 つで +0.06〜0.07 ms(512 スレッドのグループ 1 つの固定費が支配)。大きい世界で要求の鎖が多い時の費用は未測。
+- rebase 後(同じ日)も HW の gpu_multires・stress・activity・warp・gpu_tree_refine_placement(HW・WARP)・gpu_placement_refine(HW・WARP)が合格。
 
 ## 影響
 - 作り手から見て: 変わらない(置かれ方の世界の答えは CPU リファレンスと同じ)。

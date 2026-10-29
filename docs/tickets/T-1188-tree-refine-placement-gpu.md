@@ -76,6 +76,11 @@ T-1176 の CPU リファレンス(PlaceTreeCell・PlaceRefineOctantCells)と同�
 - 測り: gpu_tree_refine_placement に要求を処理する段の GPU の時間(8 回の最小)を足した(docs/perf.md)。
 - 層(T-1220・T-1221・T-1236)を持つセルの置かれ方の GPU は無い(CPU は層を分けて配る)。層を持つ世界で置かれ方を GPU で使うと食い違う → T-1240(GPU の木の段の層)で。
 
+## 引き継ぎ(2026-10-29 wt2・作業役 3 回目)— **マージ可**
+- main daba09c9 の上に rebase(main の差は HANDOFF・NEXT・QUESTIONS だけで衝突なし)。release のビルドは警告 0(20261029-010655。1 回目は link の「ファイルが別のプロセスで使われている」で 3 本落ち、そのまま流し直して通った)。
+- 引き継ぎの 19 本を 3 組で流して**全部合格**(20261029-011759・011827・011915。lab_box は前から Disabled〔T-1155 待ち〕で Not Run): tree_refine_placement・placement_refine・reaction_package・gpu_tree_refine_placement(HW・WARP)・gpu_placement_refine(HW・WARP)・gpu_multires・stress・warp・activity・quiet・layers・uniform・wide_many・gpu_lab_box(HW・WARP)・gpu_phase_layer。T-1211 の相の層・T-1236 の層の置き口が入った main の上でも gpu_lab_box・gpu_tree_refine_placement は変わらない(要約は前と同じ形で一致)。
+- 費用(HW・RTX 3070 Ti・8 回の最小): SAME 0.071 ms・置かれ方 1 段 0.128〜0.137 ms・2 段の鎖 0.175〜0.219 ms → docs/perf.md・ADR-0499 の「結果」。`archmap --check` OK。
+
 ## 引き継ぎ(2026-10-29 wt2・作業役 2 回目)
 - 状態: ブランチ t-1188-refine-gpu-2(main 20799ae7 の上に rebase 済み)。**rebase の後の試験はまだ**(会話の入れ物の再起動で止めた)。
   rebase 前(main 140f2f0c の上)の release は警告 0 で、上の作業ログの試験が合格。rebase で tests/CMakeLists.txt が gpu_phase_layer_test(T-1211)と重なり、
