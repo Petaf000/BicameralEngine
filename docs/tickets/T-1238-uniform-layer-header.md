@@ -1,6 +1,6 @@
 # T-1238 一様の層の置き場の頭(全部の枠に 48 B)を縮める
 
-- Status: Doing(2026-10-29 wt3。WIP: 書いた・release のビルドは未確認・試験は未)
+- Status: Done(2026-10-29 wt3)
 - 種類: 工学
 - PC: 必須(CPU)
 - 見積もり: チャット 0.5 回分
@@ -12,9 +12,9 @@
 枠ごとの番号(4 B)+ 層のある枠だけの組の表に替え、層の無い世界の費用を 4 B × 枠にする。
 
 ## 完了条件(チェックできる形で)
-- [ ] 枠ごとの番号 + 組の表(層のある枠だけ)。読む・書く・消す口(LoadUniformLayers・SetUniformLayers・ClearUniformLayers)は今の形のまま
-- [ ] 要約・保存点・検査(HashUniformLayers・CountLayerMisfits)は今とビット単位で同じ(multires_layers・multires_state)
-- [ ] 枠のバイトを docs/perf.md に(前後)
+- [x] 枠ごとの番号 + 組の表(層のある枠だけ)。読む・書く・消す口(LoadUniformLayers・SetUniformLayers・ClearUniformLayers)は今の形のまま
+- [x] 要約・保存点・検査(HashUniformLayers・CountLayerMisfits)は今とビット単位で同じ(multires_layers・multires_state)
+- [x] 枠のバイトを docs/perf.md に(前後)
 
 ## メモ・参考
 - 置き場: engine/src/sim/multires_nest.h の MultiresUniformLayers・engine/src/sim/multires_cell_store.cpp。
@@ -27,7 +27,9 @@
   multires_tree.cpp の細かくする所 1 か所・gpu_multires_layers.cpp の断る検査)を直した。読む・書く・消す口(LoadUniformLayers・SetUniformLayers・ClearUniformLayers)の形は同じ。
   試験 multires_layers に TestUniformLayerStore(組の持ち方・使い回し・費用のログ)を足した。
 
-## 引き継ぎ(2026-10-29)
+- 2026-10-29(wt3・T-1238 の作業役): rebase した t-1241(a4f51560)の上に載せ直した。release のビルド警告 0・multires_layers・multires_state・multires_sparse・tree_refine_placement・world_layout 合格・archmap OK。docs/perf.md に「層の無い枠 1 つ 48 B → 4 B」。
+
+## 引き継ぎ(2026-10-29。済んだ。上の作業ログの最後の行)
 - 状態: 1 回目の release ビルドは C4267(multires_nest.cpp:721 の Reset に size_t)だけで落ちた → Reset を size_t に直して 2 回目(runner/logs/20261028-232720-build)を投げたところで止めた(結果は未確認)。
 - 次の一手: (1) release ビルド・警告 0 を確かめる (2) `test -Filter '^(multires_layers|multires_state|multires_sparse|tree_refine_placement|world_layout)$'`
   (要約・保存点がビット単位で同じなことは既存の試験が見る) (3) 試験のログの「一様の枠の層の置き場 層の無い枠 1 つ 4 B(前は 48 B)」を docs/perf.md に 1 行
