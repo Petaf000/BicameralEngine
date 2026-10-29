@@ -22,10 +22,12 @@ int32_t HaloFullness(int32_t level, int64_t originX, int64_t originY, int64_t or
 
     const uint32_t index = MrCellIndex((uint32_t)(cell.x - offset.x), (uint32_t)(cell.y - offset.y),
                                        (uint32_t)(cell.z - offset.z));
-    const MrBlock block = g_blocks[slot];
-    if (block.children[MrOctantOfCell(index)] != MR_NO_BLOCK)
+
+    // 子はバッファから直に読む(読んだ構造体の配列を動的な添字で読むと局所の配列になる。T-0397・T-1233)
+    if (g_blocks[slot].children[MrOctantOfCell(index)] != MR_NO_BLOCK)
         return MR_HALO_ABSENT;
 
+    const MrBlock block = g_blocks[slot];
     const uint32_t address = MrIsUniform(block) ? slot : PageCellAddress(block.page, index);
 
     return (int32_t)PlaceFullnessAt(address);
