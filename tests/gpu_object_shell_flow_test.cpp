@@ -388,8 +388,11 @@ namespace {
         if (list == nullptr)
             return false;
 
+        // 写し元は 256 バイト以上に切り上がる(CreateFilledUpload)ので、CopyResource(同じ大きさの 2 つの間だけ)ではなく UAV の大きさだけ写す
+        // (数え上げの欄 40 バイトで大きさが食い違い、HW は通るが WARP はデバイスを失った。T-1284)
         for (size_t i = 0; i < gpuState.uavs.size(); ++i)
-            list->CopyResource(gpuState.uavs[i].Get(), gpuState.uploads[i].Get());
+            list->CopyBufferRegion(gpuState.uavs[i].Get(), 0, gpuState.uploads[i].Get(), 0,
+                                   gpuState.uavs[i]->GetDesc().Width);
 
         gpu::RecordResidentUploads(list, gpuState.srvs);
 
