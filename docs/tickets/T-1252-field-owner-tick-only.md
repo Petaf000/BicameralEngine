@@ -68,3 +68,6 @@
   multires_wide・multires_layers・multires_activity・multires_quiet・multires_uniform・multires_graded・window_lab・window_lab_blank・window_lab_compare 合格(新しい印の欄が無い世界は今と同じ)。
   **warm_start_save が 1 件落ちた**: 「支え 片持ち梁 16 × 4 m 1 つの系: 向きの欄を 0 にしても答えが変わらない」(C の確かめ。A・B は合格)。この仕事は支えの法則と温めた始まりの欄の道に触っていない
   (欄は導かれる値・SAME のまま、細かく/粗くを通らない)。最後に合格したのは wt5 の 2026-10-28 20:19 で、その後 main に T-1207(support_law)・T-1133(support_law)が入った。main でも落ちるかは未確認(司令塔が main で warm_start_save を 1 本流して確かめる)。
+- 2026-10-29(本体 18 回目・マージ): warm_start_save の落ちはこの仕事のせいではなかった。原因は T-1206(440ddf8b。固定した面を面の点の形に)で、その後は保存点 20 の刻みで持つ向きを捨てても答えが変わらない(試験が弱くなった)。main の 8f483c47 で試験の保存点を 10 に(2・5・10・15 では捨てるとずれる)。
+  rebase main(NEXT・perf の衝突は両方残した)→ release ビルド警告 0 → field_owner・multires・multires_state・multires_sparse・field_storage・placement_refine・tree_refine_placement・multires_uniform・window_lab・warm_start_save・float_check 5 本 合格・archmap --check OK → main へ --no-ff。
+  **段 1 の残り**(セルの真実を書く道を 1 つにまとめて busyTick を書く所)は T-1228 段 2 と一緒に(段 2 の GPU は wt2)。Status は段 1 の主な形が main に入った状態のまま In Progress。
