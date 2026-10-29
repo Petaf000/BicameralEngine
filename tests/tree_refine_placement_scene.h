@@ -114,4 +114,66 @@ namespace bicameral::test::tree_place {
         return world;
     }
 
+    // --- 端の場面(T-1189): 隣のブロックの列を読む ---
+    // 根 A(原点 0)の右に根 B(x = 8)、下に根 C(y = −8)と D(x = 8・y = −8)。A・B の段 y = 0 は粒の斜面(詰まりが世界の x とともに
+    // 5 % → 95 % に上がる)、上は空気。C・D の一番上の段 y = 7 は詰まりが x とともに 95 % → 20 % に下がる粒、下は詰まり切る
+    // (A の端の列 x = 7 の表面は x とともに上がる = 傾きが出る)。要求 R1 は A の八分の一 1(x = 4〜7。B と C に接する)を、
+    // R2 は B の八分の一 0(A に接する)を細かくする。B・C が無ければ A の端の列は「隣が無い」(傾き 0・下は詰まり切る)と読む。
+    inline RxCell EdgeSlopeCell(const Materials& materials, int64_t worldX, uint32_t y, bool below) {
+        std::vector<sim::SpeciesAmount> amounts = {
+            {.species = materials.table.SpeciesId("oxygen"), .amount = 1067000},
+            {.species = materials.table.SpeciesId("nitrogen"), .amount = 4013000}};
+        uint32_t grainPercent = 0;
+        if (below)
+            grainPercent = y == 7 ? 95 - (uint32_t)(worldX * 5) : 100;
+        else if (y == 0)
+            grainPercent = 5 + (uint32_t)(worldX * 6);
+
+        if (grainPercent != 0)
+            amounts.push_back(
+                {.species = materials.grain, .amount = AmountOfPercent(grainPercent, GRAIN_MOLAR_VOLUME)});
+
+        std::ranges::sort(amounts, {}, &sim::SpeciesAmount::species);
+
+        return sim::MakeReactionCell(materials.table, amounts, ROOM_MILLIKELVIN);
+    }
+
+    inline std::vector<RxCell> EdgeRootCells(const Materials& materials, int64_t originX, bool below) {
+        std::vector<RxCell> cells;
+        for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
+            cells.push_back(EdgeSlopeCell(materials, originX + MrCellX(index), MrCellY(index), below));
+
+        return cells;
+    }
+
+    // R1 = A の八分の一 1・R2 = B の八分の一 0(どちらもレベル 1 の点)
+    inline MrRequest EdgeRequestA() {
+        return MrMakeRequest(MR_REQUEST_REFINE, 1, 9, 1, 1);
+    }
+
+    inline MrRequest EdgeRequestB() {
+        return MrMakeRequest(MR_REQUEST_REFINE, 1, 17, 1, 1);
+    }
+
+    // neighbors = B・C・D を置くか。requests = 処理する要求(空なら細かくしない)。child = R1 の子(レベル 1・原点 x = 8)
+    inline World MakeEdgeWorld(const Materials& materials, bool neighbors, std::span<const MrRequest> requests) {
+        World world{.nest = sim::MakeMultiresNest(MakeMultiresCapacity(materials.table, 16, 0, 16))};
+        world.root = sim::PlaceRootBlock(world.nest, 0, 0, 0, EdgeRootCells(materials, 0, false));
+        if (neighbors) {
+            sim::PlaceRootBlock(world.nest, 8, 0, 0, EdgeRootCells(materials, 8, false));
+            sim::PlaceRootBlock(world.nest, 0, -8, 0, EdgeRootCells(materials, 0, true));
+            sim::PlaceRootBlock(world.nest, 8, -8, 0, EdgeRootCells(materials, 8, true));
+        }
+
+        sim::EnableRefineCellPlacement(world.nest, materials.table);
+        if (requests.empty())
+            return world;
+
+        sim::SubmitRequests(world.nest, requests);
+        sim::ProcessRequests(world.nest);
+        world.child = sim::LookupBlock(world.nest, 1, 8, 0, 0);
+
+        return world;
+    }
+
 }  // namespace bicameral::test::tree_place
