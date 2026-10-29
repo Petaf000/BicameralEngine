@@ -586,6 +586,7 @@ void PressureColour(ShellBox box, uint32_t thread, uint32_t colour, uint32_t slo
 // 粗い段: 2 × 2 × 2 をまとめる(奇数の端は 1 つ)。一番粗い段はどの向きも 2 以下(赤黒 16 回)。段の大きさは箱の大きさから毎回数える(GetDimensions を使わない)。
 // 赤黒・残り・まとめる・戻すはグループの同期だけで回す(再帰を使わず、下りの回し → 一番粗い段 → 上りの回し)。
 // 2 本目: 段 0 の値は小さい箱なら groupshared に借りる(MgFineShared)・一番粗い段は 1 波で(MgCoarsestWave)・粗い段の重みは V 字 1 回目だけ作る。
+// T-1285: V 字の中の同期はグループの範囲(MgSync)。小さい段を全部 1 波で回す形・段 0 の丸写しをやめる形は測って採らなかった(runner/t1285/)。
 
 FX_CONST uint32_t OH_MG_FINE_BITS = 8;           // ① ② の細かい単位(Ψ × 2^8)
 FX_CONST int64_t OH_MG_FINE_SCALE = 16777216;    // 残り(Q16)を細かい単位の右辺に: 65536 × 2^8
@@ -693,6 +694,12 @@ int64_t MgNeighbourSum(uint32_t begin, uint3 size, uint3 c, OhShellMultigrid vox
     return sum;
 }
 
+// 多重格子の中の同期(T-1285): 作業場 g_multigrid・g_voxelWork の物の領域は同じグループだけが読み書きするので、
+// 書き込みの見える化はグループの範囲で足りる(装置の範囲の AllMemoryBarrierWithGroupSync より待ちが短い)
+void MgSync() {
+    Barrier(UAV_MEMORY | GROUP_SHARED_MEMORY, GROUP_SCOPE | GROUP_SYNC);
+}
+
 // 赤黒 1 回(段が作業場にある時。色ごとに同期)。値 = (右辺 + 隣の和)÷ 重みの和(0 の向きに切る。逆数の掛け算は厳密)
 // その色のボクセルだけを回す(行ごとに x を 2 つおき。PressureColour と同じ並べ方。色ごとの答えは回す順によらない)
 void MgSweep(uint32_t begin, uint3 size, uint32_t thread, bool onShared) {
@@ -715,7 +722,7 @@ void MgSweep(uint32_t begin, uint3 size, uint32_t thread, bool onShared) {
             MgStoreValue(begin, v, onShared, sum < 0 ? -quotient : quotient);
         }
 
-        AllMemoryBarrierWithGroupSync();
+        MgSync();
     }
 }
 
@@ -940,7 +947,7 @@ void MgCycle(ShellBox box, uint32_t thread, bool withWeights) {
         MgLevelOf(box, level + 1, coarseSize, coarseBegin);
         MgSweeps(fineBegin, fineSize, OH_MG_SMOOTH_SWEEPS, thread, fineShared && level == 0);
         MgCoarsen(fineBegin, fineSize, coarseBegin, coarseSize, thread, withWeights, fineShared && level == 0);
-        AllMemoryBarrierWithGroupSync();
+        MgSync();
     }
 
     uint3 coarsestSize;
@@ -953,7 +960,7 @@ void MgCycle(ShellBox box, uint32_t thread, bool withWeights) {
     if (!inWave)
         MgSweeps(coarsestBegin, coarsestSize, OH_MG_COARSEST_SWEEPS, thread, false);
 
-    AllMemoryBarrierWithGroupSync();
+    MgSync();
     for (uint32_t up = levels - 1; up > 0; --up) {
         uint3 fineSize;
         uint32_t fineBegin;
@@ -962,7 +969,7 @@ void MgCycle(ShellBox box, uint32_t thread, bool withWeights) {
         MgLevelOf(box, up - 1, fineSize, fineBegin);
         MgLevelOf(box, up, coarseSize, coarseBegin);
         MgProlongAdd(fineBegin, fineSize, coarseBegin, coarseSize, thread, fineShared && up == 1);
-        AllMemoryBarrierWithGroupSync();
+        MgSync();
         MgSweeps(fineBegin, fineSize, OH_MG_SMOOTH_SWEEPS, thread, fineShared && up == 1);
     }
 }
@@ -1025,10 +1032,10 @@ void MgFinishToPotential(ShellBox box, uint32_t thread) {
 // ① ② ③ の解き始め(グループの全スレッドで呼ぶ。前後に同期)
 void MgSolveStart(ShellBox box, uint32_t thread) {
     MgPrepareFine(box, thread);
-    AllMemoryBarrierWithGroupSync();
+    MgSync();
     MgCycle(box, thread, true);
     MgCenterRhs(box, thread);
-    AllMemoryBarrierWithGroupSync();
+    MgSync();
     MgCycle(box, thread, false);
     MgFinishToPotential(box, thread);
 }
@@ -1272,7 +1279,7 @@ void WakeChanged(OhObject object, ShellBox box, uint32_t thread, uint64_t tick, 
         // 解き始めを多重格子で(T-1222。g_pressureMode はルート定数なのでグループの全スレッドが同じ道を通る)
         if ((g_pressureMode & OH_PRESSURE_MULTIGRID) != 0 && (g_stageMask & OH_STAGE_PRESSURE) != 0) {
             MgSolveStart(box, thread);
-            AllMemoryBarrierWithGroupSync();
+            MgSync();
         }
 
         // 圧力の値が groupshared なら、反復の間は groupshared の同期だけ(作業場の読みは反復の前に書いた値だけ)
