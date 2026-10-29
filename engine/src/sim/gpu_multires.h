@@ -320,8 +320,15 @@ namespace bicameral::sim {
         void RecordWideDeferred(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
         void RecordWideBig(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
         void StampStage(ID3D12GraphicsCommandList10* list);
-        // 層を合わせる段(T-1221。層の頁を持たなければ何もしない): u4 に層の置き場を結び、使った層の頁のセルの層を付け替える
+        // 層を合わせる段(T-1221。層の頁を持たなければ何もしない): u4 に層の置き場を結び、層の頁のセルの層を付け替える
         void RecordLayerReconcile(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
+        // 外のバッファの口(u4・u5)と定数の結び先(T-1240: 木の段の間は u4 に層の置き場を結ぶ)
+        struct ExternalBinding {
+            std::array<D3D12_GPU_VIRTUAL_ADDRESS, 2> views{};
+            std::array<uint32_t, 4> constants{};
+        };
+        [[nodiscard]] ExternalBinding BindLayers();
+        void RestoreExternal(const ExternalBinding& saved);
         [[nodiscard]] uint64_t ActivityBytes() const;
         [[nodiscard]] std::vector<std::byte> MakeActivityList(uint32_t list, std::span<const uint32_t> slots) const;
         void SetTick(uint64_t worldSeed, uint64_t tick);
@@ -413,7 +420,7 @@ namespace bicameral::sim {
 
         // --- セルの成分ごとの層の量(T-1221。GpuMultiresOptions::layerPages。並びは common/multires_layers.hlsli)---
         uint32_t m_layerCapacity = 0;  // 層の頁の数(0 = 層を持たない)
-        uint32_t m_layerUsed = 0;      // 写した時に使った層の頁の数(段はこの数だけグループを投げる)
+        uint32_t m_layerUsed = 0;      // 写した時に使った層の頁の数(0 なら層を合わせる段を投げない)
         ComPtr<ID3D12PipelineState> m_layerPipeline;
         ComPtr<ID3D12Resource> m_layerBuffer;
         ComPtr<ID3D12Resource> m_layerUpload;

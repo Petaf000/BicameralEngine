@@ -7,7 +7,8 @@
 //   3. まとめて刻む: 1 本のリストで写してから何刻みも刻み、最後に 1 回だけ読み戻して比べる(層が VRAM で刻みをまたいで続く)
 //   4. 層の無い場面: 層の頁を持つ GPU でも、層の無い世界は今とビット単位で同じ(CPU と一致)
 // 時間(WARP では測らない): 層のある場面の 1 刻み(全部を刻む)を層の頁あり・なしで測り、層を合わせる段の分を見る(docs/perf.md)。
-// 場面は tests/multires_test_scene.h の根(要求は出さない: 細かくする / 粗くする時の層の配りは T-1240)。引数は gpu_test_options.h。
+// 場面は tests/multires_test_scene.h の根(要求は出さない: 細かくする / 粗くする時の層の配りは T-1240 の 2 段目から)。引数は gpu_test_options.h。
+#include <algorithm>
 #include <expected>
 #include <format>
 #include <span>
@@ -15,6 +16,7 @@
 #include <string_view>
 #include <vector>
 
+#include "common/multires_layers.hlsli"
 #include "core/log.h"
 #include "core/singleton.h"
 #include "gpu/debug_ring.h"
@@ -166,13 +168,53 @@ namespace {
         return options;
     }
 
+    // 試験の世界の層の置き場の語の数(セルの頁の数 = 観察の枠の頁 + 世界の頁)
+    uint32_t LayerStoreWords(const sim::BakedReactionTable& table) {
+        const sim::MultiresNest nest = MakeScene(table, false);
+
+        return MrLayerStoreWords(static_cast<uint32_t>(nest.cells.pages.size()), LAYER_PAGES);
+    }
+
+    // 像の頁の索引・持ち主・空きのスタックが食い違わないか(層の頁は索引か空きのどちらか 1 つだけにある。T-1240)
+    bool LayerStoreConsistent(std::span<const uint32_t> words, uint32_t pageCount, uint32_t capacity) {
+        std::vector<uint32_t> seen(capacity, 0);
+        for (uint32_t page = 0; page < pageCount; ++page) {
+            const uint32_t layerPage = words[MrLayerIndexAddress(page)];
+            if (layerPage == MR_LAYER_NO_PAGE)
+                continue;
+
+            if (layerPage >= capacity || words[MrLayerOwnerAddress(pageCount, layerPage)] != page)
+                return false;
+
+            ++seen[layerPage];
+        }
+
+        const uint32_t freeCount = words[MrLayerFreeCountAddress(pageCount, capacity)];
+        if (freeCount > capacity)
+            return false;
+
+        for (uint32_t position = 0; position < freeCount; ++position) {
+            const uint32_t layerPage = words[MrLayerFreeAddress(pageCount, capacity, position)];
+            if (layerPage >= capacity || words[MrLayerOwnerAddress(pageCount, layerPage)] != MR_LAYER_NO_PAGE)
+                return false;
+
+            ++seen[layerPage];
+        }
+
+        return std::ranges::all_of(seen, [](uint32_t count) { return count == 1; });
+    }
+
     // --- 1. 写す像(CPU だけ)---
     std::expected<void, std::string> TestImage(const sim::BakedReactionTable& table) {
         sim::MultiresNest nest = MakeScene(table, true);
         const uint64_t before = sim::HashWholeNest(nest);
+        const auto pageCount = static_cast<uint32_t>(nest.cells.pages.size());
         auto image = sim::MakeGpuLayerImage(nest, LAYER_PAGES);
         if (!image || image->used != 1)
             return std::unexpected("像: 層のある頁 1 つを写せない");
+
+        if (!LayerStoreConsistent(image->words, pageCount, LAYER_PAGES))
+            return std::unexpected("像: 頁の索引・持ち主・空きのスタックが食い違う");
 
         sim::ApplyGpuLayerImage(nest, image->words, LAYER_PAGES);
         if (sim::HashWholeNest(nest) != before)
@@ -338,7 +380,7 @@ namespace {
 
             Log(Channel::Gpu, Level::Info,
                 "GPU 時間: 1 刻み(全部を刻む・根 1 頁に層)層の頁あり {:.4f} ms・なし {:.4f} ms(層の置き場 {} B)",
-                *withLayers, *without, uint64_t{LAYER_PAGES} * (2 + (MR_BLOCK_CELLS * RX_MAX_CELL_SPECIES * 3)) * 4);
+                *withLayers, *without, uint64_t{LayerStoreWords(*table)} * sizeof(uint32_t));
         }
 
         if (auto scenes = RunScenes(device->Get(), *queue, *ring, *table); !scenes) {
