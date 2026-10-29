@@ -372,6 +372,10 @@ namespace bicameral::sim {
     // 層を使う世界にする(物質の表の粒の印を持たせる。ADR-0489。層を書く前・刻む前に呼ぶ)
     void EnableCellLayers(MultiresNest& nest, const BakedReactionTable& table);
 
+    // 表の環境の選び(environment.cell_layers。T-1241)を当てる: 使う世界なら EnableCellLayers、使わない世界なら層を使わない形に戻す。
+    // 世界を作る時(と表を差し替えた時)に呼ぶ
+    void ApplyCellLayersChoice(MultiresNest& nest, const BakedReactionTable& table);
+
     // 層が収まらないセルの数(試験・検査用。0 でなければ不具合)
     [[nodiscard]] uint64_t CountLayerMisfits(const MultiresNest& nest);
 

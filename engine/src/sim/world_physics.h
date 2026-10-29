@@ -122,6 +122,11 @@ namespace bicameral::sim {
         // 細かい所の半径と移り目(T-0954。既定は FINE_REGION_*_DEFAULT)
         FineRegion fineRegion;
 
+        // 成分ごとの層を使う世界(T-1241・ADR-0489 の 3。environment.cell_layers。名前は仮)。使う世界では粒の物質の層でない分が舞う粒になる
+        // (多重解像度の木に ApplyCellLayersChoice が当てる)。ベイクは層を書かなかった粒の知らせを、使う世界だけ表の警告に出す。
+        // 既定は使わない(ブランクの世界・今までとビット単位で同じ)
+        bool cellLayers = false;
+
         [[nodiscard]] bool operator==(const WorldPhysics&) const = default;
     };
 

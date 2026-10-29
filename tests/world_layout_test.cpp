@@ -463,6 +463,54 @@ namespace {
         EXPECT(std::memcmp(&plainCell, &layeredCell, sizeof(plainCell)) == 0);
     }
 
+    // --- 層を使う世界(T-1241・ADR-0489 の 3): environment.cell_layers ---
+
+    // Mod の頭に environment.cell_layers = value を足す
+    std::string WithCellLayers(std::string mod, std::string_view value) {
+        const std::string head = "return {";
+        mod.replace(mod.find(head), head.size(), std::format("return {{ environment = {{ cell_layers = {} }},", value));
+
+        return mod;
+    }
+
+    size_t WarningsNaming(const BakedReactionTable& table, std::string_view text) {
+        return (size_t)rng::count_if(
+            table.warnings, [&](const std::string& warning) { return warning.find(text) != std::string::npos; });
+    }
+
+    // 層を書かなかった粒の知らせは組み立てにはいつも残り、表の警告には層を使う世界だけ出る。木には ApplyCellLayersChoice が選びを当てる
+    void TestCellLayersWorld() {
+        const auto plain = BakeWithMod(SandMod("test_sand = 15000000"));
+        const auto layered = BakeWithMod(WithCellLayers(SandMod("test_sand = 15000000"), "true"));
+        const auto off = BakeWithMod(WithCellLayers(SandMod("test_sand = 15000000"), "false"));
+        EXPECT(plain && layered && off);
+        if (!plain || !layered || !off)
+            return;
+
+        // --- 警告: 層を使う世界だけ、知らせ(砂の山の 1 つ)がそのまま 1 回 ---
+        EXPECT(!plain->environment.cellLayers && layered->environment.cellLayers && !off->environment.cellLayers);
+        EXPECT(plain->worldLayout.unsettledGrainNotes == layered->worldLayout.unsettledGrainNotes);
+        EXPECT(WarningsNaming(*plain, "settled_umol") == 0 && WarningsNaming(*off, "settled_umol") == 0);
+        EXPECT(WarningsNaming(*layered, "settled_umol") == 1 && WarningsNaming(*layered, "sand_heap") == 1);
+        for (const std::string& note : layered->worldLayout.unsettledGrainNotes)
+            EXPECT(rng::count(layered->warnings, note) == 1);
+
+        // --- 木に当てる: 使う世界は粒の印を持ち、使わない世界は層を使わない形に戻る ---
+        MultiresNest nest = MakeMultiresNest(test::MakeMultiresCapacity(*layered, 4, 0, 4));
+        EXPECT(!nest.cellLayers.enabled);
+        ApplyCellLayersChoice(nest, *layered);
+        const uint32_t sand = layered->SpeciesId("test_sand");
+        EXPECT(nest.cellLayers.enabled && nest.cellLayers.grain.size() == layered->species.size() &&
+               nest.cellLayers.grain[sand] == 1);
+
+        ApplyCellLayersChoice(nest, *off);
+        EXPECT(!nest.cellLayers.enabled && nest.cellLayers.grain.empty());
+
+        // --- 書き間違い(true / false 以外)は読み込みが名前付きで止める ---
+        EXPECT(FailsWith(WithCellLayers(SandMod(""), "1"), "cell_layers"));
+        EXPECT(FailsWith(WithCellLayers(SandMod(""), "\"on\""), "cell_layers"));
+    }
+
 }  // namespace
 
 int main() {
@@ -473,6 +521,7 @@ int main() {
     TestCellAmountLimits();
     TestFlowAreas();
     TestSettledLayers();
+    TestCellLayersWorld();
 
     std::printf("world_layout_test: %s\n", failureCount == 0 ? "OK" : "FAILED");
 

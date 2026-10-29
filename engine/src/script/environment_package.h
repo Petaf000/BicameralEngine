@@ -8,6 +8,7 @@
 //       gravity_um_per_s2 = 9806650,    -- 重力の強さ(µm/s²)。0〜100 m/s²
 //       sound_speed_mm_per_s = 340000,  -- 気体の音速の基準(mm/s)。0〜気体の小刻みの安定の上限(既定の小刻み 24 で 432 m/s)
 //       gas_pressure_speed = "instant", -- 気体の圧力の伝わる速さ: "sound"(本物の音速。書かない時)か "instant"(最速。T-0804)
+//       cell_layers = true,             -- 成分ごとの層を使う世界(true / false。書かない時は使わない。T-1241・ADR-0489 の 3。名前は仮)
 //       atmosphere_surface_pressure_pa = 101325,  -- 基準の大気の一番低い点の圧力(Pa。ほかの高さはエンジンが静水圧で出す)
 //       atmosphere_profile = {                    -- 基準の大気の高さの点の列(低い順。点の間は直線。T-0499・ADR-0182 の改訂)
 //           { height_mm = 0, temperature_mk = 288150, composition = { nitrogen = 780780, oxygen = 209460, ... } },
@@ -50,6 +51,8 @@ namespace bicameral::script {
     constexpr std::string_view ENVIRONMENT_BALANCE_CYCLES_KEY = "balance_cycles";
     // 細かい所の半径と移り目 = { radius_mm, far_leaf_mm, levels_per_doubling }(書かない欄は既定。T-0954。名前は仮)
     constexpr std::string_view ENVIRONMENT_FINE_REGION_KEY = "fine_region";
+    // 成分ごとの層を使う世界 = true / false(書かない = false。T-1241・ADR-0489 の 3。名前は仮)
+    constexpr std::string_view ENVIRONMENT_CELL_LAYERS_KEY = "cell_layers";
     constexpr std::string_view ATMOSPHERE_CATEGORY = "atmosphere";
 
     // 合わせた表から世界の物理の値を作る。分類が無ければブランク(全部 0)。誤りは「パッケージ X: environment.鍵: 何が違うか」。
