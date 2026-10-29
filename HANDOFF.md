@@ -1,8 +1,19 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-30(本体の作業役 19 回目・gpu_object_shell_flow の確かめ・T-1272・wt2 T-1240 7 の 1・wt3 T-1278・wt6 T-1287 を main へ・Q182)
+最終更新: 2026-10-30(本体の作業役 20 回目・この巡目の最後の印。前は 19 回目・gpu_object_shell_flow の確かめ・T-1272・wt2 T-1240 7 の 1・wt3 T-1278・wt6 T-1287 を main へ・Q182)
 
-## この仕事でしたこと(2026-10-30・本体の作業役・19 回目: 確かめ・T-1272・runner/ready の印のマージ)
+## この仕事でしたこと(2026-10-30・本体の作業役・20 回目: この巡目の最後の印のマージ。司令塔のチャットはこの巡目で止めた)
+- **マージ(--no-ff)**: wt5 t-1286-test-copy-size 3c1b1e69(T-1286 Done・試験だけ)/ wt2 t-1240-refine-layers b78e9c89(T-1240 の 7 の 2)/ wt3 t-1279-neighbor-strain-3d 4dc94c70(T-1279 Done・既定 None のまま・ADR-0509 追記 Proposed) / wt6 t-1230-ec-field 6900af0d(T-1230 段 1 + T-1231 の CPU の配り・ADR-0512 Proposed = 司令塔の一旦の決定)。印は runner/ready/done/ へ。
+- 試験(release・警告 0): t-1286 の後 = object_heat・object_heat_nest・object_shell + GPU HW gpu_object_heat・_nest・gpu_object_shell_flow / t-1240 の後 = multires・multires_state・field_owner・multires_layers・dxil_alloca_check + GPU gpu_multires・_quiet・_layers・_layers_warp・gpu_tree_refine_placement / t-1279 の後 = warm_start_save・support_law・support_mixed・support_mixed_neighbor_strain・support_fracture_refine・support_cost・float_check 5 本・dxil_alloca_check + gpu_equilibrium_block(HW) / t-1230 の前(本体で --no-commit のまま・混ざらないセルの今の世界のビット一致)= field_owner・phase_layer・phase_layer_tree・multires 系・support 系・time_step 系 + GPU gpu_multires・_quiet・gpu_phase_layer・gpu_time_step_choose・_span。wt6 の側の残り 14 本(time_step_*・multires_conduction・multires_implicit*・multires_wide・multires_quiet)も wt6 のランナーで合格(1 回目は上限 2 時間に当たり 14 本目で切れていた)。
+- QUESTIONS の Q182 に T-1279 の作り手から見た違いを追記(GPU の解き +14 %・値が変わる場面・答えが「既定」なら変える所)。新しい問いは無い。
+- **司令塔が仮で決めたもの(ユーザー未確認・取り消しやすい)**:
+  - T-1240: 影の鎖は CPU が決めるので断れない → layerPages は影の鎖の分まで持つ約束(gpu_multires.h)。置かれ方で細かくする世界に層がある時は RecordUpload が断る(層の分で配るのは 7 の 4)。層の頁が尽きたら細かくする要求を断って MrLayerShortageAddress に数える(【エンジン】)。
+  - **T-1230(司令塔の一旦の決定・ADR-0512 Proposed のまま)**: 伝導の面の形は案 A を広げた (2)〔部分 2 つまでの片側 + 両側の高さの重なりで組む面の式 + 部分の列。混ざらない面は今の FaceFlow のまま・陰の伝導は混ざったセルを系から外して陽で流す〕。理由 = 横の面で両側の層の高さが違うと、面の向きつきの片側だけでは 4 つの重なりの流れが決まらない。陽で流す時の 0.1 K の予算は未確認(段 2 で測る。超えたら小刻みか 2 未知数の系かを測って決める)。
+- 運転メモ: 本体で `job.py test -h` を打つと引数なしの全試験(debug)が走る(打たない)。止めるのはほかの作業ツリーのランナーから raw で ctest を止める。wt の試験の上限(既定 2 時間)に当たると残りが流れない(result.json の exit が "timeout")。
+- 次の番号は **D-684・ADR-0479・Q184**(本体。今回は使っていない)。T は T-1273・T-1274(使っていない)。
+
+
+## 前の仕事でしたこと(2026-10-30・本体の作業役・19 回目: 確かめ・T-1272・runner/ready の印のマージ)
 - **gpu_object_shell_flow(HW・release)を main で 1 本**: 合格(28 秒)。T-1222 を入れた main で初めて流した。
 - **T-1272(調べ・Done)**: warm_start_save の 1 つの系で、保存点 20 で持つ向きを捨てても同じ答えになるのは**正しい**(不具合ではない)。片持ち梁は刻み 20 頃に整数の釣り合いにほぼ着き、
   持つ向きの大きさが 10 以下・β ≈ 0.094 で β p_前 が Q16 の切り捨てで全部 0 になる(刻み 10 では 767 / 768 の節で効く)。分母 p_前ᵀ r_前 は正で、読み戻しも使われている。直しなし・試験の保存点は 10 のまま(コメントだけ直した)。
