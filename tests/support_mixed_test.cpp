@@ -11,6 +11,7 @@
 // 角の間のセルだけを 0.25 m に分け、違う大きさのセルが絡む段の棒の形 3 つ(① 中心〔既定〕・② 角の場所・置かない)を ④ で比べる
 // (落ちるのは ① のたわみ ±5 %・帳簿・決定性。縁の力は記録だけ = BraceCase)。
 // 引数: [--ticks n](既定 240)[--case n](n 番目の場面だけ。0 から。測り用)[--study](T-1260 の切り分けの場面。記録だけ)
+//   [--pair n](対の負の項に残す粗いセルの硬さ sim::MixedPairMaterial の番号。既定 0 = 無し。T-1261 の研究)
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -45,9 +46,13 @@ namespace {
     constexpr uint64_t COARSE_MM = 500;
     constexpr uint64_t FINE_MM = 250;
 
+    // 対の負の項に残す粗いセルの硬さ(T-1261 の研究。--pair n で全部の場面に掛ける)
+    sim::MixedPairMaterial pairMaterial = sim::MixedPairMaterial::None;
+
     // 解き方: 早く着く形(V 4 回 + 刻みをまたぐ共役勾配。T-1086)で釣り合いまで回す(答えの比べ。着く速さは T-1086)
     sim::SupportOptions Options(sim::MixedBeam beam, sim::MixedBrace brace = sim::MixedBrace::Center) {
         sim::SupportOptions options;
+        options.mixedPairMaterial = pairMaterial;
         options.blocks = {.cycles = 4, .lineSearch = true, .conjugateAcrossTicks = true};
         options.mixedBeam = beam;
         options.mixedBrace = brace;
@@ -531,6 +536,8 @@ namespace {
                 only = std::atoi(arguments[++i]);
             else if (name == "--study")
                 study = true;
+            else if (name == "--pair" && i + 1 < arguments.size())
+                pairMaterial = (sim::MixedPairMaterial)std::atoi(arguments[++i]);
         }
 
         static_assert(FINE_MM * 2 == COARSE_MM);
