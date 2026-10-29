@@ -10,6 +10,7 @@
 // 順番に依存しない理由: 解決と確定は要求ごとに自分の値だけを書き、取り合いは atomic の最小(小さい番号が勝つ)。
 // 割り当てと解放は 1 グループの累積和で、要求の順に枠を配る・積む(ADR-0016)。数える欄は足し算。
 #include "sim/multires_bindings.hlsli"
+#include "sim/multires_layer_access.hlsli"  // 層の置き場(u4。頁を返す時に層の頁も返す。T-1240)
 #ifdef MR_WIDE_CELLS
 #include "sim/multires_wide_access.hlsli"
 
@@ -405,6 +406,11 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
     InterlockedMax(gs_grantedBlocks, gs_blockScan[i]);
     InterlockedMax(gs_grantedFractions, gs_fractionScan[i]);
     InterlockedMax(gs_grantedPages, gs_pageScan[i]);
+
+    // 返す頁の層の頁も返す(CPU の ReleaseAll の ClearPageLayers。層を持たない世界は何もしない。T-1240)
+    if (LayerCapacity() > 0)
+        ReleaseLayerPages(i, pageRelease != 0 ? state.releasePage : MR_NO_PAGE);
+
     GroupMemoryBarrierWithGroupSync();
     if (i != 0)
         return;
@@ -882,6 +888,10 @@ bool FoldsNearly(uint32_t slot, MrBlock block, uint32_t index, MrFoldTolerance t
     //     FoldsExactly はグループで一様な結果)。溢れを使う世界は、溢れのある頁を畳まない(GPU の一様の値はまだインラインだけで、
     //     畳むと溢れを落とす。仮。溢れまで畳むのは T-0312)---
     bool foldable = MrWantsFoldCheck(block, mark);
+
+    // 層の頁を持つ頁はまだ畳まない(層まで一様な時に層ごと畳む CPU の FoldLayeredPage は T-1240 の 3 段目。仮)
+    if (foldable)
+        foldable = LayerPageOf(block.page) == MR_LAYER_NO_PAGE;
 #ifdef MR_WIDE_CELLS
     if (foldable)
         foldable = WideTotal(block.page) == 0;

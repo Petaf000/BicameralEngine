@@ -701,7 +701,7 @@ namespace bicameral::sim {
     }
 
     uint64_t GpuMultires::LayerBytes() const {
-        return uint64_t{MrLayerStoreWords(m_layerCapacity)} * sizeof(uint32_t);
+        return uint64_t{MrLayerStoreWords(static_cast<uint32_t>(PageCount()), m_layerCapacity)} * sizeof(uint32_t);
     }
 
     uint64_t GpuMultires::PageCount() const {
@@ -1208,9 +1208,11 @@ namespace bicameral::sim {
         m_constants.foldTolerance = MrPackFoldTolerance(tolerance);
         m_constants.tickLow = static_cast<uint32_t>(tick);
         m_constants.tickHigh = static_cast<uint32_t>(tick >> 32);
+        const ExternalBinding saved = BindLayers();  // 層の頁を持つ頁はまだ畳まない(T-1240)
         RecordTreePass(list, debugRing, PassFoldCheck, std::max(1u, m_capacity.worldBlocks));
         RecordTreePass(list, debugRing, PassFold, 1);
         RecordWideTrim(list, debugRing);
+        RestoreExternal(saved);
     }
 
     void GpuMultires::RecordWideTrim(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
@@ -1239,7 +1241,8 @@ namespace bicameral::sim {
     }
 
     void GpuMultires::RecordProcessRequests(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
-        m_activityWrite = m_activityCurrent;  // 木を変えたブロックはこの刻みの種へ
+        m_activityWrite = m_activityCurrent;         // 木を変えたブロックはこの刻みの種へ
+        const ExternalBinding saved = BindLayers();  // 頁を返す段が層の頁も返す(T-1240)
         const uint32_t requestGroups = GroupsFor(MR_MAX_REQUESTS, TREE_THREADS);
         RecordTreePass(list, debugRing, PassResolve, requestGroups);
         RecordTreePass(list, debugRing, PassSettle, requestGroups);
@@ -1281,6 +1284,7 @@ namespace bicameral::sim {
         RecordWideTrim(list, debugRing);  // 返した端数の枠・粗くした親の余りの塊(T-0347。段の時間は解放に含める)
         RecordTreePass(list, debugRing, PassClearIndex, GroupsFor(m_capacity.indexEntries, TREE_THREADS));
         RecordTreePass(list, debugRing, PassFillIndex, GroupsFor(m_capacity.worldBlocks, TREE_THREADS));
+        RestoreExternal(saved);
     }
 
     // --- 観察の枠 ---
@@ -1403,24 +1407,35 @@ namespace bicameral::sim {
         RecordLayerReconcile(list, debugRing);  // 刻みの段がセルを書いた後(T-1221)
     }
 
+    // u4 に層の置き場を結ぶ(外のバッファの口。T-0096)。g_external0 = 層の頁の数(0 = 層を持たない世界: 段は u4 を読まない)・
+    // g_external1 = セルの頁の数(sim/multires_layer_access.hlsli)。木の段は u4 をほかに使わない(T-1240)。前の結び先を返す
+    GpuMultires::ExternalBinding GpuMultires::BindLayers() {
+        const ExternalBinding saved{.views = m_externalViews, .constants = m_constants.external};
+        m_externalViews[0] = m_layerCapacity > 0 ? m_layerBuffer->GetGPUVirtualAddress() : 0;
+        m_constants.external = {m_layerCapacity, static_cast<uint32_t>(PageCount()), 0, 0};
+
+        return saved;
+    }
+
+    void GpuMultires::RestoreExternal(const ExternalBinding& saved) {
+        m_externalViews = saved.views;
+        m_constants.external = saved.constants;
+    }
+
     // 層を合わせる段(T-1221): CPU は刻みの段(反応)の中で 1 セルを 1 回書き、書くたびに層を付け替える(T-1220 の洗い出し)。GPU の刻みも
-    // 1 セル 1 回の書き込みなので、刻みの段の後に 1 回合わせればビット一致する。u4 に層の置き場を結び(外のバッファの口。T-0096)、
-    // 終わったら前の結び先に戻す
+    // 1 セル 1 回の書き込みなので、刻みの段の後に 1 回合わせればビット一致する。層の頁は木の段が取る・返すので、層の頁の全部に投げ、
+    // 空いている層の頁は段が飛ばす(T-1240)。写した時に層が 1 つも無かった世界は投げない(GPU だけで層が生まれる道は無い)
     void GpuMultires::RecordLayerReconcile(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
         if (m_layerCapacity == 0 || m_layerUsed == 0)
             return;
 
-        const std::array<D3D12_GPU_VIRTUAL_ADDRESS, 2> savedViews = m_externalViews;
-        const std::array<uint32_t, 4> savedConstants = m_constants.external;
-        m_externalViews[0] = m_layerBuffer->GetGPUVirtualAddress();
-        m_constants.external = {m_layerCapacity, 0, 0, 0};
+        const ExternalBinding saved = BindLayers();
         list->SetComputeRootSignature(m_rootSignature.Get());
         list->SetPipelineState(m_layerPipeline.Get());
         BindRoot(list, debugRing);
-        list->Dispatch(m_layerUsed * MR_LAYER_GROUPS_PER_PAGE, 1, 1);
+        list->Dispatch(m_layerCapacity * MR_LAYER_GROUPS_PER_PAGE, 1, 1);
         UavBarrier(list);
-        m_externalViews = savedViews;
-        m_constants.external = savedConstants;
+        RestoreExternal(saved);
     }
 
     void GpuMultires::RecordWake(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
@@ -1803,7 +1818,7 @@ namespace bicameral::sim {
 
         // --- 層(層の頁を持つ世界は GPU の層が真実。T-1221)---
         if (m_layerCapacity > 0) {
-            std::vector<uint32_t> layerWords(MrLayerStoreWords(m_layerCapacity));
+            std::vector<uint32_t> layerWords(MrLayerStoreWords(static_cast<uint32_t>(PageCount()), m_layerCapacity));
             if (!gpu::ReadBuffer(m_layerReadback.Get(), std::as_writable_bytes(std::span(layerWords))))
                 return false;
 
