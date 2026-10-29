@@ -11,7 +11,8 @@
 // 角の間のセルだけを 0.25 m に分け、違う大きさのセルが絡む段の棒の形 3 つ(① 中心〔既定〕・② 角の場所・置かない)を ④ で比べる
 // (落ちるのは ① のたわみ ±5 %・帳簿・決定性。縁の力は記録だけ = BraceCase)。
 // 引数: [--ticks n](既定 240)[--case n](n 番目の場面だけ。0 から。測り用)[--study](T-1260 の切り分けの場面。記録だけ)
-//   [--pair n](対の負の項に残す粗いセルの硬さ sim::MixedPairMaterial の番号。既定 0 = 無し。T-1261 の研究)
+//   [--pair n](対の負の項に残す粗いセルの硬さ sim::MixedPairMaterial の番号。既定 0 = 無し。1・2 = T-1261・3・4 = T-1278 の研究。
+//   3 = NeighborStrain では周りなしの根の線の 2 場面も ±5 % の線〔T-1278〕)
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
@@ -342,7 +343,11 @@ namespace {
         const double worst = WorstDifference(each.scene, reference, [&](uint32_t x, uint32_t up, uint32_t c) {
             return CoarseCellValue(mixed, x, up, c);
         });
-        const bool pass = std::abs(ratio - 1) <= each.sagTolerance;
+        // T-1278: 粗いセルの隣から読む歪みの形(NeighborStrain)では周りなしの根の線の 2 場面も 5 % の線(6 % は今の形の退く道)
+        const double sagTolerance = pairMaterial == sim::MixedPairMaterial::NeighborStrain
+                                        ? std::min(each.sagTolerance, 0.05)
+                                        : each.sagTolerance;
+        const bool pass = std::abs(ratio - 1) <= sagTolerance;
         const EdgeError edges = CompareEdges(fineScene, reference, mixed);
         const double rootLine = each.braceStudy ? RootLineError(reference, mixed, each.rootX) : 0.0;
         const bool rootPass = rootLine <= 0.05;
@@ -360,7 +365,7 @@ namespace {
         Expect(run.ledgerOk, std::format("{} {}: 帳簿", each.name, form));
         Expect(run.path.back() > 0, std::format("{} {}: 重さで下がる", each.name, form));
         if (beam == sim::MixedBeam::FacePair && brace == sim::MixedBrace::Center) {
-            Expect(pass, std::format("{} {}: 全部 0.25 m の ±{:.0f} %", each.name, form, 100.0 * each.sagTolerance));
+            Expect(pass, std::format("{} {}: 全部 0.25 m の ±{:.0f} %", each.name, form, 100.0 * sagTolerance));
             Expect(!each.rootCheck || rootPass, std::format("{} {}: 根の線の縁の力 ±5 %", each.name, form));
             // 細い梁の曲げ(0.5 m のセル 1〜2 つの厚さ)では粗いセルの精度そのもの(全部 0.5 m と全部 0.25 m の差)が入るので 5 %(T-1191)
             Expect(!each.edgeCheck || (edges.mixedFace <= 0.05 && edges.fineFace <= 0.05 && edges.clampedFace <= 0.05),
