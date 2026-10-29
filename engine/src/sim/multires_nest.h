@@ -144,6 +144,7 @@ namespace bicameral::sim {
         std::vector<int64_t> pages;       // 欄の頁 [欄の頁 × MR_BLOCK_CELLS × 値の数]
         std::vector<uint32_t> pageOf;     // 疎: セルの頁 → 欄の頁(MULTIRES_NO_FIELD_PAGE = 無い)
         std::vector<uint32_t> freePages;  // 疎: 返された欄の頁(後ろから使う)
+        uint32_t pageBudget = 0;  // 疎: 集めて書く段が取ってよい頁の数(0 = 決めない。D-468。T-1252。状態に入らない)
     };
 
     // セルの頁 page の欄の頁の値の先頭(MR_BLOCK_CELLS × 値の数。疎で無い頁は nullptr = 全部 0)
