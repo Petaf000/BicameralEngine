@@ -1,5 +1,6 @@
 # シミュのシェーダーごとの DXIL の局所の配列(alloca)の数の上限(T-1233。tools/dxil_alloca/dxil_alloca_check.py)。
 # release の dxc の出力で数える。ここに無いシェーダーは 0。減らしたら --update で下げる(上げる時は理由をチケットに書く)。
+cascade_light_tree_grid 2
 equilibrium_block_k1_coarsen 2
 equilibrium_block_k1_conjugatepush 2
 equilibrium_block_k1_conjugateresidual 2
@@ -35,6 +36,7 @@ multires_conduct_graph 16
 multires_conduct_mark 13
 multires_conduct_prepare 1
 multires_graph 60
+multires_graph_place 60
 multires_graph_wide 82
 multires_peek_extract 2
 multires_step_expanded_wait 2
@@ -62,6 +64,7 @@ multires_wide_conduct_prepare 1
 object_heat_nest_fill 1
 object_heat_nest_gather 1
 object_heat_react 15
+phase_layer_cells 6
 physics_build_manifolds 8
 physics_collect_heat 10
 physics_graph 83
