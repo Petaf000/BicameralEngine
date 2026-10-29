@@ -951,7 +951,10 @@ namespace bicameral::editor {
         const sim::BakedReactionTable& table = m_session->Table();
         const uint32_t neighbor = lab::LabCellIndex(BORDER + 1, BORDER, BORDER);
         const int32_t neighborMilliKelvin = TemperatureOf(table, sim::LabBoxCell(m_session->Gpu(), neighbor, shape));
-        constexpr int32_t WARMED_MILLIKELVIN = 1000;  // 1 K
+        // 温まったと見る幅は 1 mK(熱が根の境を越えた = 室温より上)。実験室の箱は熱の放射の段を持たず、熱伝導率は
+        // D-637・T-1066(2026-10-24。試験の倍率 固体 20000 → 1)から現実の値なので、57 刻みで隣のセルの木は数 mK しか上がらない
+        // (前の幅 1 K は倍率 20000 の時のもの。T-1251)
+        constexpr int32_t WARMED_MILLIKELVIN = 1;
         if (neighborMilliKelvin < static_cast<int32_t>(AUTO_ROOM_MILLIKELVIN) + WARMED_MILLIKELVIN)
             return std::unexpected(std::format("隣の根の木が温まっていない({} mK)", neighborMilliKelvin));
 

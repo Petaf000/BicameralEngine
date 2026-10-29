@@ -263,10 +263,21 @@ namespace {
                 Names{"real_elements", "real_matter", "earth_environment", "real_reactions", "combustion_test"}));
         EXPECT(sample->rejected.empty() && !sample->modifiedWorld);
         EXPECT(sample->standardRoot == fs::path(BICAMERAL_DATA_STANDARD_DIR));
-        EXPECT(!sample->overrides.empty() && std::ranges::all_of(sample->overrides, [](const TableOverride& entry) {
-            return entry.category == "species" && entry.previousPackage == "real_matter" &&
-                   entry.package == "combustion_test";
-        }));
+        // 書き直すのは real_matter の物質(熱伝導率)と、earth_environment の基準の大気(地面の点を 300 K に。T-1164・278c9469 から。仮)だけ
+        const auto isSampleOverride = [](const TableOverride& entry) {
+            if (entry.package != "combustion_test")
+                return false;
+
+            return (entry.category == "species" && entry.previousPackage == "real_matter") ||
+                   (entry.category == "environment" && entry.key == "atmosphere_profile" &&
+                    entry.previousPackage == "earth_environment");
+        };
+        EXPECT(!sample->overrides.empty() && std::ranges::all_of(sample->overrides, isSampleOverride));
+        for (const TableOverride& entry : sample->overrides) {
+            if (!isSampleOverride(entry))
+                std::printf("  思わない書き直し: %s.%s('%s' → '%s')\n", entry.category.c_str(), entry.key.c_str(),
+                            entry.previousPackage.c_str(), entry.package.c_str());
+        }
 
         // 熱伝導率は現実の値に書き直しの倍率(units.luau。T-1066 から固体・気体とも 1)。ほかの欄も現実の値のまま
         const auto standardOnly = LoadMix(*catalog, Names{"real_elements", "real_matter"});
