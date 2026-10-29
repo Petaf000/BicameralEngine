@@ -952,6 +952,18 @@ set_tests_properties(time_step_choose_dump PROPERTIES TIMEOUT 900 FIXTURES_SETUP
 bicameral_add_gpu_test_case(gpu_time_step_choose gpu_time_step_choose_test gpu --queue compute --no-gbv
                             --choices ${CMAKE_CURRENT_BINARY_DIR}/time_step_choices.bin)
 set_tests_properties(gpu_time_step_choose PROPERTIES FIXTURES_REQUIRED time_step_choices)
+# 境の面の案 (c)(面の結びつきの数で隣の差 0 段。T-1271・ADR-0507。既定は None のまま)の表を持つ刻みを選ぶ段の GPU 版と CPU のビット一致
+add_test(NAME time_step_choose_dump_coupling COMMAND time_step_tree_test choose-dump shape=fine every=16 border=c0 dump=${CMAKE_CURRENT_BINARY_DIR}/time_step_choices_coupling.bin)
+set_tests_properties(time_step_choose_dump_coupling PROPERTIES TIMEOUT 900 FIXTURES_SETUP time_step_choices_coupling)
+bicameral_add_gpu_test_case(gpu_time_step_choose_coupling gpu_time_step_choose_test gpu --queue compute --no-gbv
+                            --choices ${CMAKE_CURRENT_BINARY_DIR}/time_step_choices_coupling.bin)
+set_tests_properties(gpu_time_step_choose_coupling PROPERTIES FIXTURES_REQUIRED time_step_choices_coupling)
+# 同じ・池(静かな夜。結びつきの強い物で隣の差 0 段が効く)
+add_test(NAME time_step_choose_dump_coupling_night COMMAND time_step_tree_test choose-dump shape=fine scene=night every=16 border=c0 dump=${CMAKE_CURRENT_BINARY_DIR}/time_step_choices_coupling_night.bin)
+set_tests_properties(time_step_choose_dump_coupling_night PROPERTIES TIMEOUT 900 FIXTURES_SETUP time_step_choices_coupling_night)
+bicameral_add_gpu_test_case(gpu_time_step_choose_coupling_night gpu_time_step_choose_test gpu --queue compute --no-gbv
+                            --choices ${CMAKE_CURRENT_BINARY_DIR}/time_step_choices_coupling_night.bin)
+set_tests_properties(gpu_time_step_choose_coupling_night PROPERTIES FIXTURES_REQUIRED time_step_choices_coupling_night)
 
 # 計測は job.py run -Preset release -Exe gpu_gas_projection_test -- --no-gbv --measure --edge 32
 bicameral_add_gpu_test(gpu_gas_projection_test)

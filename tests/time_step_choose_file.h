@@ -32,7 +32,7 @@ namespace bicameral::test {
     namespace choose_file {
 
         constexpr uint32_t MAGIC = 0x48435354u;  // 'TSCH'
-        constexpr uint32_t VERSION = 1;
+        constexpr uint32_t VERSION = 2;          // 2: 案 (c) の looseExponents(T-1271。1 も読める = 空)
 
         template <typename T>
         void Put(std::ofstream& out, T value) {
@@ -80,6 +80,7 @@ namespace bicameral::test {
         PutVector(out, tables.gridUnits);
         PutVector(out, tables.neighborStarts);
         PutVector(out, tables.neighbors);
+        PutVector(out, tables.looseExponents);
         Put(out, static_cast<uint32_t>(file.events.size()));
         for (const TimeStepChooseEvent& event : file.events) {
             Put(out, event.tick);
@@ -98,7 +99,7 @@ namespace bicameral::test {
         std::ifstream in(path, std::ios::binary);
         uint32_t magic = 0;
         uint32_t version = 0;
-        if (!Get(in, magic) || !Get(in, version) || magic != MAGIC || version != VERSION)
+        if (!Get(in, magic) || !Get(in, version) || magic != MAGIC || version < 1 || version > VERSION)
             return std::nullopt;
 
         TimeStepChooseFile file;
@@ -110,7 +111,8 @@ namespace bicameral::test {
 
         uint32_t events = 0;
         good = good && Get(in, tables.radius) && Get(in, tables.maxExponent) && GetVector(in, tables.gridUnits) &&
-               GetVector(in, tables.neighborStarts) && GetVector(in, tables.neighbors) && Get(in, events);
+               GetVector(in, tables.neighborStarts) && GetVector(in, tables.neighbors) &&
+               (version < 2 || GetVector(in, tables.looseExponents)) && Get(in, events);
         if (!good)
             return std::nullopt;
 

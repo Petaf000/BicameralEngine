@@ -1,5 +1,6 @@
 // gpu_time_tree_choose.h — 時間を飛ばす試作(sim/time_step_tree)の刻みを選ぶ段の GPU 版(T-1112・T-1213。D-669 の窓・隣の差 1 段)。
-// CPU リファレンスは time_step_tree.cpp の WindowCaps・ChooseExponents(既定の形: 単位はセル・窓 2 m・退く道/緩衝/揃える相手なし)。
+// CPU リファレンスは time_step_tree.cpp の WindowCaps・ChooseExponents(既定の形: 単位はセル・窓 2 m・退く道/緩衝/揃える相手なし。
+// 境の面は今の形〔隣の差 1 段〕か案 (c)〔面の結びつきの数の表 looseExponents で 0 段。T-1271・ADR-0507〕)。
 // 持つもの: 木の形の表(TimeTreeChooseTables: 窓の格子の単位・隣。既定のヒープ)・出来事ごとの選ぶ前の詰めた記録(2 B/単位。
 //   試験の間は CPU が書いた記録を並べて写す。本物の GPU の早送りでは前の出来事の後の記録がそのまま次の入力)・作業場(格子の 2 面・
 //   単位の上限と今の e)・出来事の後の詰めた記録。シェーダーは shaders/sim/time_tree_choose.hlsl。
@@ -84,6 +85,7 @@ namespace bicameral::sim {
         uint32_t m_wordsPerEvent = 0;
         uint32_t m_events = 0;
         uint32_t m_tiles = 0;
+        bool m_coupled = false;        // 境の面の案 (c) の表を持つ(T-1271)
         TimeTreeChooseTables m_shape;  // 大きさだけ(表の中身は写しの中)
 
         ComPtr<ID3D12RootSignature> m_rootSignature;
@@ -94,6 +96,7 @@ namespace bicameral::sim {
         gpu::ResidentBuffer m_neighbors;
         gpu::ResidentBuffer m_tileNeighborStarts;  // 区画ごとの隣の区画(仕上げが印を付ける)
         gpu::ResidentBuffer m_tileNeighbors;
+        gpu::ResidentBuffer m_loose;  // 単位ごとの隣の差 1 段を許す e(案 (c)。無ければ 1 語)
         ComPtr<ID3D12Resource> m_caps;
         ComPtr<ID3D12Resource> m_state;
         ComPtr<ID3D12Resource> m_after;

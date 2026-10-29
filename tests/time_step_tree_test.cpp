@@ -154,6 +154,25 @@ namespace {
     // 燃える物を置く所(T-1153。空 = どこにも置く。x〔m〕→ 置くか)
     std::function<bool(double)> fuelAt;
 
+    // 境の面の扱い(border=。T-1270: 案 (c) を既定にした時の差を測る。none・mismatch・restart・gap0・c<n>。既定 none = 今の既定)
+    std::string borderMode = "none";
+
+    // 境の面の扱いを名前から(T-1269 の border-trace の modes= と同じ名前。none は今の形に戻す)
+    void ApplyBorder(TimeTreeSetup& setup, std::string_view mode) {
+        setup.border = TimeTreeBorder::None;
+        setup.couplingShift = 0;
+        if (mode == "mismatch")
+            setup.border = TimeTreeBorder::Mismatch;
+        else if (mode == "restart")
+            setup.border = TimeTreeBorder::Restart;
+        else if (mode == "gap0")
+            setup.border = TimeTreeBorder::Gap0;
+        else if (mode.starts_with("c")) {
+            setup.border = TimeTreeBorder::Coupling;
+            setup.couplingShift = std::atoi(std::string(mode.substr(1)).c_str());
+        }
+    }
+
     TimeTreeSetup MakeSetup(const Material& material, TimeStepRule rule) {
         TimeTreeSetup setup;
         setup.cycles = rule == TimeStepRule::Fixed ? solverCycles : longCycles;
@@ -185,6 +204,8 @@ namespace {
         setup.unitByLength = unitByLength && windowMeters <= 0.0;
         setup.windowLevel0Cells = static_cast<uint32_t>(std::llround(windowMeters / 0.5));  // レベル 0 のセルは 0.5 m
         setup.unitEdgeCells = unitEdgeCells;
+        if (rule != TimeStepRule::Fixed)
+            ApplyBorder(setup, borderMode);
 
         return setup;
     }
@@ -592,11 +613,12 @@ namespace {
         if (bufferUnits > 0)
             buffer = std::format("・前線の緩衝 {} 単位", bufferUnits);
 
-        return std::format("{} 通り目{}・予算 {}・木 {}・揃える段 {}・V {}(1 刻み {})・単位 {}",
+        return std::format("{} 通り目{}・予算 {}・木 {}・揃える段 {}・V {}(1 刻み {})・単位 {}・境 {}",
                            selectRule == TimeTreeSelect::Retake ? 2 : 1, buffer, BudgetText(), shapeName, groupShift,
                            trialCycles != 0 ? trialCycles : longCycles, zeroCycles,
                            windowMeters > 0.0 ? std::format("窓 {:g} m・{} セル角", windowMeters, unitEdgeCells)
-                                              : std::string(unitByLength ? "4 m" : "ブロック"));
+                                              : std::string(unitByLength ? "4 m" : "ブロック"),
+                           borderMode);
     }
 
     void LogRun(std::string_view scene, std::string_view name, const TimeTreeWorld& world, const RunResult& run,
@@ -1782,16 +1804,7 @@ namespace {
 
     TimeTreeSetup BorderSetup(const TimeTreeSetup& base, std::string_view mode) {
         TimeTreeSetup setup = base;
-        if (mode == "mismatch")
-            setup.border = TimeTreeBorder::Mismatch;
-        else if (mode == "restart")
-            setup.border = TimeTreeBorder::Restart;
-        else if (mode == "gap0")
-            setup.border = TimeTreeBorder::Gap0;
-        else if (mode.starts_with("c")) {
-            setup.border = TimeTreeBorder::Coupling;
-            setup.couplingShift = std::atoi(std::string(mode.substr(1)).c_str());
-        }
+        ApplyBorder(setup, mode);
 
         return setup;
     }
@@ -1887,11 +1900,13 @@ namespace {
         Log(Channel::Sim, Level::Info, "境の比べ: {} 刻み・{} セル・{:.1f} 秒", ticks, cells, seconds);
     }
 
-    void CheckChooseDump(const Material& material, const Ignition& ignition) {
+    // scene=night なら池(静かな夜。結びつきの強い物で案 (c) の隣の差 0 段が効く場面。T-1271)
+    void CheckChooseDump(const Material& material, const Profile& profile, uint64_t defaultTicks,
+                         const Ignition& ignition) {
         TimeTreeSetup setup = MakeSetup(material, TimeStepRule::Change);
         setup.groupShift = groupShift;
-        const TimeTreeWorld world = MakeWorld(setup, material, sceneShape, Ambient(material.groundKelvin));
-        const uint64_t ticks = sceneTicks != 0 ? sceneTicks : ignition.tick + 4096;
+        const TimeTreeWorld world = MakeWorld(setup, material, sceneShape, profile);
+        const uint64_t ticks = sceneTicks != 0 ? sceneTicks : defaultTicks;
         const uint32_t every = mergeDumpEvery != 0 ? mergeDumpEvery : 16;
         ChooseTrace bulk = TraceChoose(setup, material, world, ticks, ticks, ignition, every);
         bulk.file.tables = MakeTimeTreeChooseTables(setup, world.layout);
@@ -1910,6 +1925,11 @@ namespace {
             bulk.file.tables.gridSize[0], bulk.file.tables.gridSize[1], bulk.file.tables.gridSize[2],
             bulk.file.tables.radius, bulk.file.tables.neighbors.size(), bulk.truncated, bulk.truncatedEvents,
             bulk.limited, bulk.limitedEvents, bulk.hash);
+        // 案 (c) の表: 隣の差 1 段を許す e が上限より短い単位の数(0 なら表が効かない場面)
+        const auto tight = std::ranges::count_if(bulk.file.tables.looseExponents,
+                                                 [&](int32_t e) { return e < setup.maxExponent; });
+        Log(Channel::Sim, Level::Info, "刻みを選ぶ段: 境 {}・案 (c) の表 {} 単位・上限より短い {} 単位", borderMode,
+            bulk.file.tables.looseExponents.size(), tight);
         if (!dumpPath.empty())
             Expect(test::WriteTimeStepChoose(dumpPath, bulk.file), "刻みを選ぶ段: ファイルに書けた");
     }
@@ -2008,6 +2028,8 @@ namespace {
                 traceLockstep = std::strtoull(value.c_str(), nullptr, 10);
             else if (key == "modes")
                 borderModes = value;
+            else if (key == "border")
+                borderMode = value;
         }
 
         const bool all = part == "all";
@@ -2039,8 +2061,12 @@ namespace {
         if (part == "span-dump")
             CheckSpanDump(fire, fireIgnition);
 
-        if (part == "choose-dump")
-            CheckChooseDump(fire, fireIgnition);
+        if (part == "choose-dump") {
+            if (mergeNight)
+                CheckChooseDump(pond, PondProfile(WorldLength(sceneShape)), NIGHT_TICKS / 7, {});
+            else
+                CheckChooseDump(fire, Ambient(fire.groundKelvin), FIRE_IGNITION_TICK + 4096, fireIgnition);
+        }
 
         if (part == "night-trace")
             CheckNightTrace(pond);

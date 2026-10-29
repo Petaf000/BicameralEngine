@@ -28,6 +28,8 @@ StructuredBuffer<uint32_t> g_ttcNeighborStarts : register(t2);  // 単位ごと�
 StructuredBuffer<uint32_t> g_ttcNeighbors : register(t3);
 StructuredBuffer<uint32_t> g_ttcTileNeighborStarts : register(t4);  // 区画ごとの隣の区画の始まり(区画の数 + 1)
 StructuredBuffer<uint32_t> g_ttcTileNeighbors : register(t5);
+StructuredBuffer<uint32_t> g_ttcLoose
+    : register(t6);  // 単位ごと: 隣の差 1 段を許す最も長い e(境の面の案 (c)。g_ttcCoupled の時だけ読む)
 
 cbuffer TimeTreeChooseConstants : register(b0) {
     uint32_t g_ttcUnits;
@@ -39,6 +41,7 @@ cbuffer TimeTreeChooseConstants : register(b0) {
     uint32_t g_ttcCap;         // この刻みで始めてよい最も長い e
     uint32_t g_ttcPass;        // TtcSweep の回の番号
     uint32_t g_ttcBeforeWord;  // この出来事の選ぶ前の記録の始まり(語)
+    uint32_t g_ttcCoupled;     // 1 = 境の面の案 (c)(T-1271): 隣の e + 1 が g_ttcLoose を超えるなら隣の差 0 段
 };
 
 static const uint32_t TTC_NO_UNIT = 0xFFFFFFFFu;
@@ -177,10 +180,15 @@ void TtcInitUnit(uint32_t unit) {
 groupshared uint32_t s_ttcState[TTC_TILE_UNITS];
 groupshared uint32_t s_ttcChanged[3];  // 区画の中の回ごとの「変わった」(3 つを回して使う。消すのは 2 回後)
 
-// 区画の中の単位 local を上限まで縮める。変えたら true(区画の外の単位へも書き写す)
+// 区画の中の単位 local を上限まで縮める。変えたら true(区画の外の単位へも書き写す)。
+// 隣の差は 1 段、案 (c) では隣の e + 1 が単位の loose を超えるなら 0 段(CPU の BorderAllowed)。隣の e について単調なので
+// どの順で回しても同じ最大の不動点に落ちる
 bool TtcSweepOnce(uint32_t tileFirst, uint32_t tileUnits, uint32_t local) {
     const uint32_t unit = tileFirst + local;
     uint32_t limit = g_ttcCaps[unit];
+    uint32_t loose = g_ttcMaxExponent + 1;  // 今の形: 隣の差はいつも 1 段
+    if (g_ttcCoupled != 0)
+        loose = g_ttcLoose[unit];  // 表が無い時は 1 語なので、読むのは案 (c) の時だけ
     const uint32_t end = g_ttcNeighborStarts[unit + 1];
     for (uint32_t k = g_ttcNeighborStarts[unit]; k < end; ++k) {
         const uint32_t neighbor = g_ttcNeighbors[k];
@@ -191,7 +199,9 @@ bool TtcSweepOnce(uint32_t tileFirst, uint32_t tileUnits, uint32_t local) {
         else
             state = g_ttcState[neighbor];
 
-        limit = min(limit, (state & TTC_STATE_EXPONENT_MASK) + 1);
+        const uint32_t neighborExponent = state & TTC_STATE_EXPONENT_MASK;
+        const uint32_t gap = neighborExponent + 1 <= loose ? 1u : 0u;
+        limit = min(limit, neighborExponent + gap);
     }
 
     const uint32_t state = s_ttcState[local];
