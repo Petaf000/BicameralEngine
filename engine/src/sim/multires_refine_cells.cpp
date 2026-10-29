@@ -5,14 +5,17 @@
 // 寄せないセル(気体だけ・詰まり切った・据わる固体を含む・凝縮相が無い)は呼ぶ前の写し(SAME)のまま触らない = 今とビット単位で同じ。
 // 端数(2^-64 単位)は子へ SAME のまま(1 単位未満なので形に効かない。保存は子 8 つの和 = 親 × 8 でビット単位)。
 // エネルギーは子の温度が親と揃うように熱(µJ)を子の熱容量の重みで配る(D-674)。
-// 傾きは同じ親のブロックの中の隣の列から(SfSurfaceSlopeQ16)。ブロックの外・子に覆われたセルは無いと読む(1 本目の仮。チケットの設計の詰め 6):
-//   横が無い → 傾き 0・下が無い → 詰まり切る・上が無い → 空。1 刻みに 1 つの親は 1 つの要求だけが触るので、読む所は順番に依存しない。
+// 傾きは隣の列から(SfSurfaceSlopeQ16)。親のブロックの中はそのまま、ブロックの外は要求の処理の割り当ての後に写した「隣の写し」
+// (SnapshotRefineHalos。索引で同じレベルの本物のブロック。T-1189・common/multires_refine_halo.hlsli)から読む。
+// 子に覆われたセル・同じレベルのブロックが無い所は無いと読む(T-1176 の仮のまま): 横が無い → 傾き 0・下が無い → 詰まり切る・上が無い → 空。
+// 1 刻みに 1 つの親は 1 つの要求だけが触り、外は刻みの前の写しなので、読む所は順番に依存しない。
 // GPU は shaders/sim/multires_refine_place.hlsli(multires_graph.hlsl の RefineLevel が呼ぶ。T-1188。tests/gpu_tree_refine_placement_test.cpp)。
 // 世界の箱(MakeLabBoxNest)は既定で使う(D-664)。MakeMultiresNest だけで作る木は使わない(SAME)。
 // 成分ごとの層(T-1220。ADR-0481 の 5 の 4・ADR-0489): 層を持つ成分は「層 = 沈む側(凝縮相)」と「残り = 物質の置かれ方」の 2 つの物質に分けて配り、
 // 子の層 = 子へ配った層の分(子の層の和 = 親の層 × 8・子の量の和 = 親 × 8)。層を使う世界(EnableCellLayers)では粒の残りは舞う粒(空きに同じ濃さ)。
 // 層の無いセル(層を使わない世界)は前と同じ 1 つの物質のまま = ビット単位で同じ。
 #include <algorithm>
+#include <array>
 
 #include "sim/multires_nest.h"
 #include "sim/multires_nest_internal.h"
@@ -93,17 +96,44 @@ namespace bicameral::sim {
             return result;
         }
 
-        // --- 隣の読み方: 同じ親のブロックの中で、子に覆われていないセルの詰まり(Q16。器 = 子 8 つ)---
+        // 枠 slot のセル index の詰まり(Q16。器 = 子 8 つ。一様な枠は一様の値)
+        int64_t CellFullness(const MultiresNest& nest, std::span<const RxSpecies> table, uint32_t slot,
+                             uint32_t index) {
+            const RxCell cell = LoadNestCell(nest, slot, index);
+            const MrCellLayers layers = LoadNestCellLayers(nest, slot, index);
+            const CellMaterials cellMaterials = MaterialsOf(nest, table, cell, layers);
+            const SfSettleSum sum = PlaceSettleSum(cellMaterials.materials, cellMaterials.amounts);
+
+            return SfSettleFullnessQ16(SfSettledVolume(sum), MR_CELL_VOLUME_MM3 * 8, sum.anchored);
+        }
+
+        bool InsideBlock(int32_t x, int32_t y, int32_t z) {
+            const auto edge = (int32_t)MR_BLOCK_EDGE;
+
+            return x >= 0 && y >= 0 && z >= 0 && x < edge && y < edge && z < edge;
+        }
+
+        // --- 隣の読み方: 親のブロックの中は子に覆われていないセル、外は隣の写し(T-1189)の詰まり(Q16。器 = 子 8 つ)---
         struct Neighborhood {
             const MultiresNest& nest;
             std::span<const RxSpecies> table;
             uint32_t slot;
+            uint32_t octant;  // 親のセルの八分の一(写しの面の向き)
         };
 
+        // 隣の写しの値(写しが無ければ無い)
+        int32_t HaloAt(const Neighborhood& around, int32_t x, int32_t y, int32_t z) {
+            const uint32_t halo = around.nest.refineCells.activeHalo;
+            if (halo == MR_HALO_NONE)
+                return MR_HALO_ABSENT;
+
+            return around.nest.refineCells
+                .halos[((size_t)halo * MR_HALO_CELLS) + MrHaloIndexOf(x, y, z, around.octant)];
+        }
+
         bool Present(const Neighborhood& around, int32_t x, int32_t y, int32_t z) {
-            if (x < 0 || y < 0 || z < 0 || x >= (int32_t)MR_BLOCK_EDGE || y >= (int32_t)MR_BLOCK_EDGE ||
-                z >= (int32_t)MR_BLOCK_EDGE)
-                return false;
+            if (!InsideBlock(x, y, z))
+                return HaloAt(around, x, y, z) != MR_HALO_ABSENT;
 
             const uint32_t index = MrCellIndex((uint32_t)x, (uint32_t)y, (uint32_t)z);
 
@@ -111,13 +141,11 @@ namespace bicameral::sim {
         }
 
         int64_t FullnessAt(const Neighborhood& around, int32_t x, int32_t y, int32_t z) {
-            const uint32_t index = MrCellIndex((uint32_t)x, (uint32_t)y, (uint32_t)z);
-            const RxCell cell = nest_detail::LoadCellAt(around.nest, around.slot, index);
-            const MrCellLayers layers = LoadNestCellLayers(around.nest, around.slot, index);
-            const CellMaterials cellMaterials = MaterialsOf(around.nest, around.table, cell, layers);
-            const SfSettleSum sum = PlaceSettleSum(cellMaterials.materials, cellMaterials.amounts);
+            if (!InsideBlock(x, y, z))
+                return HaloAt(around, x, y, z);
 
-            return SfSettleFullnessQ16(SfSettledVolume(sum), MR_CELL_VOLUME_MM3 * 8, sum.anchored);
+            return CellFullness(around.nest, around.table, around.slot,
+                                MrCellIndex((uint32_t)x, (uint32_t)y, (uint32_t)z));
         }
 
         // 列 (x, z) の段 y の表面(下が無い = 詰まり切る・上が無い = 空)
@@ -245,7 +273,8 @@ namespace bicameral::sim {
             return std::nullopt;
 
         // --- 隣の列から傾き(x・z。重さの向きは −y)---
-        const Neighborhood around{.nest = nest, .table = table, .slot = parentSlot};
+        const Neighborhood around{
+            .nest = nest, .table = table, .slot = parentSlot, .octant = MrOctantOfCell(parentCell)};
         const auto x = (int32_t)MrCellX(parentCell);
         const auto y = (int32_t)MrCellY(parentCell);
         const auto z = (int32_t)MrCellZ(parentCell);
@@ -284,6 +313,75 @@ namespace bicameral::sim {
 
     }  // namespace nest_detail
 
+    namespace nest_detail {
+
+        namespace {
+
+            // 隣の写しの 1 つのセル: 親のブロック(レベル level・原点 origin)の中の座標 (x, y, z)(外に出る)を含む同じレベルの本物のブロックの、
+            // 子に覆われていないセルの詰まり。無ければ MR_HALO_ABSENT
+            int32_t HaloFullness(const MultiresNest& nest, int32_t level, const std::array<int64_t, 3>& origin,
+                                 const std::array<int32_t, 3>& cell) {
+                std::array<int64_t, 3> neighborOrigin{};
+                std::array<uint32_t, 3> local{};
+                for (size_t axis = 0; axis < 3; ++axis) {
+                    const int32_t offset = cell[axis] < 0
+                                               ? -(int32_t)MR_BLOCK_EDGE
+                                               : (cell[axis] >= (int32_t)MR_BLOCK_EDGE ? (int32_t)MR_BLOCK_EDGE : 0);
+                    neighborOrigin[axis] = origin[axis] + offset;
+                    local[axis] = (uint32_t)(cell[axis] - offset);
+                }
+
+                const uint32_t slot = LookupBlock(nest, level, neighborOrigin[0], neighborOrigin[1], neighborOrigin[2]);
+                if (slot == MR_NO_BLOCK)
+                    return MR_HALO_ABSENT;
+
+                const uint32_t index = MrCellIndex(local[0], local[1], local[2]);
+                if (nest.blocks[slot].children[MrOctantOfCell(index)] != MR_NO_BLOCK)
+                    return MR_HALO_ABSENT;
+
+                return (int32_t)CellFullness(nest, nest.refineCells.species, slot, index);
+            }
+
+        }  // namespace
+
+        void SnapshotRefineHalos(MultiresNest& nest, uint32_t count) {
+            nest.refineCells.activeHalo = MR_HALO_NONE;
+            if (nest.refineCells.species.empty() || nest.wideCells)
+                return;
+
+            if (nest.refineCells.halos.size() < (size_t)nest.capacity.worldBlocks * MR_HALO_CELLS)
+                nest.refineCells.halos.assign((size_t)nest.capacity.worldBlocks * MR_HALO_CELLS, MR_HALO_ABSENT);
+
+            for (uint32_t i = 0; i < count; ++i) {
+                const MrRequest& request = nest.requests[i];
+                const MrRequestState& state = nest.states[i];
+                if (state.status != MR_STATUS_GRANTED || request.op != MR_REQUEST_REFINE ||
+                    MrIsUniform(nest.blocks[state.target]))
+                    continue;
+
+                // --- 鎖の段 d の親(レベル = 始まりの親 + d・原点は要求の点から。d ≥ 1 の親はこの刻みに作る)---
+                for (uint32_t depth = 0; depth < state.levels; ++depth) {
+                    const int32_t level = nest.blocks[state.target].level + (int32_t)depth;
+                    const std::array<int64_t, 3> target = {request.x, request.y, request.z};
+                    std::array<int64_t, 3> origin{};
+                    uint32_t octant = 0;
+                    for (uint32_t axis = 0; axis < 3; ++axis) {
+                        origin[axis] = MrBlockOriginOf(MrCoarserCoordinate(target[axis], request.level, level));
+                        octant |= MrOctantBitOfPoint(origin[axis], level, target[axis], request.level) << axis;
+                    }
+
+                    const size_t base = (size_t)(state.blockBase - 1 - depth) * MR_HALO_CELLS;
+                    for (uint32_t h = 0; h < MR_HALO_CELLS; ++h) {
+                        const std::array<int32_t, 3> cell = {MrHaloCellAxis(h, octant, 0), MrHaloCellAxis(h, octant, 1),
+                                                             MrHaloCellAxis(h, octant, 2)};
+                        nest.refineCells.halos[base + h] = HaloFullness(nest, level, origin, cell);
+                    }
+                }
+            }
+        }
+
+    }  // namespace nest_detail
+
     void EnableCellLayers(MultiresNest& nest, const BakedReactionTable& table) {
         nest.cellLayers.enabled = true;
         nest.cellLayers.grain.assign(table.species.size(), 0);
@@ -303,6 +401,7 @@ namespace bicameral::sim {
 
     void EnableRefineCellPlacement(MultiresNest& nest, const BakedReactionTable& table) {
         nest.refineCells.species = table.species;
+        nest.refineCells.halos.assign((size_t)nest.capacity.worldBlocks * MR_HALO_CELLS, MR_HALO_ABSENT);
 
         // 欄(SF_FLAG_PLACE_*)は同じ置かれ方の重みで配る(親のセルを覆う前に呼ばれるので、セルと同じ答え)
         nest.refinePlacement = [](const MultiresNest& owner, uint32_t parentSlot, uint32_t parentCell,

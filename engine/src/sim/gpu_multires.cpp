@@ -428,6 +428,16 @@ namespace bicameral::sim {
         }
 
         m_wakePipeline = std::move(*wake);
+        if (!options.wideCells) {
+            // 置かれ方の世界の細かくする段が読む隣の写し(T-1189)
+            auto refineHalo = LoadComputePipeline(device, m_rootSignature.Get(), options.pipelineCache,
+                                                  "sim/multires_refine_halo.cso");
+            if (!refineHalo)
+                return std::unexpected(refineHalo.error());
+
+            m_treeRefineHaloPipeline = std::move(*refineHalo);
+        }
+
         m_stepWaitPipeline = std::move(*stepWait);
         m_stepExpandedWaitPipeline = std::move(*expandedWait);
         if (options.wideCells) {
@@ -680,8 +690,9 @@ namespace bicameral::sim {
     }
 
     uint64_t GpuMultires::OverflowBytes() const {
+        // 溢れを使わない世界は同じ所に、細かくする段の置かれ方が読む隣の写し(段ごとの位置 = 世界の枠の空きのスタックの位置。T-1189)
         if (!m_wideCells)
-            return 0;
+            return uint64_t{m_capacity.worldBlocks} * MR_HALO_CELLS * sizeof(uint32_t);
 
         return (MrWideAreaWords(static_cast<uint32_t>(PageCount()), m_wideChunks, m_capacity.worldBlocks,
                                 m_capacity.fractions) +
@@ -798,8 +809,11 @@ namespace bicameral::sim {
     // 溢れの領域の像: 頁と端数の枠(T-0311)と一様の値(T-0312)の今の面 0 = CPU の溢れ(塊は頁の番号の順、続けて端数の枠・
     // 世界の枠の番号の順に 0 から配る)、面 1 は塊なし。空きのスタックは上から若い番号
     void GpuMultires::AppendOverflowImage(const MultiresNest& nest, std::vector<uint32_t>& words) const {
-        if (!m_wideCells)
+        if (!m_wideCells) {
+            // 隣の写し(T-1189。要求の処理が書いてから読む)
+            words.resize(words.size() + (size_t{m_capacity.worldBlocks} * MR_HALO_CELLS), (uint32_t)MR_HALO_ABSENT);
             return;
+        }
 
         const auto pages = static_cast<uint32_t>(PageCount());
         const size_t first = words.size();
@@ -1230,6 +1244,14 @@ namespace bicameral::sim {
         RecordTreePass(list, debugRing, PassResolve, requestGroups);
         RecordTreePass(list, debugRing, PassSettle, requestGroups);
         RecordTreePass(list, debugRing, PassAllocate, 1);
+        if (m_activeGraph == GraphPlace) {
+            // 細かくする段の置かれ方が読む隣のブロックの写し(刻みの前の木から。1 グループ = 要求 1 つ。T-1189)
+            list->SetPipelineState(m_treeRefineHaloPipeline.Get());
+            BindRoot(list, debugRing);
+            list->Dispatch(MR_MAX_REQUESTS, 1, 1);
+            UavBarrier(list);
+        }
+
         if (m_wideCells) {
             // 細かくする子の頁に溢れの塊を付ける(T-0237)
             list->SetPipelineState(m_treeWideReservePipeline.Get());

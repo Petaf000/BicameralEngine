@@ -309,4 +309,7 @@ namespace bicameral::sim::nest_detail {
     // 写した後・欄を配る前・親を覆う前に呼ぶ
     void PlaceRefineOctantCells(MultiresNest& nest, uint32_t parentSlot, uint32_t octant, uint32_t childPage);
 
+    // 許可した細かくする要求の鎖の段ごとに、親の八分の一の外の隣の詰まりを写す(T-1189。割り当ての後・適用の前に呼ぶ。multires_refine_cells.cpp)
+    void SnapshotRefineHalos(MultiresNest& nest, uint32_t count);
+
 }  // namespace bicameral::sim::nest_detail

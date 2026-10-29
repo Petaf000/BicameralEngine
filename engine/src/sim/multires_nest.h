@@ -19,6 +19,7 @@
 #include <string>
 #include <vector>
 
+#include "common/multires_refine_halo.hlsli"
 #include "common/multires_tree.hlsli"
 #include "common/state_field.hlsli"
 #include "common/world_edge.hlsli"
@@ -223,8 +224,12 @@ namespace bicameral::sim {
         // --- 細かくする時のセルの中身(成分・エネルギー)を置かれ方で(T-1176。D-664・D-674。状態に入らない)。物質の表(相の印と
         //     モル体積・粒の詰まり)を持てば、寄せるセルの子は置かれ方で配る(EnableRefineCellPlacement)。空なら SAME。
         //     GPU の RefineLevel も同じ(RecordUpload がこれを見て決める。T-1188)。世界の箱(MakeLabBoxNest)は既定で持つ(D-664)---
+        //     隣のブロックの列(T-1189): 要求の処理の割り当ての後に、細かくする鎖の段ごとの親の八分の一の外の隣の詰まりを写し(halos。
+        //     並びは common/multires_refine_halo.hlsli)、適用はその写しを読む(同じ刻みにほかの要求が隣を覆っても・粗くしても、読むのは刻みの前)---
         struct RefineCells {
             std::vector<reaction::RxSpecies> species;
+            std::vector<int32_t> halos;  // [空きのスタックの位置][MR_HALO_CELLS](要求の処理の中だけ使う)
+            uint32_t activeHalo = multires::MR_HALO_NONE;  // 今細かくしている段の写しの位置(無ければ MR_HALO_NONE)
         } refineCells;
 
         // --- 成分ごとの層を使う世界(T-1220。ADR-0489。状態に入らない)。EnableCellLayers で物質の表の粒の印を持たせる。

@@ -396,13 +396,17 @@ namespace bicameral::sim {
                         SetFraction(nest, childFraction, index, FractionAt(nest, parent.fraction, parentCell));
                 }
 
-                // --- 寄せるセルの中身は置かれ方で(T-1176。端数は上で写した SAME のまま)---
+                // --- 寄せるセルの中身は置かれ方で(T-1176。端数は上で写した SAME のまま)。隣のブロックは刻みの前の写しから(T-1189)---
+                if (!uniform && !nest.refineCells.halos.empty())
+                    nest.refineCells.activeHalo = state.blockBase - 1 - depth;
+
                 if (!uniform)
                     nest_detail::PlaceRefineOctantCells(nest, parentSlot, octant, childPage);
             }
 
-            // --- 登録した欄: 子は親と同じ数・頁を持つ親の覆われたセルは 0(T-0711)---
+            // --- 登録した欄: 子は親と同じ数・頁を持つ親の覆われたセルは 0(T-0711)。置かれ方の印の欄も同じ写しを読む ---
             nest_fields::Refine(nest, parentSlot, octant, childSlot, childPage);
+            nest.refineCells.activeHalo = MR_HALO_NONE;
 
             // --- 親を覆う(覆われた親のセルと端数は空。一様な親は覆われた所を空と読むので書かない)---
             for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
@@ -749,6 +753,7 @@ namespace bicameral::sim {
             Settle(nest, i);
 
         Allocate(nest, count);
+        nest_detail::SnapshotRefineHalos(nest, count);  // 隣の写しは刻みの前の木から(T-1189)
         for (uint32_t i = 0; i < count; ++i) {
             if (nest.states[i].status != MR_STATUS_GRANTED)
                 continue;

@@ -71,9 +71,11 @@ cbuffer RootConstants : register(b0) {
     // --- 頁を畳む(T-0112)---
     uint32_t g_foldTolerance;  // MrPackFoldTolerance(0 = 完全に同じ)
 
-#ifdef MR_WIDE_CELLS
-    // --- 成分の二段(T-0176。溢れを使う変種 multires_step_wide_* だけが宣言する。ルート署名の最後の 1 語)---
-    uint32_t g_overflowBase;  // u6 の溢れの領域の始まり(語。shaders/common/multires_wide.hlsli)
+#if defined(MR_WIDE_CELLS) || defined(MR_REFINE_PLACE)
+    // --- 成分の二段(T-0176。溢れを使う変種 multires_step_wide_* が宣言する。ルート署名の最後の 1 語)---
+    // u6 の溢れの領域の始まり(語。shaders/common/multires_wide.hlsli)。溢れを使わない世界では同じ所から隣の写し
+    // (細かくする段の置かれ方の変種 MR_REFINE_PLACE が読む。common/multires_refine_halo.hlsli。T-1189)
+    uint32_t g_overflowBase;
 #endif
 };
 

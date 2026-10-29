@@ -4,6 +4,8 @@
 //   - 置かれ方を使う世界(EnableRefineCellPlacement)を 1 段(根の八分の一)と 2 段の鎖(子の八分の一まで。2 段目は 1 段目が配った頁を読む)で
 //   - 粒の詰まり 100 %(印 0)と 60 %(D-679 の既定)
 //   - 置かれ方を使わない世界(SAME)も今まで通り一致
+//   - 端の場面(T-1189): 親のブロックの端の列が隣のブロック(索引で同じレベル)の列を読む。隣の写し(sim/multires_refine_halo.hlsl)を通る。
+//     隣の無い世界・隣を同じ刻みに細かくする 2 つの要求(どちらの順でも)も
 // 場面ごとに、要求を処理する段(RecordProcessRequests。置かれ方の世界は別の Work Graph のプログラム。ADR-0499)の GPU の時間を
 // 同じ処理 8 回の最小で出す(docs/perf.md)。
 // 引数は gpu_test_options.h。
@@ -78,11 +80,11 @@ namespace {
 
     // 1 つの場面: 細かくする前の世界を写し、要求を 1 つ処理して読み戻し、CPU の同じ処理と比べる。
     // 同じ処理を TIMING_RUNS 回くり返し、要求を処理する段の GPU の時間の最小を ms で返す
-    std::expected<double, std::string> RunScene(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring,
-                                                const Timestamps& timestamps, const Materials& materials, bool placed,
-                                                int32_t level, std::string_view name) {
-        const World initial = MakeWorld(materials, placed, false);
-        const World expected = MakeWorld(materials, placed, true, level);
+    std::expected<double, std::string> RunWorlds(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                 gpu::DebugRing& ring, const Timestamps& timestamps,
+                                                 const Materials& materials, const World& initial,
+                                                 const World& expected, std::span<const MrRequest> requests,
+                                                 std::string_view name) {
         auto gpu = sim::GpuMultires::Create(device, materials.table, initial.nest.capacity);
         if (!gpu)
             return std::unexpected(gpu.error());
@@ -97,9 +99,8 @@ namespace {
             if (list == nullptr)
                 return std::unexpected("コマンドリストを始められない");
 
-            const MrRequest refine = MrMakeRequest(MR_REQUEST_REFINE, level, 1, 1, 1);
             ring.RecordBegin(list);
-            if (!gpu->RecordUpload(list, initial.nest) || !gpu->RecordRequests(list, std::span(&refine, 1)))
+            if (!gpu->RecordUpload(list, initial.nest) || !gpu->RecordRequests(list, requests))
                 return std::unexpected("写せない");
 
             list->EndQuery(timestamps.heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
@@ -139,6 +140,24 @@ namespace {
         return bestMs;
     }
 
+    std::expected<double, std::string> RunScene(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring,
+                                                const Timestamps& timestamps, const Materials& materials, bool placed,
+                                                int32_t level, std::string_view name) {
+        const MrRequest refine = MrMakeRequest(MR_REQUEST_REFINE, level, 1, 1, 1);
+
+        return RunWorlds(device, queue, ring, timestamps, materials, MakeWorld(materials, placed, false),
+                         MakeWorld(materials, placed, true, level), std::span(&refine, 1), name);
+    }
+
+    // 端の場面(T-1189): neighbors = 隣のブロックを置くか
+    std::expected<double, std::string> RunEdgeScene(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                    gpu::DebugRing& ring, const Timestamps& timestamps,
+                                                    const Materials& materials, bool neighbors,
+                                                    std::span<const MrRequest> requests, std::string_view name) {
+        return RunWorlds(device, queue, ring, timestamps, materials, MakeEdgeWorld(materials, neighbors, {}),
+                         MakeEdgeWorld(materials, neighbors, requests), requests, name);
+    }
+
     std::expected<void, std::string> RunScenes(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring,
                                                const sim::BakedReactionTable& baked) {
         const auto timestamps = CreateTimestamps(device);
@@ -163,6 +182,30 @@ namespace {
         for (const Scene& scene : scenes) {
             const auto ran = RunScene(device, queue, ring, *timestamps, *scene.materials, scene.placed, scene.level,
                                       scene.name);
+            if (!ran)
+                return std::unexpected(ran.error());
+        }
+
+        // --- 端の場面(T-1189)---
+        const MrRequest a = EdgeRequestA();
+        const std::array<MrRequest, 2> abOrder = {a, EdgeRequestB()};
+        const std::array<MrRequest, 2> baOrder = {EdgeRequestB(), a};
+        struct EdgeScene {
+            const Materials* materials;
+            bool neighbors;
+            std::span<const MrRequest> requests;
+            std::string_view name;
+        };
+        const EdgeScene edgeScenes[] = {
+            {&full, true, std::span(&a, 1), "端・隣のブロックの列・詰まり 100 %"},
+            {&packed, true, std::span(&a, 1), "端・隣のブロックの列・詰まり 60 %"},
+            {&full, false, std::span(&a, 1), "端・隣が無い"},
+            {&packed, true, abOrder, "端・隣を同じ刻みに細かくする(A, B)"},
+            {&packed, true, baOrder, "端・隣を同じ刻みに細かくする(B, A)"},
+        };
+        for (const EdgeScene& scene : edgeScenes) {
+            const auto ran = RunEdgeScene(device, queue, ring, *timestamps, *scene.materials, scene.neighbors,
+                                          scene.requests, scene.name);
             if (!ran)
                 return std::unexpected(ran.error());
         }
@@ -210,8 +253,9 @@ namespace {
             return 1;
 
         Log(Channel::Gpu, Level::Info,
-            "gpu_tree_refine_placement_test: OK(置かれ方の 1 段・2 段の鎖・詰まり 100 % と 60 %・SAME で GPU と CPU "
-            "がビット一致)");
+            "gpu_tree_refine_placement_test: OK(置かれ方の 1 段・2 段の鎖・詰まり 100 % と 60 "
+            "%・SAME・端の隣のブロックの列で "
+            "GPU と CPU がビット一致)");
 
         return 0;
     }

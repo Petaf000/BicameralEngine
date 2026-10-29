@@ -7,15 +7,25 @@
 //   → グループ共有に親のブロックの詰まり(1 スレッド = 親のセル t)→ 子のセル t(1 スレッド = 子のセル t)の成分とエネルギーを子の頁へ。
 // 「数の空間」: 子 1 つの器 = レベル 0 のセルの体積 MR_CELL_VOLUME_MM3・配る量 = 親の数 × 8(子のレベルの単位)。
 // 寄せないセル(気体だけ・詰まり切った・据わる固体を含む・凝縮相が無い)は写したまま触らない。端数の枠は SAME のまま。
-// 隣は同じ親のブロックの中だけ(子に覆われたセル・ブロックの外は無いと読む: 横 → 傾き 0・下 → 詰まり切る・上 → 空。T-1176 の 1 本目の仮)。
+// 隣は親のブロックの中と、ブロックの外は隣の写し(要求の処理の割り当ての後に sim/multires_refine_halo.hlsl が u6 の g_overflowBase から書く。
+// 刻みの前の、索引で同じレベルの本物のブロックの詰まり。T-1189・common/multires_refine_halo.hlsli)。子に覆われたセル・同じレベルのブロックが
+// 無い所は無いと読む(横 → 傾き 0・下 → 詰まり切る・上 → 空。T-1176 の仮のまま)。
 // 書き換えた構造体の配列を動的な添字で読まない(T-0397): 親のセルの成分は毎回バッファから読み、子のセルはバッファへ直接書く。
 // 64bit の引き算と同じ値どうしの比べを並べない(T-1078・T-1159): 差は 32bit の 2 つに分けて借りを手で回す(PrSubS64)。
 #ifndef BICAMERAL_MULTIRES_REFINE_PLACE_HLSLI
 #define BICAMERAL_MULTIRES_REFINE_PLACE_HLSLI
 
+#include "common/multires_refine_halo.hlsli"
 #include "common/state_field.hlsli"
 
 static uint32_t s_placeAddress;  // 今のスレッドが読む親のセルの番地(g_cells)
+static uint32_t s_placeHalo;     // 今の段の隣の写しの位置(MR_HALO_NONE なら写しを読まない)
+static uint32_t s_placeOctant;   // 今の段の親の八分の一(写しの面の向き)
+
+// 隣の写しの番地(u6。並びは common/multires_refine_halo.hlsli)
+uint32_t RefineHaloAddress(uint32_t halo, uint32_t h) {
+    return g_overflowBase + (halo * MR_HALO_CELLS) + h;
+}
 
 // 物質の相の印 → 置かれ方の種類・密度(使わない。体積はモル体積から)・粒の詰まり(%。0 は 100)
 uint3 PlaceMaterialOf(uint32_t speciesId) {
@@ -59,16 +69,24 @@ int64_t PlaceFullnessAt(uint32_t address) {
     return SfSettleFullnessQ16(SfSettledVolume(sum), MR_CELL_VOLUME_MM3 * 8, sum.anchored);
 }
 
-bool PlacePresent(int32_t x, int32_t y, int32_t z) {
+// 詰まり(無ければ MR_HALO_ABSENT)。ブロックの中はグループ共有、外は隣の写し
+int32_t PlaceFullnessRaw(int32_t x, int32_t y, int32_t z) {
     const int32_t edge = (int32_t)MR_BLOCK_EDGE;
-    if (x < 0 || y < 0 || z < 0 || x >= edge || y >= edge || z >= edge)
-        return false;
+    if (x >= 0 && y >= 0 && z >= 0 && x < edge && y < edge && z < edge)
+        return (int32_t)gs_placeNarrow[MrCellIndex((uint32_t)x, (uint32_t)y, (uint32_t)z)];
 
-    return (int32_t)gs_placeNarrow[MrCellIndex((uint32_t)x, (uint32_t)y, (uint32_t)z)] >= 0;
+    if (s_placeHalo == MR_HALO_NONE)
+        return MR_HALO_ABSENT;
+
+    return (int32_t)g_treeWords[RefineHaloAddress(s_placeHalo, MrHaloIndexOf(x, y, z, s_placeOctant))];
+}
+
+bool PlacePresent(int32_t x, int32_t y, int32_t z) {
+    return PlaceFullnessRaw(x, y, z) >= 0;
 }
 
 int64_t PlaceFullnessOf(int32_t x, int32_t y, int32_t z) {
-    return (int32_t)gs_placeNarrow[MrCellIndex((uint32_t)x, (uint32_t)y, (uint32_t)z)];
+    return PlaceFullnessRaw(x, y, z);
 }
 
 // 列 (x, z) の段 y の表面(下が無い = 詰まり切る・上が無い = 空)
@@ -169,8 +187,13 @@ int64_t PlaceChildEnergy(uint32_t parentAddress, uint32_t j, uint32_t local, uin
     return PrSubS64(parentEnergy * 8, given);
 }
 
-// 細かくする段の置かれ方(グループの全部のスレッドが呼ぶ。1 スレッド = 子のセル t。子の頁のセル t は親と同じ数で写してある)
-void PlaceRefineChildren(MrBlock parent, uint32_t parentSlot, uint32_t octant, uint32_t childPage, uint32_t t) {
+// 細かくする段の置かれ方(グループの全部のスレッドが呼ぶ。1 スレッド = 子のセル t。子の頁のセル t は親と同じ数で写してある)。
+// halo = この段の隣の写しの位置(T-1189。MR_HALO_NONE なら外は無い)
+void PlaceRefineChildren(MrBlock parent, uint32_t parentSlot, uint32_t octant, uint32_t childPage, uint32_t halo,
+                         uint32_t t) {
+    s_placeHalo = halo;
+    s_placeOctant = octant;
+
     // --- 1. 親のブロックのセル t の詰まり(子に覆われたセルは無い)。覆いは索引の見出しから(親を覆うのはこの段の後)---
     int32_t fullness = -1;
     if (g_blocks[parentSlot].children[MrOctantOfCell(t)] == MR_NO_BLOCK)

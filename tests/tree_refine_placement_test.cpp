@@ -8,6 +8,8 @@
 //   - 2 回走らせて状態の要約が同じ
 //   - 層(T-1220): 粒が全部層なら層の無い世界と同じ子(子の層 = 子の粒の量)・層を使う世界では子の粒と層の和が親 × 8・
 //     舞う粒だけのセルは沈めない
+//   - 隣のブロックの列(T-1189): 親のブロックの端の列は隣のブロック(索引で同じレベル)から傾きと下の詰まりを読み、隣が無い世界と変わる。
+//     同じ刻みに隣のブロックを細かくする要求があっても(どちらの順でも)、読むのは刻みの前の写し = 1 つずつ処理した時と同じ
 // 物質の表は試験の表(MakeSpeciesChangedTestTable)の 2 つの物質を、粒(ばらける固体)と液体に書き換えて使う(相の印とモル体積だけを読む)。
 #include <algorithm>
 #include <array>
@@ -268,6 +270,81 @@ namespace {
         Expect(HashWholeNest(half.nest) != HashWholeNest(floating.nest), "層: 層の違いで子が変わる");
     }
 
+    // --- 5. 隣のブロックの列(T-1189)---
+
+    // 枠 slot(level・原点 x の本物のブロック)のセルの要約
+    uint64_t BlockCellsHash(const MultiresNest& nest, int32_t level, int64_t originX) {
+        const uint32_t slot = LookupBlock(nest, level, originX, 0, 0);
+        if (slot == MR_NO_BLOCK)
+            return 0;
+
+        uint64_t hash = 0;
+        for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
+            hash = (hash * 1099511628211ULL) ^ HashReactionCell(LoadNestCell(nest, slot, index));
+
+        return hash;
+    }
+
+    void TestEdge(const Materials& materials) {
+        const MrRequest a = EdgeRequestA();
+        const MrRequest b = EdgeRequestB();
+        const World alone = MakeEdgeWorld(materials, true, std::span(&a, 1));
+        const World lonely = MakeEdgeWorld(materials, false, std::span(&a, 1));
+        const World onlyB = MakeEdgeWorld(materials, true, std::span(&b, 1));
+        const std::array<MrRequest, 2> abOrder = {a, b};
+        const std::array<MrRequest, 2> baOrder = {b, a};
+        const World ab = MakeEdgeWorld(materials, true, abOrder);
+        const World ba = MakeEdgeWorld(materials, true, baOrder);
+        Expect(alone.child != MR_NO_BLOCK && lonely.child != MR_NO_BLOCK, "端の場面: 細かくした子がある");
+        if (alone.child == MR_NO_BLOCK || lonely.child == MR_NO_BLOCK)
+            return;
+
+        // --- 端の列(親のセル x = 7 の子 = 子のブロックの x = 6・7)は隣で変わり、中の列(x = 5 の子)は下の隣だけで変わる ---
+        uint32_t edgeChanged = 0;
+        uint32_t edgeCells = 0;
+        for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+            if (MrCellX(index) < 6 || MrCellY(index) > 1)
+                continue;
+
+            edgeCells += 1;
+            edgeChanged += MrSameCell(LoadNestCell(alone.nest, alone.child, index),
+                                      LoadNestCell(lonely.nest, lonely.child, index))
+                               ? 0u
+                               : 1u;
+        }
+
+        Expect(edgeChanged > 0 && edgeChanged <= edgeCells, "端の列: 隣のブロックの列を読むと子が変わる");
+
+        // --- 保存: 子の粒の和は親 × 8(端の列も)---
+        bool conserved = true;
+        for (uint32_t local = 0; local < MR_OCTANT_CELLS; ++local) {
+            const uint32_t parentCell = MrOctantCell(1, local);
+            const RxCell parent = EdgeSlopeCell(materials, MrCellX(parentCell), MrCellY(parentCell), false);
+            uint64_t grain = 0;
+            int64_t energy = 0;
+            for (uint32_t j = 0; j < 8; ++j) {
+                const RxCell child = LoadNestCell(alone.nest, alone.child, MrChildCell(local, j));
+                grain += AmountOf(child, materials.grain);
+                energy += child.energy;
+            }
+
+            conserved &= grain == AmountOf(parent, materials.grain) * 8 && energy == parent.energy * 8;
+        }
+
+        Expect(conserved, "端の列: 物質ごと・エネルギーの和は親 × 8");
+
+        // --- 同じ刻みに隣を細かくする要求があっても、読むのは刻みの前(どちらの順でも 1 つずつと同じ)---
+        const uint64_t aloneA = BlockCellsHash(alone.nest, 1, 8);
+        const uint64_t aloneB = BlockCellsHash(onlyB.nest, 1, 16);
+        Expect(aloneA != 0 && aloneB != 0, "端の場面: 両方の子がある");
+        Expect(BlockCellsHash(ab.nest, 1, 8) == aloneA && BlockCellsHash(ba.nest, 1, 8) == aloneA,
+               "同じ刻みの隣の要求: A の子は A だけの刻みと同じ(順に依らない)");
+        Expect(BlockCellsHash(ab.nest, 1, 16) == aloneB && BlockCellsHash(ba.nest, 1, 16) == aloneB,
+               "同じ刻みの隣の要求: B の子は B だけの刻みと同じ(順に依らない)");
+        Expect(HashWholeNest(ab.nest) == HashWholeNest(MakeEdgeWorld(materials, true, abOrder).nest),
+               "端の場面: 2 回走らせて状態の要約が同じ");
+    }
+
     int Run() {
         const auto baked = BakeReactionTable(MakeSpeciesChangedTestTable());
         if (!baked) {
@@ -285,6 +362,7 @@ namespace {
         TestConservation(materials, placed, same);
         TestShape(materials, placed);
         TestLayers(materials, placed);
+        TestEdge(materials);
         Expect(HashWholeNest(placed.nest) == HashWholeNest(MakeWorld(materials, true).nest),
                "2 回走らせて状態の要約が同じ");
         Expect(HashWholeNest(placed.nest) != HashWholeNest(same.nest), "置かれ方の世界は SAME の世界と違う");

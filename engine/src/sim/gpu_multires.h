@@ -349,7 +349,9 @@ namespace bicameral::sim {
         ComPtr<ID3D12PipelineState> m_wideBigPipeline;          // 速い形に入らないセルを作業場の形で刻む(T-0362)
         ComPtr<ID3D12PipelineState> m_treeWideReservePipeline;  // 細かくする子の頁に溢れの塊を付ける(T-0237)
         ComPtr<ID3D12PipelineState> m_treeWideTrimPipeline;     // 端数の枠が要らない塊を返す(T-0347)
-        uint32_t m_wideChunks = 0;                              // 溢れの塊の置き場の塊の数
+        ComPtr<ID3D12PipelineState>
+            m_treeRefineHaloPipeline;  // 置かれ方の世界の隣の写し(溢れを使わない世界だけ。T-1189)
+        uint32_t m_wideChunks = 0;     // 溢れの塊の置き場の塊の数
         uint32_t m_spaceSpecies =
             0;  // 作業場の 1 セルの成分の上限(表の物質の数。速い形に収まる表なら 0 = 作業場なし。T-0362)
         uint32_t m_spaceGroups = 0;  // 作業場の段のグループの数(T-0380。作業場なしなら 0)

@@ -188,7 +188,8 @@ void RefineLevel(MrRefineRecord record, uint32_t t) {
     // --- 寄せるセルの中身は置かれ方で(T-1188・T-1176。CPU の PlaceRefineOctantCells。端数は上で写した SAME のまま。
     //     グループで同じ条件なので、中のバリアは全部のスレッドが通る)---
     if (fromRequest && real && !uniformChild)
-        PlaceRefineChildren(parent, record.parentSlot, octant, childPage, t);
+        PlaceRefineChildren(parent, record.parentSlot, octant, childPage,
+                            g_states[record.request].blockBase - 1 - record.depth, t);  // 隣の写しの位置(T-1189)
 #endif
 
 #ifdef MR_WIDE_CELLS
