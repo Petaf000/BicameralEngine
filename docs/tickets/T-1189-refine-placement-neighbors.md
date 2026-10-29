@@ -1,6 +1,6 @@
 # T-1189 木を細かくする段の置かれ方: 隣のブロックの列を読む・斜面の空気の速さの比べ(T-1188 の続き)
 
-- Status: In Progress(2026-10-29 wt2・t-1189-refine-neighbors)
+- Status: Done(2026-10-29 wt2・t-1189-refine-neighbors: 隣のブロックの列を刻みの前の写しから読む。CPU・GPU ビット一致。斜面の空気の速さの比べは T-1257 に分けた)
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1 回分
@@ -12,9 +12,9 @@
 置かれ方で結果が変わる所を 1 つの場面で測って残す。
 
 ## 完了条件
-- [ ] 隣のブロックの列: 同じ刻みに別の要求が隣を覆いうるので、刻みの前の詰まりの写し(要求ごとに先に作る)から読む。CPU と GPU で同じ(gpu_tree_refine_placement に端の場面)
-- [ ] 下が木の中で無い時は粗い親のセルの詰まりを読むか決める(1 本目は詰まり切る)
-- [ ] 結果が変わる所の比べ: 0.25 m の 25° の斜面で空気の速さ(T-1106 の 2.8 m/s → 1 mm/s)。docs/perf.md か設計 20 §10.5 に残す
+- [x] 隣のブロックの列: 同じ刻みに別の要求が隣を覆いうるので、刻みの前の詰まりの写し(要求ごとに先に作る)から読む。CPU と GPU で同じ(gpu_tree_refine_placement に端の場面)
+- [x] 下が木の中で無い時は粗い親のセルの詰まりを読むか決める(1 本目は詰まり切る)→ 仮: 読まない(下の「判断」)
+- [ ] 結果が変わる所の比べ: 0.25 m の 25° の斜面で空気の速さ(T-1106 の 2.8 m/s → 1 mm/s)→ **T-1257 に分けた**(世界の木の上に斜面の場面を作る所から。下の「残り」)
 
 ## メモ
 - T-1188 で GPU の置かれ方と既定 on(世界の箱)を入れた。ブロックの中だけで読むのは CPU も GPU も同じ(ビット一致)。
@@ -45,3 +45,27 @@
   端の段が少しずれる。どちらも保存はビット単位。取り消しやすい(HaloFullness で 1 段粗い索引を引く形に足せる)。横の隣も同じ(粗い所との境は傾き 0)。
 
 ## 作業ログ
+- 2026-10-29 wt2(作業役): 隣の写し(CPU の SnapshotRefineHalos・GPU の TreeRefineHalo)を作り、置かれ方が親のブロックの外の列を写しから読む形にした。
+  release のビルドは警告 0(1 回目は link の Access is denied で落ち、流し直して通った)。tree_refine_placement・placement_refine・multires・
+  gpu_tree_refine_placement(HW・WARP。端の 5 場面を含む 10 場面がビット一致)が合格(20261029-074240・075019)。費用は docs/perf.md(写しの段 +0.004〜0.007 ms)。
+  斜面の空気の速さの比べは T-1257 に分けた。
+  引き継ぎの組 14 本(reaction_package・gpu_multires・stress・wide_many・warp・activity・quiet・layers・uniform・gpu_lab_box〔HW・WARP〕・gpu_placement_refine〔HW・WARP〕・gpu_phase_layer)も合格(20261029-075222。u6 の後ろを溢れを使わない世界でも使うようにしたので全部の非溢れの世界に当たる)。`archmap --check` OK。
+
+## 残り(T-1257 へ)
+- 0.25 m の 25° の斜面の空気の速さの比べ(T-1106 の 2.8 m/s → 1 mm/s): 案 B の場面(case_b)は世界の木を通らず、絵 → 箱の細かくする口が PlaceRefineCell を直接呼び
+  隣は絵のセルから読む(= もう隣を読む形。T-1106 の 1 mm/s はこの形の値)。世界の木で同じ比べをするには、斜面を世界の木の複数の根に描き、
+  前線で細かくして(要求)から流体の段を回す場面が要る(世界の木の上で空気が動く試験の器 = gpu_lab_box 系か multires_gas。大きい)。
+  比べる 3 行: 隣を読まない(T-1188 の形)・隣を読む(この枝)・箱の細かさで描いた斜面。
+
+## T-1240 の着手に要るもの(司令塔へ。この巡目は着手しない)
+- T-1188(t-1188-refine-gpu-2)と T-1238 が main に入っていること。この枝(T-1189)も multires_refine_place.hlsli・multires_graph.hlsl・gpu_multires.cpp の
+  RecordProcessRequests を触るので、T-1240 はこの枝の後か、この枝の上から始める。
+- **u6 の後ろ(g_overflowBase から)は、溢れを使わない世界ではこの枝の隣の写しが使う**(世界の枠 × 108 語)。T-1240 が層の置き場を「ほかのバッファの後ろ(溢れと同じ)」に置くなら、
+  写しの後ろ(g_overflowBase + 世界の枠 × MR_HALO_CELLS)からにする。木の段(multires_graph.hlsl・multires_tree.hlsl・multires_refine_halo.hlsl)は u4・u5 を
+  宣言していない(2026-10-29 grep で確かめた)ので、層の置き場を u4 に結ぶ形(T-1221 の multires_layers.hlsl と同じ)も取れる。
+- 置かれ方の段の層: CPU は MaterialsOf が層を「層の分(沈む側)・残り」の 2 つの物質に分けて配り、隣の詰まり(CellFullness)も層まで含めて読む。
+  GPU の PlaceFullnessAt・PlaceRefineChildren は層を読まない(層の無い世界だけ一致)。GPU の写しの段(HaloFullness)も同じく層を読まないので、T-1240 で層を足す時は
+  写しの段の詰まりにも層を入れる(CPU と同じ式)。
+- HW の Work Graph の止まり(T-0397・alloca)に注意: 置かれ方の段は別のプログラム(ADR-0499)。層の読みを足すとさらに重くなるので、層の物質を分ける回しは
+  書き換えた構造体の配列を動的な添字で読まない形(t-1233 の後なら共通の HLSL のローカルの配列は消えている)。
+
