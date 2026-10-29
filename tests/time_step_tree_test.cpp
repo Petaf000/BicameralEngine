@@ -133,6 +133,8 @@ namespace {
     int32_t shortExponent = 8;  // 短い刻み = e がこれ以下(shorte=。既定 8)
     bool unitByLength = true;   // 刻みを選ぶ単位を物の長さ 4 m で(D-640 の一旦。unit=block で外す)
     bool solverGalerkin = false;
+    double conductScale = 1.0;    // 火事の伝導率の倍率(conductscale=。T-1139 の速い伝導の測り)
+    uint32_t coarsestSweeps = 4;  // 試しの V の最も粗い段の掃き出し(coarsest=。T-1139。毎刻みの写しは 4 のまま)
     TimeTreeSelect selectRule = TimeTreeSelect::Previous;
     uint32_t groupShift = 0;   // 細かさの比べで 0.5 m の木の枠を揃える段(1 = 8 m のブロックに)
     uint32_t trialCycles = 0;  // 0 = longCycles と同じ
@@ -156,6 +158,7 @@ namespace {
         TimeTreeSetup setup;
         setup.cycles = rule == TimeStepRule::Fixed ? solverCycles : longCycles;
         setup.galerkin = solverGalerkin;
+        setup.coarsestSweeps = coarsestSweeps;
         setup.capacityQ32 = ToQ(material.heatPerCubic * LEVEL0_VOLUME, Q32);
         setup.conductLevel0Q32 = {0, ToQ(material.conductivity * 0.25 / 0.5 * TICK_SECONDS, Q32)};
         setup.groundQ32 = ToQ(material.groundPerCubic * LEVEL0_VOLUME * TICK_SECONDS, Q32);
@@ -624,6 +627,8 @@ namespace {
             "{}(T-1090)",
             scene, name, run.steps.vCycles, run.steps.zeroSolves, run.steps.zeroReshaped, run.steps.zeroRebanded[0],
             run.steps.zeroRebanded[1], run.steps.zeroRebanded[2]);
+        Log(Channel::Sim, Level::Info, "{} {}: 要約 {:016x}・最も粗い段の掃き出し {} 回(T-1139)", scene, name, run.hash,
+            coarsestSweeps);
     }
 
     // --- 1・4・5. 精度と費用(混ぜた木)---
@@ -660,8 +665,9 @@ namespace {
     std::vector<Snapshot> ReferenceSnapshots(std::string_view scene, std::string_view tag, const Material& material,
                                              const Profile& profile, uint64_t ticks, const Ignition& ignition,
                                              bool& conserved, std::vector<FrontSample>* fronts = nullptr) {
-        const std::string name = std::format("time_step_tree_reference_{}_v{}{}", tag, solverCycles,
-                                             solverGalerkin ? "g" : "");
+        const std::string scaled = conductScale == 1.0 ? "" : std::format("_k{:g}", conductScale);
+        const std::string name = std::format("time_step_tree_reference_{}_v{}{}{}", tag, solverCycles,
+                                             solverGalerkin ? "g" : "", scaled);
         const std::string path = name + ".bin";
         const std::string frontPath = name + "_front.bin";
         auto loaded = LoadSnapshots(path, ticks / COMPARE_EVERY);
@@ -677,6 +683,7 @@ namespace {
         // 毎刻みは V 4 のまま(写しのファイルの名前の V の回数どおり)
         TimeTreeSetup setup = MakeSetup(material, TimeStepRule::Fixed);
         setup.cyclesAtZero = 0;
+        setup.coarsestSweeps = 4;  // 写しのファイルの名前は掃き出しの回数を持たない(T-1139)
         const TimeTreeWorld world = MakeWorld(setup, material, sceneShape, profile);
         RunResult reference = Run(setup, material, world, ticks, ticks, ignition, true, fronts != nullptr);
         LogRun(scene, "毎刻み", world, reference, ticks);
@@ -951,6 +958,31 @@ namespace {
     }
 
     // --- T-1089: 広い世界の火事の解きの数(毎刻みとは比べない。試しだけ)---
+    // T-1139: 最も粗い段の掃き出し 4 回(既定)の写しを残し、ほかの回数の時はそれと比べる(同じ倍率・同じ木の時だけ)
+    void CompareCoarsest(const TimeTreeWorld& world, const Material& material, const RunResult& run) {
+        const std::string name = std::format("time_step_fire_cost_{}_k{:g}", shapeName, conductScale);
+        const std::string path = std::format("{}_c{}.bin", name, coarsestSweeps);
+        SaveSnapshots(path, run.snapshots);
+        if (coarsestSweeps == 4)
+            return;
+
+        const auto base = LoadSnapshots(name + "_c4.bin", run.snapshots.size());
+        if (!base) {
+            Log(Channel::Sim, Level::Info, "掃き出しの比べ: {}_c4.bin が無い(先に coarsest=4 を流す)", name);
+            return;
+        }
+
+        Difference worst;
+        for (size_t i = 0; i < run.snapshots.size(); ++i)
+            worst = Worst(worst, Compare(world, material, run.snapshots[i], (*base)[i]));
+
+        Log(Channel::Sim, Level::Info,
+            "掃き出しの比べ(T-1139): 掃き出し {} 回と 4 回: セルの温度の差の最大 {:.4f} mK(x {:.2f} m)・A {:.4f}/100 "
+            "万・"
+            "地面へ逃げた熱 {:.5f} mK",
+            coarsestSweeps, worst.temperatureMk, worst.worstX, worst.reactantMillionth, worst.groundMk);
+    }
+
     void CheckFireCost(const Material& material, const Ignition& ignition) {
         TimeTreeSetup setup = MakeSetup(material, TimeStepRule::Change);
         setup.groupShift = groupShift;
@@ -965,8 +997,9 @@ namespace {
         setup.spanObserver = &observer;
         const TimeTreeWorld world = MakeWorld(setup, material, sceneShape, Ambient(material.groundKelvin));
         const uint64_t ticks = sceneTicks != 0 ? sceneTicks : FIRE_TICKS;
-        const RunResult run = Run(setup, material, world, ticks, ticks, ignition, false, true);
+        const RunResult run = Run(setup, material, world, ticks, ticks, ignition, true, true);
         LogRun("火事の費用", TrialName(), world, run, ticks);
+        CompareCoarsest(world, material, run);
         uint64_t waitNs = 0;
         uint64_t largest = 0;
         for (const auto& [start, counts] : eventCells) {
@@ -1660,6 +1693,10 @@ namespace {
                 perturbMeters = std::atof(value.c_str());
             else if (key == "trial")
                 trialFixed = value == "fixed";
+            else if (key == "conductscale")
+                conductScale = std::atof(value.c_str());
+            else if (key == "coarsest")
+                coarsestSweeps = static_cast<uint32_t>(std::atoi(value.c_str()));
             else if (key == "galerkin")
                 solverGalerkin = value == "1";
             else if (key == "dump")
@@ -1682,7 +1719,8 @@ namespace {
 
         const bool all = part == "all";
         const Material pond = Pond();
-        const Material fire = Fire();
+        Material fire = Fire();
+        fire.conductivity *= conductScale;
         const Ignition fireIgnition{FIRE_IGNITION_TICK, fire.groundKelvin};
         if (all || part == "forward") {
             // 1 通り目と退く道の 1 本目で(2 通り目は採らないので外した。T-1013)

@@ -701,6 +701,7 @@ namespace bicameral::sim {
             options.solver.cycles = setup.residualStop == 0 ? cycles : 1;
             options.faceValues = false;
             options.galerkinCoarse = setup.galerkin;
+            options.solver.coarsestSweeps = setup.coarsestSweeps;
             if (setup.spanObserver != nullptr && setup.residualStop == 0) {
                 (*setup.spanObserver)(
                     {.system = solved.built.system, .exponent = span.exponent, .start = span.start, .cycles = cycles});

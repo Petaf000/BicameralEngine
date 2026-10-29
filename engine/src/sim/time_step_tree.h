@@ -94,6 +94,8 @@ namespace bicameral::sim {
         // (上限は上の回数)
         uint64_t residualStop = 0;
         bool galerkin = false;  // C-0 の粗い段の面の係数を子の和のまま(EquilibriumOptions::galerkinCoarse)
+        // C-0 の V の最も粗い段の掃き出しの回数(ImplicitOptions::coarsestSweeps。e = 0 の系は段 1 つなので V 1 = これだけ。T-1139 の測り)
+        uint32_t coarsestSweeps = 4;
         TimeTreeSelect select = TimeTreeSelect::Previous;
         // 同じレベルで 2^これ ブロック角の枠は同じ e に揃える(細かさを同じ物の長さのブロックで比べる。0 = ブロックごと)
         uint32_t groupShift = 0;
