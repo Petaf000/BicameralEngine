@@ -1,6 +1,6 @@
 # T-1240 GPU の層: 要求の処理(細かくする・粗くする・畳む・広げる)・一様の枠の層・溢れの成分の層
 
-- Status: Doing(7 の 1 まで。T-1221 から分けた。T-1188〔wt2 の multires_tree・gpu_multires〕の後)
+- Status: Doing(7 の 2 まで。T-1221 から分けた。T-1188〔wt2 の multires_tree・gpu_multires〕の後)
 - 種類: 工学
 - PC: 必須(GPU)
 - 見積もり: チャット 2 回分(要求の処理 / 一様の枠と溢れ)
@@ -89,6 +89,21 @@ T-1221 の 1 段目は、層の頁を GPU に置き、刻みの段の後に層�
   道具は新しい sim/multires_layer_access.hlsli(u4 = g_layers・g_external0 = 層の頁の数・g_external1 = セルの頁の数)。TreeRelease が返す頁の層の頁を返す(中身を 0 にして積む)。
   TreeFoldCheck は層の頁を持つ頁を畳まない(仮。層ごと畳むのは 7 の 3)。GpuMultires::BindLayers / RestoreExternal で要求の処理・畳むの間は u4 = 層の置き場。
   層を合わせる段は層の頁の全部に投げ、空いた層の頁は飛ばす。release ビルド警告 0・dxil_alloca_check・multires_layers 合格。GPU の組(下の引き継ぎ)は流した。
+
+- 2026-10-30 wt2(作業役 3): 7 の 2 を実装(t-1240-refine-layers)。TreeAllocate が細かくする要求ごとに層の頁を要求の順のプレフィックス和で取る
+  (親の頁が層の頁を持つ時だけ・鎖の段の数。MrLayerRequestAddress)。尽きたら MR_STATUS_NO_SPACE・MrLayerShortageAddress(仮【エンジン】)。
+  RefineLevel: 子の頁に層の頁を結び、子のセル t ← 親のセル MrParentCellOfChild の組 8 つ(CopyLayerCell)・覆った親のセルの層は 0。
+  影の鎖: 影の頁の層の頁を使い回すか空きの上から取る(尽きたら数えて層なし: CPU が決めた鎖は断れない)。RecordRefineShadow も u4 を結ぶ・RecordPullBack の後に層を合わせる。
+  置かれ方の世界に層がある時は RecordUpload が断る(7 の 4 まで)。試験: gpu_multires_layers に本物の鎖・影の鎖(9 段・毎刻み)・層の頁が尽きる場面。
+
+## 引き継ぎメモ(2026-10-30 wt2 作業役 3)
+- 済み: 7 の 2(細かくする: 要求の鎖・影の鎖・覆った親の層)。一様な親の子(一様の枠の層)は 4 の一様の枠の層と一緒に(今は写す像が一様の枠の層を断る)。
+- 次(7 の 3): 粗くする(CoarsenRequest。子 8 つの層を物質で結んで和 ÷ 8 の切り捨て = CPU の CoarsenLayers)。親が層の頁を持たなければ TreeAllocate で取る
+  (今の RefineLayerNeed と同じ累積和に粗くする要求の分を足す: 子が層の頁を持ち親が持たない時 1)。子の層の頁は TreeRelease が返す(済み)。
+  畳む: TreeFoldCheck の「層の頁を持つ頁は畳まない」を、CPU の FoldExact → FoldLayeredPage(層まで一様・舞う粒が残れば畳まない)に。一様の枠の層(4)が要る。
+  広げる: TreeExpand で一様の枠の層を頁へ。3 と 4 は一緒に進める方が早い(一様の枠の層が無いと畳む・広げるの層の行き先が無い)。
+- 影の頁は RemoveShadow で層の頁を返さない(CPU の RemoveShadowChain は頁の層を残すが観察の枠の頁なので次の RefineShadow で書き直す)。影の鎖の分の層の頁を
+  layerPages に持たせる約束(尽きると CPU とずれる)は gpu_multires.h のコメントに書いた。
 
 ## 引き継ぎメモ(2026-10-29 wt2 作業役 2)
 - 済み: 7 の 1(並び・像・層を合わせる段・頁を返す時に層の頁を返す)。**細かくする・粗くする・畳む・広げるはまだ層を配らない**(前と同じ「層が消える」側に倒れる。前は持ち主の印で 0 にしていた)。

@@ -70,8 +70,9 @@ namespace bicameral::sim {
         // セルの成分ごとの層の量(T-1221。ADR-0481 の 5): 層の頁(層のある頁だけ。1 頁 48 KiB)の数。0 = 層を持たない(今と同じ。
         // CPU の頁に層があっても GPU は層を知らず、読み戻しは CPU の前の層を付け替えるだけ)。0 でなければ RecordUpload が層のある頁を写し、
         // 刻み(RecordStep・RecordStepActive)の後に層を合わせる段が層 = min(前の層, 今の量) に付け替え、Read が CPU の頁の層を GPU の層で置き換える。
-        // 1 段目の限り: 溢れを使う世界・一様の枠の層は写さない(RecordUpload が false)。要求の処理(細かくする・粗くする・畳む・広げる)は
-        // 層を配らない(頁を手放した層の頁は 0 になる)。T-1240
+        // 細かくする(要求の鎖・影の鎖)は子の頁へ親の層を写す(層の頁は空きのスタックから取る。T-1240 の 2 段目)。層の頁が尽きたら
+        // 層のある所を細かくする要求を断って ReadLayerShortage に数える(量は変わらない。仮・ユーザー未確認)。
+        // まだの所: 溢れを使う世界・一様の枠の層は写さない(RecordUpload が false)。粗くする・畳む・広げるは層を配らない(T-1240 の続き)
         uint32_t layerPages = 0;
 
         // 作ったルート署名・パイプライン・Work Graph のプログラムを使い回す置き場(T-0427。無ければ毎回作る)。同じデバイスで
@@ -167,6 +168,8 @@ namespace bicameral::sim {
             uint32_t dropped = 0;
         };
         [[nodiscard]] std::optional<ActivitySeeds> ReadSeeds() const;
+        // 層の頁が尽きて断った細かくする要求・取れなかった影の段の数(RecordReadback の時の値。層を持たない世界は 0。T-1240)
+        [[nodiscard]] std::optional<uint32_t> ReadLayerShortage() const;
 
         // 溢れの塊の置き場の使い方(RecordReadback の時。溢れを使う世界だけ。試験用。T-0347)。
         // 端数の枠は今の面の溢れに要る塊だけを持つ(fractionChunks == fractionNeeded)・塊は置き場から漏れない(空き + 頁 + 端数の枠 + 一様の値 = 全部)

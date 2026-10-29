@@ -6,11 +6,16 @@
 //      0 ≤ 層 ≤ 量 で、燃えて減った物質の層が GPU でも減る(試験が空でない)
 //   3. まとめて刻む: 1 本のリストで写してから何刻みも刻み、最後に 1 回だけ読み戻して比べる(層が VRAM で刻みをまたいで続く)
 //   4. 層の無い場面: 層の頁を持つ GPU でも、層の無い世界は今とビット単位で同じ(CPU と一致)
+//   5. 細かくする場面(T-1240 の 2 段目): 層のある根の 1 点を本物の鎖・影の鎖で 9 段細かくし(test::StepMultiresScene と同じ順)、
+//      毎刻み比べる(子の頁の層 = 親のセルの層・覆った親のセルの層は 0・影は引き戻しの後に層を合わせる)。粗くする前の刻みまで
+//      (粗くする・畳む・広げるの層は T-1240 の 3 段目)
+//   6. 層の頁が尽きる場面: 層の頁を小さくした世界では、層のある所を細かくする要求を断って数える(木と量は細かくしない世界と同じ)
 // 時間(WARP では測らない): 層のある場面の 1 刻み(全部を刻む)を層の頁あり・なしで測り、層を合わせる段の分を見る(docs/perf.md)。
-// 場面は tests/multires_test_scene.h の根(要求は出さない: 細かくする / 粗くする時の層の配りは T-1240 の 2 段目から)。引数は gpu_test_options.h。
+// 場面は tests/multires_test_scene.h の根と鎖。引数は gpu_test_options.h。
 #include <algorithm>
 #include <expected>
 #include <format>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -27,6 +32,7 @@
 #include "reaction_test_table.h"
 #include "sim/gpu_multires.h"
 #include "sim/gpu_multires_layers.h"
+#include "sim/multires_nest_internal.h"
 #include "sim/multires_state.h"
 
 using namespace bicameral;
@@ -35,11 +41,13 @@ using namespace bicameral::reaction;
 
 namespace {
 
-    constexpr uint64_t LAYER_TICKS = 24;    // 毎刻み比べる場面の刻みの数
-    constexpr uint64_t BATCH_TICKS = 12;    // まとめて刻む場面の刻みの数
-    constexpr uint32_t LAYER_PAGES = 4;     // GPU の層の頁の数
-    constexpr uint32_t WARMUP_STEPS = 200;  // 計測の前の刻み(GPU のクロックを上げる)
-    constexpr uint32_t MEASURE_STEPS = 64;  // 計測の刻み
+    constexpr uint64_t LAYER_TICKS = 24;                               // 毎刻み比べる場面の刻みの数
+    constexpr uint64_t BATCH_TICKS = 12;                               // まとめて刻む場面の刻みの数
+    constexpr uint32_t LAYER_PAGES = 4;                                // GPU の層の頁の数
+    constexpr uint32_t CHAIN_LAYER_PAGES = 1 + test::MULTIRES_LEVELS;  // 細かくする場面: 根 + 鎖の 9 段(ちょうど足りる)
+    constexpr uint64_t CHAIN_TICKS = test::MULTIRES_REFINE_TICK + 8;   // 細かくする場面の刻みの数(粗くする前)
+    constexpr uint32_t WARMUP_STEPS = 200;                             // 計測の前の刻み(GPU のクロックを上げる)
+    constexpr uint32_t MEASURE_STEPS = 64;                             // 計測の刻み
 
     enum class StepMode : uint8_t {
         Full,
@@ -265,6 +273,119 @@ namespace {
         return {};
     }
 
+    // 1 刻みの GPU の記録(test::StepMultiresScene と同じ順。gpu_multires_test の RecordTick と同じ)
+    bool RecordSceneTick(ID3D12GraphicsCommandList10* list, sim::GpuMultires& gpu, D3D12_GPU_VIRTUAL_ADDRESS ring,
+                         test::MultiresScenario scenario, uint64_t tick) {
+        using test::MultiresScenario;
+        const sim::MultiresPoint point = test::MakeMultiresPoint(test::MULTIRES_LEVELS);
+        if (!gpu.RecordRequests(list, test::MultiresRequestsAt(scenario, tick)))
+            return false;
+
+        gpu.RecordProcessRequests(list, ring);
+        if (tick == test::MULTIRES_REFINE_TICK && scenario == MultiresScenario::Shadow)
+            gpu.RecordRefineShadow(list, ring, test::MULTIRES_ROOT_SLOT, test::MULTIRES_SHADOW_SLOT,
+                                   test::MULTIRES_LEVELS, point);
+
+        gpu.RecordStep(list, ring, test::MULTIRES_TEST_SEED, tick);
+        if (test::MultiresShadowExists(scenario, tick))
+            gpu.RecordPullBack(list, ring, test::MULTIRES_SHADOW_SLOT, test::MULTIRES_LEVELS);
+
+        return true;
+    }
+
+    // 層のある頁の数(根の外へ層が配られたかを見る)
+    uint32_t LayeredPages(const sim::MultiresNest& nest) {
+        uint32_t count = 0;
+        for (uint32_t page = 0; page < nest.cells.pages.size(); ++page)
+            count += sim::nest_detail::PageHasLayers(nest, page) ? 1 : 0;
+
+        return count;
+    }
+
+    // --- 5. 細かくする場面(本物の鎖・影の鎖)---
+    std::expected<void, std::string> RunChain(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring,
+                                              const sim::BakedReactionTable& table, test::MultiresScenario scenario) {
+        sim::MultiresNest cpu = MakeScene(table, true);
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, GpuOptions(StepMode::Full, CHAIN_LAYER_PAGES));
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        const std::string scene = scenario == test::MultiresScenario::Real ? "本物の鎖" : "影の鎖";
+        uint32_t layered = 0;
+        for (uint64_t tick = 0; tick < CHAIN_TICKS; ++tick) {
+            const auto record = [&](ID3D12GraphicsCommandList10* list) {
+                if (tick == 0 && !gpu->RecordUpload(list, cpu))
+                    return false;
+
+                return RecordSceneTick(list, *gpu, ring.GpuAddress(), scenario, tick);
+            };
+            auto read = Execute(queue, ring, *gpu, record);
+            if (!read)
+                return std::unexpected(std::format("{} 刻み {}: {}", scene, tick, read.error()));
+
+            test::StepMultiresScene(cpu, table, scenario, tick);
+            if (sim::CountLayerMisfits(*read) != 0)
+                return std::unexpected(std::format("{} 刻み {}: GPU の層が量を超える", scene, tick));
+
+            if (sim::HashWholeNest(cpu) != sim::HashWholeNest(*read))
+                return std::unexpected(
+                    std::format("{} 刻み {}: CPU と GPU の状態の要約が違う(層のある頁 cpu {} / gpu {})", scene, tick,
+                                LayeredPages(cpu), LayeredPages(*read)));
+
+            if (gpu->ReadLayerShortage() != 0u)
+                return std::unexpected(std::format("{} 刻み {}: 足りるはずの層の頁が尽きた", scene, tick));
+
+            layered = LayeredPages(*read);
+        }
+
+        // 根と鎖の 9 段の頁が層を持つ(試験が空でない)
+        if (layered != CHAIN_LAYER_PAGES)
+            return std::unexpected(std::format("{}: 層のある頁が {}(期待 {})", scene, layered, CHAIN_LAYER_PAGES));
+
+        Log(Channel::Gpu, Level::Info, "{}: {} 刻み毎回一致(層のある頁 {})", scene, CHAIN_TICKS, layered);
+
+        return {};
+    }
+
+    // --- 6. 層の頁が尽きる場面: 細かくする要求を断って数える(仮【エンジン】T-1240)---
+    // 比べる相手は細かくしない CPU(断った要求の分だけ「空きが無い」の数える欄が 1 多い)
+    std::expected<void, std::string> RunShortage(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                 gpu::DebugRing& ring, const sim::BakedReactionTable& table) {
+        sim::MultiresNest cpu = MakeScene(table, true);
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, GpuOptions(StepMode::Full, LAYER_PAGES));
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        const uint64_t ticks = test::MULTIRES_REFINE_TICK + 2;
+        for (uint64_t tick = 0; tick < ticks; ++tick) {
+            const auto record = [&](ID3D12GraphicsCommandList10* list) {
+                if (tick == 0 && !gpu->RecordUpload(list, cpu))
+                    return false;
+
+                return RecordSceneTick(list, *gpu, ring.GpuAddress(), test::MultiresScenario::Real, tick);
+            };
+            auto read = Execute(queue, ring, *gpu, record);
+            if (!read)
+                return std::unexpected(std::format("尽きる 刻み {}: {}", tick, read.error()));
+
+            test::StepMultiresScene(cpu, table, test::MultiresScenario::None, tick);
+            const uint32_t denied = tick >= test::MULTIRES_REFINE_TICK ? 1u : 0u;
+            const std::optional<uint32_t> shortage = gpu->ReadLayerShortage();
+            if (shortage != denied || read->counters[MR_COUNTER_NO_SPACE] != cpu.counters[MR_COUNTER_NO_SPACE] + denied)
+                return std::unexpected(std::format("尽きる 刻み {}: 断った数が違う(層の頁 {}・空きが無い {})", tick,
+                                                   shortage.value_or(~0u), read->counters[MR_COUNTER_NO_SPACE]));
+
+            read->counters[MR_COUNTER_NO_SPACE] = cpu.counters[MR_COUNTER_NO_SPACE];
+            if (auto compared = Compare(cpu, *read, std::format("尽きる 刻み {}", tick)); !compared)
+                return compared;
+        }
+
+        Log(Channel::Gpu, Level::Info,
+            "層の頁が尽きる: 細かくする要求を断って数えた(層の頁 {}・木と量は細かくしない世界と一致)", LAYER_PAGES);
+
+        return {};
+    }
+
     // --- 3. まとめて刻む ---
     std::expected<void, std::string> RunBatch(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring,
                                               const sim::BakedReactionTable& table) {
@@ -342,6 +463,14 @@ namespace {
 
         if (auto plain = RunEachTick(device, queue, ring, table, StepMode::Full, false); !plain)
             return plain;
+
+        for (const test::MultiresScenario scenario : {test::MultiresScenario::Real, test::MultiresScenario::Shadow}) {
+            if (auto chain = RunChain(device, queue, ring, table, scenario); !chain)
+                return chain;
+        }
+
+        if (auto shortage = RunShortage(device, queue, ring, table); !shortage)
+            return shortage;
 
         return RunBatch(device, queue, ring, table);
     }

@@ -15,6 +15,7 @@
 // 1 グループの中でスレッドは別々のセルに書き、見出し・返す枠・索引はスレッド 0 だけが書く。数える欄と帳簿は足し算。
 // 次のレベルは前のレベルの書き込みを読むので、出力の前に Barrier(UAV_MEMORY, DEVICE_SCOPE | GROUP_SYNC)、バッファは globallycoherent。
 #include "sim/multires_bindings.hlsli"
+#include "sim/multires_layer_access.hlsli"  // 層の置き場(u4。細かくする子の頁へ層を写す。T-1240)
 #ifdef MR_WIDE_CELLS
 #include "sim/multires_wide_access.hlsli"
 #endif
@@ -39,6 +40,7 @@ struct MrCoarsenRecord {
 
 groupshared uint32_t gs_octantFraction;
 groupshared uint32_t gs_restFraction;
+groupshared uint32_t gs_childLayerPage;
 
 // 手で決めた影の鎖の点(ルート定数)
 MrRequest ShadowPoint() {
@@ -137,6 +139,44 @@ void CoverWideTails(uint32_t page, uint32_t octant) {
 }
 #endif
 
+// 細かくする子の頁 childPage の層の頁(T-1240。スレッド 0 だけが呼ぶ。頁の索引と持ち主も書く)。
+// 要求の鎖: TreeAllocate が割り当てた層の頁の上から depth 番目(親が層の頁を持たない要求は割り当てが無い)。
+// 影の鎖: 影の頁が前から持つ層の頁(古い層は下で書き直す)か、親が層の頁を持てば空きのスタックの上から取る。
+// 尽きたら数えて層なし(影は CPU が決めた鎖なので断れない。CPU とずれる。layerPages を影の鎖の分まで持つ)
+uint32_t ChildLayerPage(MrRefineRecord record, MrBlock parent, uint32_t childPage) {
+    const uint32_t pageCount = LayerPageCount();
+    const uint32_t capacity = LayerCapacity();
+    if (capacity == 0 || childPage == MR_NO_PAGE)
+        return MR_LAYER_NO_PAGE;
+
+    if (record.request != MR_NO_BLOCK) {
+        const uint32_t base = g_layers[MrLayerRequestAddress(pageCount, capacity, record.request)];
+        if (base == MR_LAYER_NO_PAGE)
+            return MR_LAYER_NO_PAGE;
+
+        const uint32_t layerPage = g_layers[MrLayerFreeAddress(pageCount, capacity, base - 1 - record.depth)];
+        AttachLayerPage(childPage, layerPage);
+        return layerPage;
+    }
+
+    const uint32_t existing = LayerPageOf(childPage);
+    const bool parentLayers = !MrIsUniform(parent) && LayerPageOf(parent.page) != MR_LAYER_NO_PAGE;
+    if (existing != MR_LAYER_NO_PAGE || !parentLayers)
+        return existing;
+
+    const uint32_t freeCount = g_layers[MrLayerFreeCountAddress(pageCount, capacity)];
+    if (freeCount == 0) {
+        CountLayerShortage(1);
+        return MR_LAYER_NO_PAGE;
+    }
+
+    const uint32_t layerPage = g_layers[MrLayerFreeAddress(pageCount, capacity, freeCount - 1)];
+    g_layers[MrLayerFreeCountAddress(pageCount, capacity)] = freeCount - 1;
+    AttachLayerPage(childPage, layerPage);
+
+    return layerPage;
+}
+
 // 1 段を細かくする(1 スレッド = 子のセル t。親のセル t も読む)
 void RefineLevel(MrRefineRecord record, uint32_t t) {
     const bool fromRequest = record.request != MR_NO_BLOCK;
@@ -161,6 +201,7 @@ void RefineLevel(MrRefineRecord record, uint32_t t) {
     if (t == 0) {
         gs_octantFraction = 0;
         gs_restFraction = 0;
+        gs_childLayerPage = uniformChild ? MR_LAYER_NO_PAGE : ChildLayerPage(record, parent, childPage);
     }
 
     GroupMemoryBarrierWithGroupSync();
@@ -183,6 +224,14 @@ void RefineLevel(MrRefineRecord record, uint32_t t) {
 
     if (childFraction != MR_NO_FRACTION)
         g_fractions[FractionAddress(childFraction, t)] = LoadFraction(parent.fraction, parentCell);
+
+    // --- 層: 子のセルは親のセルと同じ層(CPU の CopyCellToPage。親に層が無ければ子の層の頁の古い層を消す。T-1240)---
+    const uint32_t childLayerPage = gs_childLayerPage;
+    const uint32_t parentLayerPage = uniformChild ? MR_LAYER_NO_PAGE : LayerPageOf(parent.page);
+    if (childLayerPage != MR_LAYER_NO_PAGE && parentLayerPage != MR_LAYER_NO_PAGE)
+        CopyLayerCell(parentLayerPage, parentCell, childLayerPage, t);
+    else if (childLayerPage != MR_LAYER_NO_PAGE)
+        ClearLayerCell(childLayerPage, t);
 
 #ifdef MR_REFINE_PLACE
     // --- 寄せるセルの中身は置かれ方で(T-1188・T-1176。CPU の PlaceRefineOctantCells。端数は上で写した SAME のまま。
@@ -210,6 +259,9 @@ void RefineLevel(MrRefineRecord record, uint32_t t) {
         const uint32_t index = MrOctantCell(octant, t);
         if (!uniformChild)
             g_cells[PageCellAddress(parent.page, index)] = RxMakeEmptyCell(0);
+
+        if (parentLayerPage != MR_LAYER_NO_PAGE)
+            ClearLayerCell(parentLayerPage, index);  // 空のセルの層は 0(CPU の StorePageCell の付け替え)
 
         if (parent.fraction != MR_NO_FRACTION)
             g_fractions[FractionAddress(parent.fraction, index)] = MrMakeEmptyFraction();
