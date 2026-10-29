@@ -677,6 +677,16 @@ FX_FN uint64_t RcShare(uint64_t energy, uint64_t weight, uint64_t weightSum) {
     return FxDivU128By64(FxMulU64Full(energy, weight), weightSum).quotient;
 }
 
+// 持ち越しを葉の面の側の升目 count 個へ同じ重みで広げる時の at 番目の量(T-1227 段 1・ADR-0500 の光の配り)。
+// 最後の升目が残り(和は amount とビット単位で同じ)。count > 0
+FX_FN uint64_t RcCarrySpreadShare(uint64_t amount, uint32_t count, uint32_t at) {
+    const uint64_t share = amount / (uint64_t)count;
+    if (at + 1 < count)
+        return share;
+
+    return amount - (share * (uint64_t)(count - 1));
+}
+
 FX_FN uint64_t RcBagId(uint32_t level, int64_t blockX, int64_t blockY, int64_t blockZ, uint32_t face, uint32_t i,
                        uint32_t j) {
     uint64_t hash = FxHashCombine((uint64_t)level, (uint64_t)blockX);
@@ -1138,11 +1148,12 @@ FX_CONST uint32_t RC_GPU_STEPS = 18;        // 通ったセルの数
 FX_CONST uint32_t RC_GPU_FACE_COUNT = 19;   // 放つ面の数
 FX_CONST uint32_t RC_GPU_BAG_COUNT = 20;    // 袋の表ごとの袋の数(2)
 FX_CONST uint32_t RC_GPU_CARRY_COUNT = 22;  // 持ち越しの表ごとの 0 でない鍵の数(2。測りの目安)
-FX_CONST uint32_t RC_GPU_OVERFLOW = 24;     // 溢れの印(1 = 放つ面・2 = 袋・4 = 木を読む写しが 0.5 m より細かい葉に当たった〔T-1117〕。持ち越しは密な表なので溢れない)
+FX_CONST uint32_t RC_GPU_OVERFLOW =
+    24;  // 溢れの印(1 = 放つ面・2 = 袋・4 = 木を読む写しが 0.5 m より細かい葉に当たった〔T-1117〕。持ち越しは密な表なので溢れない)
 FX_CONST uint32_t RC_GPU_OVERFLOW_FINE_LEAF = 4;
-FX_CONST uint32_t RC_GPU_BAG_PEAK = 25;     // 段 1 つの袋の数の最大(置き場の大きさを決める目安。作ってからの最大)
-FX_CONST uint32_t RC_GPU_HELD = 26;         // 帯ごとの、熱で放って組の刻みまで待たせた量(2。T-1010)
-FX_CONST uint32_t RC_GPU_KEPT = 28;         // 帯ごとの、持ち越しの表で次の刻みへそのまま送った量(2)
+FX_CONST uint32_t RC_GPU_BAG_PEAK = 25;  // 段 1 つの袋の数の最大(置き場の大きさを決める目安。作ってからの最大)
+FX_CONST uint32_t RC_GPU_HELD = 26;      // 帯ごとの、熱で放って組の刻みまで待たせた量(2。T-1010)
+FX_CONST uint32_t RC_GPU_KEPT = 28;      // 帯ごとの、持ち越しの表で次の刻みへそのまま送った量(2)
 FX_CONST uint32_t
     RC_GPU_RUN = 30;  // この刻みを流す印(RcPlanTick が書く。起動の予告のバッファにも同じ値。0 = 飛ばす。T-1229・T-1235)
 FX_CONST uint32_t RC_GPU_SKIPPED = 31;  // 飛ばした刻みの数(作ってから。測りの目安)

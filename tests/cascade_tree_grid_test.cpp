@@ -7,6 +7,10 @@
 //   2. RC を 3 刻み流した A と B の結果(セルごとの吸った・放った・持ち越し)が同じで、A の葉ごとの和 = B の 8 セルの和
 //   3. 葉ごとに足した和 = 升目の和(帯ごと・ビット単位)。C(粗い葉と 0.5 m の葉が混ざった木)でも
 //   4. 0.5 m の根の木は前の写し(MakeCascadeGrid)と同じ。0.5 m より細かい葉の木は誤り(配る規則は土台)
+//   5. 葉の鍵の持ち越し(T-1227 段 1): 全部 0.5 m の木で升目の鍵の持ち越しと全部の刻みでビット一致(吸った・放った・帳簿・持ち越し)。
+//      粗い葉の木・混ざった木で持ち越しの量が帳簿で合う(畳む・広げるで和が同じ・次の刻みの carriedIn + kept = 前の刻みの持ち越し)
+//   6. 受けのあった葉の枠(T-1228 段 1)= 升目の吸った・放ったが 0 でない葉の枠の全部(落とさない)
+#include <algorithm>
 #include <array>
 #include <cstdio>
 #include <span>
@@ -240,6 +244,111 @@ namespace {
         EXPECT(!MakeCascadeTreeGrid(finer, table).has_value());
     }
 
+    // --- 葉の鍵の持ち越し(T-1227・T-1228 段 1)---
+
+    std::array<uint64_t, rx::LT_BANDS> CarrySum(const CascadeCarry& carry) {
+        std::array<uint64_t, rx::LT_BANDS> sum{};
+        for (const CascadeCarryEntry& entry : carry.entries)
+            sum[entry.band] += entry.amount;
+
+        return sum;
+    }
+
+    std::array<uint64_t, rx::LT_BANDS> LeafCarrySum(const CascadeLeafCarry& carry) {
+        std::array<uint64_t, rx::LT_BANDS> sum{};
+        for (const CascadeLeafCarryEntry& entry : carry.entries)
+            sum[entry.band] += entry.amount;
+
+        return sum;
+    }
+
+    // 受けのあった枠を升目から数え直す(落とさないことの確かめ)
+    std::vector<uint32_t> TouchedByGrid(const CascadeTreeGrid& tree, const CascadeTickResult& result) {
+        std::vector<bool> touched(*std::ranges::max_element(tree.leafSlot) + 1, false);
+        for (size_t at = 0; at < tree.leafSlot.size(); ++at) {
+            for (uint32_t band = 0; band < rx::LT_BANDS; ++band) {
+                if (result.absorbed[(at * rx::LT_BANDS) + band] != 0 || result.emitted[(at * rx::LT_BANDS) + band] != 0)
+                    touched[tree.leafSlot[at]] = true;
+            }
+        }
+
+        std::vector<uint32_t> slots;
+        for (uint32_t slot = 0; slot < touched.size(); ++slot) {
+            if (touched[slot])
+                slots.push_back(slot);
+        }
+
+        return slots;
+    }
+
+    // 全部 0.5 m の木: 葉の鍵で流しても升目の鍵とビット一致
+    void TestLeafCarryMatchesGrid(const BakedReactionTable& table) {
+        constexpr uint64_t TICKS = 6;
+        const MultiresNest fine = MakeWorld(table, 0, {4, 2, 4});
+        const auto tree = MakeCascadeTreeGrid(fine, table);
+        EXPECT(tree.has_value());
+        if (!tree)
+            return;
+
+        const Ticks gridRun = RunTicks(tree->grid, TICKS);
+        CascadeLeafCarry carry;
+        size_t pages = 0;
+        uint64_t carried = 0;
+        for (uint64_t tick = 0; tick < TICKS; ++tick) {
+            const CascadeLeafTick step = StepCascadeLightOnLeaves(fine, *tree, carry, CascadeParams{}, tick);
+            const CascadeTickResult& expected = gridRun.results[tick];
+            EXPECT(step.result.absorbed == expected.absorbed && step.result.emitted == expected.emitted);
+            EXPECT(step.result.ledger == expected.ledger && step.result.carry == expected.carry);
+            EXPECT(SpreadLeafCarry(fine, *tree, step.carry) == expected.carry);
+            EXPECT(step.touchedSlots == TouchedByGrid(*tree, expected));
+            carry = step.carry;
+            pages = std::max(pages, CascadeLeafCarryPages(carry));
+            for (const uint64_t band : LeafCarrySum(carry))
+                carried += band;
+        }
+
+        EXPECT(carried > 0);
+        std::printf("葉の鍵の持ち越し(0.5 m の根): %llu 刻み升目の鍵とビット一致・持ち越しの頁 最大 %zu / 枠 %u\n",
+                    static_cast<unsigned long long>(TICKS), pages, fine.capacity.worldBlocks);
+    }
+
+    // 粗い葉のある木: 持ち越しの量が帳簿で合う
+    void TestLeafCarryConserves(const BakedReactionTable& table, const MultiresNest& nest, const char* name) {
+        constexpr uint64_t TICKS = 6;
+        const auto tree = MakeCascadeTreeGrid(nest, table);
+        EXPECT(tree.has_value());
+        if (!tree)
+            return;
+
+        CascadeLeafCarry carry;
+        uint64_t carried = 0;
+        size_t touched = 0;
+        for (uint64_t tick = 0; tick < TICKS; ++tick) {
+            const std::array<uint64_t, rx::LT_BANDS> carryIn = LeafCarrySum(carry);
+            EXPECT(CarrySum(SpreadLeafCarry(nest, *tree, carry)) == carryIn);
+            const CascadeLeafTick step = StepCascadeLightOnLeaves(nest, *tree, carry, CascadeParams{}, tick);
+            const std::array<uint64_t, rx::LT_BANDS> carryOut = LeafCarrySum(step.carry);
+            EXPECT(carryOut == CarrySum(step.result.carry));
+            for (uint32_t band = 0; band < rx::LT_BANDS; ++band) {
+                const CascadeBandLedger& ledger = step.result.ledger[band];
+                EXPECT(ledger.carriedIn + ledger.kept == carryIn[band]);
+                EXPECT(ledger.reflected + ledger.held + ledger.kept == carryOut[band]);
+                EXPECT(ledger.emitted + ledger.carriedIn ==
+                       ledger.absorbed + ledger.reflected + ledger.escaped + ledger.held);
+                carried += carryOut[band];
+            }
+
+            EXPECT(FoldConserves(*tree, step.result));
+            EXPECT(step.touchedSlots == TouchedByGrid(*tree, step.result));
+            touched = std::max(touched, step.touchedSlots.size());
+            carry = step.carry;
+        }
+
+        EXPECT(carried > 0 && touched > 0);
+        std::printf("葉の鍵の持ち越し(%s): %llu 刻み帳簿で合う・持ち越しの頁 %zu・受けのあった枠 最大 %zu\n", name,
+                    static_cast<unsigned long long>(TICKS), CascadeLeafCarryPages(carry), touched);
+    }
+
 }  // namespace
 
 int main() {
@@ -247,6 +356,9 @@ int main() {
     TestCoarseEqualsSplit(table);
     TestMixedTree(table);
     TestRefusesFinerLeaves(table);
+    TestLeafCarryMatchesGrid(table);
+    TestLeafCarryConserves(table, MakeWorld(table, -1, {2, 1, 2}), "1 m の根");
+    TestLeafCarryConserves(table, MakeWorld(table, -1, {2, 1, 2}, true), "混ざった木");
     if (failureCount != 0)
         return 1;
 

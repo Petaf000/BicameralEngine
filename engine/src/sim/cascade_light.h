@@ -148,6 +148,55 @@ namespace bicameral::sim {
     [[nodiscard]] std::vector<CascadeLeafNet> FoldCascadeToLeaves(const CascadeTreeGrid& tree,
                                                                   const CascadeTickResult& result);
 
+    // --- 葉の鍵の持ち越し(T-1227 段 1。ADR-0500 の決定 1・5)---
+    // 持ち越しの鍵を (葉の枠・セル・入った面・帯) にした形。段 2 で登録の欄(セル × 12 値・光の配り = SF_SCALE_OWNER)へ移すまでの、
+    // 放射の側の仮の置き場(土台の登録・頁には触らない)。並びは段 2 の欄と同じ(枠 → セル → 面 × 2 + 帯)。
+    //   畳む(升目 → 葉): 葉のセルが覆う升目の面 f の値の和(割らない・端数なし)。
+    //   広げる(葉 → 升目): 葉の面 f の側の升目の層(世界の箱の中の部分)へ同じ重みで(RcCarryShare。最後の升目が残り)。
+    // 全部 0.5 m の木では升目と葉のセルが 1 対 1 なので、升目の鍵の持ち越しとビット単位で同じ。粗い葉では光が葉の面から出直す(量は保つ)。
+    struct CascadeLeafCarryEntry {
+        uint32_t slot = 0;   // 葉のブロックの枠
+        uint16_t index = 0;  // 葉のセル(0〜MR_BLOCK_CELLS − 1)
+        uint8_t face = 0;    // 光が入った面(CascadeCarryEntry と同じ)
+        uint8_t band = 0;    // LT_BAND_*
+        uint64_t amount = 0;
+
+        bool operator==(const CascadeLeafCarryEntry&) const = default;
+    };
+
+    struct CascadeLeafCarry {
+        std::vector<CascadeLeafCarryEntry> entries;  // 0 でない値だけ・枠・セル・面・帯の順
+
+        bool operator==(const CascadeLeafCarry&) const = default;
+    };
+
+    // 升目の鍵の持ち越し → 葉の鍵(和。升目の和とビット単位で同じ)
+    [[nodiscard]] CascadeLeafCarry FoldCarryToLeaves(const CascadeTreeGrid& tree, const CascadeCarry& carry);
+
+    // 葉の鍵の持ち越し → 次の刻みの升目の鍵(葉の面の側の升目の層へ同じ重みで)。nest は tree を作った木
+    [[nodiscard]] CascadeCarry SpreadLeafCarry(const MultiresNest& nest, const CascadeTreeGrid& tree,
+                                               const CascadeLeafCarry& carry);
+
+    // ハッシュ(エントリの順 = 枠・セル・面・帯)と、持ち越しのある枠の数(段 2 の欄の頁の数 = 1 頁 512 セル × 12 × 8 B)
+    [[nodiscard]] uint64_t HashCascadeLeafCarry(const CascadeLeafCarry& carry);
+    [[nodiscard]] size_t CascadeLeafCarryPages(const CascadeLeafCarry& carry);
+
+    // 受け(吸った・放った)のあった葉の枠(昇順・重なりなし。T-1228 段 1)。当てる段が変わったブロックの印(busyTick)を付ける相手 =
+    // 眠った粗い葉も起こす道。多めに拾ってよい・落とさない(ADR-0500 の決定 4)。印を書くのは土台の 1 つの関数(T-1252)で、ここは数えるだけ
+    [[nodiscard]] std::vector<uint32_t> CascadeTouchedSlots(const CascadeTreeGrid& tree,
+                                                            const CascadeTickResult& result);
+
+    // 葉の鍵の持ち越しで 1 刻み: 広げる → StepCascadeLight → 畳む・受けのあった枠
+    struct CascadeLeafTick {
+        CascadeTickResult result;  // result.carry は升目の鍵(畳む前)
+        CascadeLeafCarry carry;
+        std::vector<uint32_t> touchedSlots;
+    };
+
+    [[nodiscard]] CascadeLeafTick StepCascadeLightOnLeaves(const MultiresNest& nest, const CascadeTreeGrid& tree,
+                                                           const CascadeLeafCarry& carry, const CascadeParams& params,
+                                                           uint64_t tick);
+
     // 世界の箱を確かめる(1 辺 127 セルまで。溜めの出どころを 15bit × 3 に詰める。ADR-0432。細かい葉・粗い根を読む形は T-0973)
     [[nodiscard]] std::expected<void, std::string> CheckCascadeGrid(const CascadeGrid& grid);
 

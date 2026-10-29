@@ -553,6 +553,145 @@ namespace bicameral::sim {
         return folded;
     }
 
+    // --- 葉の鍵の持ち越し(T-1227 段 1)---
+
+    namespace {
+
+        // 葉の鍵 = (枠 × 512 + セル) × 12 + 面 × 2 + 帯(昇順 = 枠・セル・面・帯の順 = 段 2 の欄の並び)
+        uint64_t LeafCarryKey(uint64_t slot, uint64_t index, uint64_t face, uint64_t band) {
+            return (((slot * mr::MR_BLOCK_CELLS) + index) * rx::RC_FACES * rx::LT_BANDS) + (face * rx::LT_BANDS) + band;
+        }
+
+        // 葉のセルが覆う升目の、世界の箱の中の範囲 [low, high)
+        struct LeafSpan {
+            std::array<int64_t, 3> low{};
+            std::array<int64_t, 3> high{};
+        };
+
+        LeafSpan LeafSpanOf(const MultiresNest& nest, const CascadeGrid& grid, uint32_t slot, uint32_t index) {
+            const mr::MrBlock& block = nest.blocks[slot];
+            const auto shift = static_cast<uint32_t>(-block.level);
+            const std::array<int64_t, 3> cell = {(block.originX + mr::MrCellX(index)) << shift,
+                                                 (block.originY + mr::MrCellY(index)) << shift,
+                                                 (block.originZ + mr::MrCellZ(index)) << shift};
+            LeafSpan span;
+            for (uint32_t axis = 0; axis < 3; ++axis) {
+                span.low[axis] = std::max(cell[axis], grid.low[axis]);
+                span.high[axis] = std::min(cell[axis] + (int64_t{1} << shift), grid.low[axis] + grid.size[axis]);
+            }
+
+            return span;
+        }
+
+    }  // namespace
+
+    CascadeLeafCarry FoldCarryToLeaves(const CascadeTreeGrid& tree, const CascadeCarry& carry) {
+        std::map<uint64_t, uint64_t> leaves;
+        for (const CascadeCarryEntry& entry : carry.entries)
+            leaves[LeafCarryKey(tree.leafSlot[entry.cell], tree.leafIndex[entry.cell], entry.face,
+                                entry.band)] += entry.amount;
+
+        CascadeLeafCarry folded;
+        folded.entries.reserve(leaves.size());
+        for (const auto& [key, amount] : leaves) {
+            if (amount == 0)
+                continue;
+
+            const uint64_t cell = key / (rx::RC_FACES * rx::LT_BANDS);
+            const uint64_t rest = key % (rx::RC_FACES * rx::LT_BANDS);
+            folded.entries.push_back({.slot = static_cast<uint32_t>(cell / mr::MR_BLOCK_CELLS),
+                                      .index = static_cast<uint16_t>(cell % mr::MR_BLOCK_CELLS),
+                                      .face = static_cast<uint8_t>(rest / rx::LT_BANDS),
+                                      .band = static_cast<uint8_t>(rest % rx::LT_BANDS),
+                                      .amount = amount});
+        }
+
+        return folded;
+    }
+
+    CascadeCarry SpreadLeafCarry(const MultiresNest& nest, const CascadeTreeGrid& tree, const CascadeLeafCarry& carry) {
+        const CascadeGrid& grid = tree.grid;
+        std::map<uint64_t, uint64_t> cells;
+        for (const CascadeLeafCarryEntry& entry : carry.entries) {
+            // --- 面 f の側の升目の層(負の面 = 低い側・正の面 = 高い側)---
+            LeafSpan span = LeafSpanOf(nest, grid, entry.slot, entry.index);
+            const uint32_t axis = entry.face >> 1;
+            if ((entry.face & 1u) != 0)
+                span.high[axis] = span.low[axis] + 1;
+            else
+                span.low[axis] = span.high[axis] - 1;
+
+            const auto count = static_cast<uint32_t>((span.high[0] - span.low[0]) * (span.high[1] - span.low[1]) *
+                                                     (span.high[2] - span.low[2]));
+
+            // --- 同じ重みで(最後の升目が残り)---
+            uint32_t at = 0;
+            for (int64_t z = span.low[2]; z < span.high[2]; ++z) {
+                for (int64_t y = span.low[1]; y < span.high[1]; ++y) {
+                    for (int64_t x = span.low[0]; x < span.high[0]; ++x) {
+                        const uint64_t share = rx::RcCarrySpreadShare(entry.amount, count, at);
+                        ++at;
+                        if (share != 0)
+                            cells[CarryKey(grid.IndexOf(x, y, z), entry.face, entry.band)] += share;
+                    }
+                }
+            }
+        }
+
+        CascadeCarry spread;
+        spread.entries.reserve(cells.size());
+        for (const auto& [key, amount] : cells) {
+            const uint64_t cell = key / (rx::RC_FACES * rx::LT_BANDS);
+            const uint64_t rest = key % (rx::RC_FACES * rx::LT_BANDS);
+            spread.entries.push_back({.cell = static_cast<uint32_t>(cell),
+                                      .face = static_cast<uint8_t>(rest / rx::LT_BANDS),
+                                      .band = static_cast<uint8_t>(rest % rx::LT_BANDS),
+                                      .amount = amount});
+        }
+
+        return spread;
+    }
+
+    uint64_t HashCascadeLeafCarry(const CascadeLeafCarry& carry) {
+        uint64_t hash = fx::FxMix64(carry.entries.size());
+        for (const CascadeLeafCarryEntry& entry : carry.entries) {
+            hash = fx::FxHashCombine(hash, (uint64_t{entry.slot} << 16) | entry.index);
+            hash = fx::FxHashCombine(hash, (uint64_t{entry.face} << 8) | entry.band);
+            hash = fx::FxHashCombine(hash, entry.amount);
+        }
+
+        return hash;
+    }
+
+    size_t CascadeLeafCarryPages(const CascadeLeafCarry& carry) {
+        size_t pages = 0;
+        for (size_t at = 0; at < carry.entries.size(); ++at)
+            pages += at == 0 || carry.entries[at - 1].slot != carry.entries[at].slot ? 1 : 0;
+
+        return pages;
+    }
+
+    std::vector<uint32_t> CascadeTouchedSlots(const CascadeTreeGrid& tree, const CascadeTickResult& result) {
+        std::vector<uint32_t> slots;
+        for (const CascadeLeafNet& leaf : FoldCascadeToLeaves(tree, result)) {
+            if (slots.empty() || slots.back() != leaf.slot)
+                slots.push_back(leaf.slot);
+        }
+
+        return slots;
+    }
+
+    CascadeLeafTick StepCascadeLightOnLeaves(const MultiresNest& nest, const CascadeTreeGrid& tree,
+                                             const CascadeLeafCarry& carry, const CascadeParams& params,
+                                             uint64_t tick) {
+        CascadeLeafTick leafTick;
+        leafTick.result = StepCascadeLight(tree.grid, SpreadLeafCarry(nest, tree, carry), params, tick);
+        leafTick.carry = FoldCarryToLeaves(tree, leafTick.result.carry);
+        leafTick.touchedSlots = CascadeTouchedSlots(tree, leafTick.result);
+
+        return leafTick;
+    }
+
     std::expected<void, std::string> CheckCascadeParams(const CascadeParams& params) {
         if (params.levels == 0 || params.levels > LEVEL_LIMIT)
             return std::unexpected("段の数は 1〜8");
