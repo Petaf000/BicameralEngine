@@ -558,7 +558,8 @@ namespace bicameral::sim {
     // 対はずれの向き(shearFine の横の成分)に並ぶので、K_C はその向きの硬さの単位 b で数える
     uint64_t SupportLaw::PairShearCoefficient(uint64_t series,
                                               const std::array<int64_t, SUPPORT_COMPONENTS>& shearFine) const {
-        if (m_options.mixedPairMaterial == MixedPairMaterial::None)
+        if (m_options.mixedPairMaterial != MixedPairMaterial::Section &&
+            m_options.mixedPairMaterial != MixedPairMaterial::HalfSection)
             return series;
 
         const uint64_t b = shearFine[SUPPORT_X] != 0 ? m_bondX : m_bondUp;
@@ -680,6 +681,101 @@ namespace bicameral::sim {
 
             m_tripleTerms.push_back(triple);
         }
+
+        if (m_options.mixedPairMaterial == MixedPairMaterial::NeighborStrain ||
+            m_options.mixedPairMaterial == MixedPairMaterial::NeighborStrainBend) {
+            const MixedPair& pair = m_mixedPairs.back();
+            AddStrainTerms(coarse, fineLower, fineUpper, fineSide, shearFine[SUPPORT_X] != 0 ? SUPPORT_X : SUPPORT_UP,
+                           m_pairTerms[pair.pairTerm].coefficient, m_pairTerms[pair.pairTerm + 1].coefficient);
+        }
+    }
+
+    // 対の歪みの差の項(T-1278・h の MixedPairMaterial::NeighborStrain)。across = 対の並ぶ向き p の成分・fineSide = 細かいセルが C の +軸の側なら +1。
+    // 面の点の相対の動き P = (t_U + σ ε φ_U) − (t_L + σ ε φ_L)(σ = fineSide・ε = 面の軸の回りの符号)。C の面の高さの繊維 f = t_p − σ ε φ(粗いセル)。
+    // 隣 N(向き d)から m = d (f_N − f_C) ÷ 2・固定した面(向き d)から m = −d f_C。項は 2 倍の勾配 2 (P − m)・係数 K_q ÷ (4 × 読める側の数)。
+    // 曲げ: Q = s (θ_U − θ_L) = 2 (φ_U − φ_L)・目標 s² κ = d (φ_N − φ_C) ÷ 2(固定した面は −d φ_C)
+    void SupportLaw::AddStrainTerms(uint32_t coarse, uint32_t fineLower, uint32_t fineUpper, int64_t fineSide,
+                                    uint32_t across, uint64_t shearPair, uint64_t bendPair) {
+        MixedPair& pair = m_mixedPairs.back();
+        pair.firstStrain = (uint32_t)m_strainTerms.size();
+
+        const uint64_t b = across == SUPPORT_X ? m_bondX : m_bondUp;
+        const bool withBend = m_options.mixedPairMaterial == MixedPairMaterial::NeighborStrainBend;
+        const std::array<uint64_t, 2> keep = {SeriesCoefficient(shearPair, 6 * b),
+                                              withBend ? SeriesCoefficient(bendPair, b / 2) : 0};
+        const int64_t epsilon = across == SUPPORT_X ? 1 : -1;  // 面の軸の回りの符号(上の面 +1・x の面 −1)
+        const int64_t pointTurn = fineSide * epsilon;          // 面の点の p の動きの φ の係数(細かいセル)
+        const uint32_t pAxis = across == SUPPORT_X ? 0 : 1;
+        const auto [cx, cup] = m_cells[coarse];
+
+        // --- 読める側(固定した面 → 壁・隣の粗いセル → 中心の差。分けたセル・無い・割れた面の側は読まない)---
+        struct Side {
+            int64_t direction = 0;
+            uint32_t neighbor = UINT32_MAX;  // UINT32_MAX = 固定した面
+            uint32_t intact = SUPPORT_INTACT_FULL;
+        };
+        std::array<Side, 2> sides{};
+        uint32_t count = 0;
+        const uint8_t clamps = m_scene.clamps[cx + (size_t)m_scene.width * cup];
+        for (const int64_t direction : {-1, 1}) {
+            const uint8_t clampBit = across == SUPPORT_X ? (direction < 0 ? SUPPORT_CLAMP_LEFT : SUPPORT_CLAMP_RIGHT)
+                                                         : (direction < 0 ? SUPPORT_CLAMP_BOTTOM : 0);
+            if (clampBit != 0 && (clamps & clampBit) != 0) {
+                sides[count++] = {.direction = direction};
+                continue;
+            }
+
+            const int64_t nx = (int64_t)cx + (across == SUPPORT_X ? direction : 0);
+            const int64_t nup = (int64_t)cup + (across == SUPPORT_UP ? direction : 0);
+            if (nx < 0 || nup < 0 || nx >= (int64_t)m_scene.width || nup >= (int64_t)m_scene.height)
+                continue;
+
+            const uint32_t neighbor = m_index[(size_t)nx + (size_t)m_scene.width * (size_t)nup];
+            const uint32_t intact = direction > 0 ? Intact(cx, cup, pAxis) : Intact((uint32_t)nx, (uint32_t)nup, pAxis);
+            if (neighbor >= SPLIT_CELL || intact == 0)
+                continue;
+
+            sides[count++] = {.direction = direction, .neighbor = neighbor, .intact = intact};
+        }
+
+        // --- 項(側ごと・ずれと曲げ)---
+        for (uint32_t i = 0; i < count; ++i) {
+            const Side& side = sides[i];
+            const bool clamped = side.neighbor == UINT32_MAX;
+            const int64_t d = side.direction;
+            for (uint32_t kind = 0; kind < 2; ++kind) {
+                if (keep[kind] == 0)
+                    continue;
+
+                StrainTerm term{.nodes = {fineLower, fineUpper, coarse, clamped ? coarse : side.neighbor},
+                                .count = clamped ? 3u : 4u,
+                                .coefficient = Scaled(keep[kind] / (4 * count), side.intact),
+                                .bend = kind == 1};
+                Gradient& lower = term.gradients[0];
+                Gradient& upper = term.gradients[1];
+                Gradient& own = term.gradients[2];
+                Gradient& other = term.gradients[3];
+                if (kind == 0) {
+                    upper[across] = 2;
+                    upper[SUPPORT_TURN] = 2 * pointTurn;
+                    lower[across] = -2;
+                    lower[SUPPORT_TURN] = -2 * pointTurn;
+                    own[across] = clamped ? 2 * d : d;
+                    own[SUPPORT_TURN] = -(clamped ? 2 * d : d) * pointTurn;
+                    other[across] = clamped ? 0 : -d;
+                    other[SUPPORT_TURN] = clamped ? 0 : d * pointTurn;
+                } else {
+                    upper[SUPPORT_TURN] = 4;
+                    lower[SUPPORT_TURN] = -4;
+                    own[SUPPORT_TURN] = clamped ? 2 * d : d;
+                    other[SUPPORT_TURN] = clamped ? 0 : -d;
+                }
+
+                m_strainTerms.push_back(term);
+            }
+        }
+
+        pair.strainCount = (uint32_t)m_strainTerms.size() - pair.firstStrain;
     }
 
     // --- 成分を持つ節の系(Coupled。T-0919): Lagged と同じエネルギーの項を 3 × 3 の面のブロックへ ---
@@ -784,6 +880,29 @@ namespace bicameral::sim {
             }
 
             faces.push_back(pairFace);
+        }
+
+        // 対の歪みの差の項(T-1278): 節の組ごとに面(対角は最初の節を含む面へ。N と L・U はレベルの差 1 の斜めの面)
+        for (const StrainTerm& term : m_strainTerms) {
+            const auto c = (int64_t)term.coefficient;
+            for (uint32_t i = 0; i < term.count; ++i) {
+                for (uint32_t j = i + 1; j < term.count; ++j) {
+                    EquilibriumBlockFace face{.low = term.nodes[i], .high = term.nodes[j]};
+                    for (uint32_t row = 0; row < SUPPORT_COMPONENTS; ++row) {
+                        for (uint32_t column = 0; column < SUPPORT_COMPONENTS; ++column) {
+                            const uint32_t at = row * EQ_MAX_COMPONENTS + column;
+                            face.lowHigh[at] += c * term.gradients[i][row] * term.gradients[j][column];
+                            if (i == 0 && j == 1)
+                                face.lowLow[at] += c * term.gradients[0][row] * term.gradients[0][column];
+
+                            if (i == 0)
+                                face.highHigh[at] += c * term.gradients[j][row] * term.gradients[j][column];
+                        }
+                    }
+
+                    faces.push_back(face);
+                }
+            }
         }
     }
 
@@ -1125,6 +1244,16 @@ namespace bicameral::sim {
         return projection;
     }
 
+    int64_t SupportLaw::StrainProjection(const StrainTerm& term) const {
+        int64_t projection = 0;
+        for (uint32_t i = 0; i < term.count; ++i) {
+            for (uint32_t c = 0; c < SUPPORT_COMPONENTS; ++c)
+                projection += term.gradients[i][c] * CellValue(term.nodes[i], c);
+        }
+
+        return projection;
+    }
+
     int64_t SupportLaw::TermForce(const MixedTerm& term) const {
         const int64_t force = Flow(term.coefficient, TermProjection(term));
 
@@ -1253,6 +1382,27 @@ namespace bicameral::sim {
             forces.axialMn += tripleForce * highGradient[along];
             forces.shearMn += tripleForce * highGradient[across];
             forces.energyPj += SpringWork(tripleForce, projection);
+
+            // 対の歪みの差の項(T-1278): 自分の細かいセルが受ける力を面が運ぶ(ずれの負の項と同じ読み。エネルギーは 2 つの面で半分ずつ)。
+            // 曲げは自分の細かいセルの回りの力を曲げの項の力に直して曲げの項と同じ両端の勾配で回りへ
+            for (uint32_t i = 0; i < pair.strainCount; ++i) {
+                const StrainTerm& strain = m_strainTerms[pair.firstStrain + i];
+                const int64_t strainProjection = StrainProjection(strain);
+                const int64_t strainForce = Flow(strain.coefficient, strainProjection);
+                const Gradient& own = strain.gradients[group.upper ? 1 : 0];
+                forces.energyPj += SpringWork(strainForce, strainProjection) / 2;
+                if (!strain.bend) {
+                    forces.axialMn += toFace * strainForce * own[along];
+                    forces.shearMn += toFace * strainForce * own[across];
+                    continue;
+                }
+
+                const int64_t fineTurn = fineHigh ? faceBend.gradientHigh[SUPPORT_TURN]
+                                                  : faceBend.gradientLow[SUPPORT_TURN];
+                const int64_t share = strainForce * own[SUPPORT_TURN] / fineTurn;
+                turnLow += share * faceBend.gradientLow[SUPPORT_TURN];
+                turnHigh += share * faceBend.gradientHigh[SUPPORT_TURN];
+            }
         }
 
         const int64_t bend = 2 * (turnHigh - turnLow);
@@ -1323,6 +1473,16 @@ namespace bicameral::sim {
             const int64_t force = Flow(term.coefficient, TripleProjection(term));
             for (uint32_t i = 0; i < 3; ++i)
                 net[term.nodes[i]] -= force * term.gradients[i][SUPPORT_UP];
+        }
+
+        // 対の歪みの差の項(T-1278): 固定した面の側の項は和が 0 でない分を壁が支える(固定した面の力に数える)
+        for (const StrainTerm& term : m_strainTerms) {
+            const int64_t force = Flow(term.coefficient, StrainProjection(term));
+            for (uint32_t i = 0; i < term.count; ++i) {
+                const int64_t up = -force * term.gradients[i][SUPPORT_UP];
+                net[term.nodes[i]] += up;
+                ledger.reactionMn += up;
+            }
         }
 
         for (const Clamp& clamp : m_clamps) {

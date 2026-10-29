@@ -71,6 +71,12 @@ namespace bicameral::sim {
         None,         // 今まで(T-1191・ADR-0485。ビット一致)
         Section,      // 形 A: 粗いセルの断面全部(2s)÷ s = 12 b
         HalfSection,  // 形 B: 面の側の半分(s)÷ s = 6 b(細かい面の伸びの硬さと同じ)
+        // T-1278 の研究(負の項はそのまま全部外し、粗いセル C が表せる一様な歪みからのずれにだけ C の材料の硬さを残す):
+        //   対の 2 つの細かいセルの面の点の相対の動き P(並ぶ向き)と、C の隣(並ぶ向きの両側。固定した面の側は壁)の中心の差から読む
+        //   C の面の高さの繊維の歪み m の差に ½ K_q (P − m)²(K_q = 外した硬さと 6 b の直列・読める側で等分)。一様な歪み・回り・
+        //   一様な曲げでは P = m なので今と同じ(つぎはぎの検査を壊さない)
+        NeighborStrain,
+        NeighborStrainBend,  // NeighborStrain + 曲げの負の項も同じ形(C の隣の回りの差から読む曲率。K_qb = 外した硬さと b/2 の直列)
     };
 
     // 違う大きさのセルが絡む段の斜めの棒の硬さ(T-1133・ADR-0504)。棒は段の角を挟む 2 つのセル(違う大きさ)の間に 1 本・向きは 45°。
@@ -285,6 +291,17 @@ namespace bicameral::sim {
             uint32_t upper = 0;  // U の面の最初の項
             uint32_t pairTerm = 0;
             uint32_t firstTriple = 0;
+            uint32_t firstStrain = 0;  // m_strainTerms(T-1278。無ければ strainCount = 0)
+            uint32_t strainCount = 0;
+        };
+
+        // 対の相対の動きと、粗いセルの隣から読む歪みの差の項 ½ c (Σ g · x)²(T-1278。nodes = L・U・C・C の隣〔固定した面の側は 3 つ〕)
+        struct StrainTerm {
+            std::array<uint32_t, 4> nodes{};
+            std::array<std::array<int64_t, SUPPORT_COMPONENTS>, 4> gradients{};
+            uint32_t count = 0;
+            uint64_t coefficient = 0;
+            bool bend = false;  // 曲げ(回りの差)の項
         };
 
         // 遅らせた結合: 行の成分の式に K × (列の成分の値) が入る
@@ -309,6 +326,9 @@ namespace bicameral::sim {
         uint32_t PairBeta(uint32_t fine, uint32_t axis, uint32_t faceX, uint32_t faceUp) const;
         void BuildMixedPairs();
         void AddMixedPair(uint32_t lower, uint32_t upper);
+        void AddStrainTerms(uint32_t coarse, uint32_t fineLower, uint32_t fineUpper, int64_t fineSide, uint32_t across,
+                            uint64_t shearPair, uint64_t bendPair);
+        int64_t StrainProjection(const StrainTerm& term) const;
         uint64_t PairShearCoefficient(uint64_t series, const std::array<int64_t, SUPPORT_COMPONENTS>& shearFine) const;
         void BuildMixedBlocks(std::vector<EquilibriumBlockFace>& faces) const;
         void AddTriple(EquilibriumBlockFace& own, EquilibriumBlockFace& other, EquilibriumBlockFace& pairFace,
@@ -357,6 +377,7 @@ namespace bicameral::sim {
         std::vector<MixedPair> m_mixedPairs;
         std::vector<MixedTerm> m_pairTerms;     // 対のずれの負の項(low = L の細かいセル・high = U の細かいセル)
         std::vector<TripleTerm> m_tripleTerms;  // 対の伸び(対の平均のずれの歪みを引く)
+        std::vector<StrainTerm> m_strainTerms;  // 対の相対の動きと C の隣から読む歪みの差(T-1278。比べ用)
         std::vector<uint32_t>
             m_mixedFaceAt;  // [(fx + 2 width × fup) × 2 + 軸] → 違う大きさの梁の最初の項(T-1067。無ければ UINT32_MAX)
         std::vector<Bond> m_bonds;
