@@ -309,6 +309,20 @@ namespace bicameral::sim::nest_detail {
     // 写した後・欄を配る前・親を覆う前に呼ぶ
     void PlaceRefineOctantCells(MultiresNest& nest, uint32_t parentSlot, uint32_t octant, uint32_t childPage);
 
+    // --- 相の層の配り手(T-1230・T-1231。ADR-0512 の 1。multires_phase_layer.cpp)---
+    // 細かくする: 頁を持つ親のセル parent(Ec = parentEnergy)と、セルの中身を配った後の子 8 つ(子の番号は MrChildCell の j)から、
+    // 子の Ec を childEnergies に書く。混ざった親なら子のエネルギーも部分ごとの配りで書き直す(和は親 × 8 のまま)
+    void RefinePhaseLayerCell(std::span<const reaction::RxSpecies> species, const reaction::RxCell& parent,
+                              int64_t parentEnergy,
+                              std::array<reaction::RxCell, multires::MR_CHILDREN_PER_CELL>& children,
+                              std::array<int64_t, multires::MR_CHILDREN_PER_CELL>& childEnergies);
+
+    // 粗くする: 粗くした親のセル parent と子 8 つ(と子の Ec)から親の Ec
+    [[nodiscard]] int64_t CoarsenPhaseLayerCell(
+        std::span<const reaction::RxSpecies> species, const reaction::RxCell& parent,
+        const std::array<reaction::RxCell, multires::MR_CHILDREN_PER_CELL>& children,
+        const std::array<int64_t, multires::MR_CHILDREN_PER_CELL>& childEnergies);
+
     // 許可した細かくする要求の鎖の段ごとに、親の八分の一の外の隣の詰まりを写す(T-1189。割り当ての後・適用の前に呼ぶ。multires_refine_cells.cpp)
     void SnapshotRefineHalos(MultiresNest& nest, uint32_t count);
 

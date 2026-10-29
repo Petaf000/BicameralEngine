@@ -86,6 +86,7 @@ add_library(bicameral_multires STATIC
   src/sim/multires_state.cpp
   src/sim/multires_tree.cpp
   src/sim/multires_refine_cells.cpp  # 細かくする時のセルの中身を置かれ方で(T-1176)
+  src/sim/multires_phase_layer.cpp  # 相の層のエネルギー Ec の欄と細かく/粗くする時の配り(T-1230・T-1231・ADR-0512)
   src/sim/multires_wide_cell.cpp
   src/sim/sun_column.cpp  # 太陽の影の柱の CPU リファレンス(T-0910・ADR-0396)
   src/sim/sun_lens.cpp  # 日の光を物で集める CPU リファレンス(研究 R-R2・T-0878・ADR-0425)
