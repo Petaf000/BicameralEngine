@@ -690,6 +690,27 @@ struct RcTreeLights {
     LtSpeciesLight Light(uint32_t speciesId) { return g_rcWork.Load<LtSpeciesLight>(speciesOffset + (speciesId * 16)); }
 };
 
+// 葉のセルの光の値と温度(CPU の MakeCascadeTreeGrid と同じ式)
+struct RcTreeCell {
+    RcCellLight light;
+    uint32_t temperatureMk;
+};
+
+RcTreeCell RcTreeCellOf(RcTreeLights lights, uint32_t slot, uint32_t index) {
+    const RxCell cell = LoadCell(slot, index);
+    const LtCellBand shortBand = LtCellBandOf(lights, cell, LT_BAND_SHORT);
+    const LtCellBand longBand = LtCellBandOf(lights, cell, LT_BAND_LONG);
+    RcTreeCell result;
+    result.light.depthShortQ32 = RdOpticalDepthQ32(shortBand.absorption);
+    result.light.depthLongQ32 = RdOpticalDepthQ32(longBand.absorption);
+    result.light.reflectanceShortQ16 = shortBand.reflectanceQ16;
+    result.light.reflectanceLongQ16 = longBand.reflectanceQ16;
+    const int32_t thermal = RxComputeThermal(MakeTable(), cell).temperature;
+    result.temperatureMk = thermal > 0 ? (uint32_t)thermal : 0u;
+
+    return result;
+}
+
 [numthreads(RC_GROUP_THREADS, 1, 1)] void RcTreeGrid(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const RcGpuParams params = LoadParams();
     const GpuRcGrid grid = GridOf(params);
@@ -707,17 +728,7 @@ struct RcTreeLights {
             continue;
         }
 
-        // --- 葉のセルの光の値と温度(CPU の MakeCascadeTreeGrid と同じ式)---
-        const RxCell cell = LoadCell(slot, index);
-        const LtCellBand shortBand = LtCellBandOf(lights, cell, LT_BAND_SHORT);
-        const LtCellBand longBand = LtCellBandOf(lights, cell, LT_BAND_LONG);
-        RcCellLight light;
-        light.depthShortQ32 = RdOpticalDepthQ32(shortBand.absorption);
-        light.depthLongQ32 = RdOpticalDepthQ32(longBand.absorption);
-        light.reflectanceShortQ16 = shortBand.reflectanceQ16;
-        light.reflectanceLongQ16 = longBand.reflectanceQ16;
-        const int32_t thermal = RxComputeThermal(MakeTable(), cell).temperature;
-        const uint32_t temperatureMk = thermal > 0 ? (uint32_t)thermal : 0u;
+        const RcTreeCell leaf = RcTreeCellOf(lights, slot, index);
 
         // --- 2^−L 角へ広げる(箱の外は書かない)---
         const uint32_t shift = (uint32_t)(-block.level);
@@ -740,10 +751,56 @@ struct RcTreeLights {
                     const uint32_t relativeZ = (uint32_t)(z - params.lowZ);
                     const uint32_t at = (((relativeZ * (uint32_t)params.sizeY) + relativeY) * (uint32_t)params.sizeX) +
                                         relativeX;
-                    g_rcWork.Store<RcCellLight>(params.workLights + (at * 24), light);
-                    g_rcWork.Store(params.workTemperatures + (at * 4), temperatureMk);
+                    g_rcWork.Store<RcCellLight>(params.workLights + (at * 24), leaf.light);
+                    g_rcWork.Store(params.workTemperatures + (at * 4), leaf.temperatureMk);
                 }
             }
         }
+    }
+}
+
+    // --- 木を読む写しの別の形(T-1117 の比べ): 1 スレッド = 升目のセル 1 つ ---
+    // 升目のセル(0.5 m)を含む最も細かい本物のブロックを索引で引き(0.5 m から根のレベルへ。SunFindContaining と同じ探し方)、
+    // その葉の値を書く。見つからない所(木の無い所)は書かない(葉ごとの形と同じ)。点が 0.5 m のブロックの本物の子に覆われた
+    // セルなら 0.5 m より細かい葉なので書かずに溢れの印。g_external0 = 升目のセルの数・g_external1 = 物質の光の値の位置
+    [numthreads(RC_GROUP_THREADS, 1, 1)] void RcTreeGridCells(uint3 dispatchThreadId : SV_DispatchThreadID) {
+    const RcGpuParams params = LoadParams();
+    RcTreeLights lights;
+    lights.speciesOffset = g_external1;
+    const uint32_t sizeX = (uint32_t)params.sizeX;
+    const uint32_t sizeY = (uint32_t)params.sizeY;
+    for (uint32_t at = dispatchThreadId.x; at < g_external0; at += g_external2) {
+        const int64_t x = params.lowX + (int64_t)(at % sizeX);
+        const int64_t y = params.lowY + (int64_t)((at / sizeX) % sizeY);
+        const int64_t z = params.lowZ + (int64_t)(at / (sizeX * sizeY));
+
+        // --- 点を含む最も細かい本物のブロック(0.5 m のレベル 0 から粗い方へ)---
+        uint32_t found = MR_NO_BLOCK;
+        uint32_t shift = 0;
+        for (int32_t candidate = 0; found == MR_NO_BLOCK && candidate >= g_rootLevel; --candidate) {
+            shift = (uint32_t)(-candidate);
+            found = LookupBlock(candidate, MrBlockOriginOf(x >> shift), MrBlockOriginOf(y >> shift),
+                                MrBlockOriginOf(z >> shift));
+        }
+
+        if (found == MR_NO_BLOCK)
+            continue;
+
+        // ブロックの中のセル(原点は 8 の倍数に切り捨てた値なので、下の 3 bit がブロックの中の位置)
+        const uint32_t index = MrCellIndex((uint32_t)(x >> shift) & 7u, (uint32_t)(y >> shift) & 7u,
+                                           (uint32_t)(z >> shift) & 7u);
+        // 覆われたセル: 本物の子なら 0.5 m より細かい葉(細かい本物のブロックは索引にあるので、ここに来るのは 0.5 m のブロック
+        // だけ)。影の子なら葉ごとの形と同じく書かない
+        const MrBlock block = g_blocks[found];
+        if (MrIsCoveredCell(block, index)) {
+            if (g_blocks[block.children[MrOctantOfCell(index)]].kind == MR_BLOCK_REAL)
+                SetOverflow(RC_GPU_OVERFLOW_FINE_LEAF);
+
+            continue;
+        }
+
+        const RcTreeCell leaf = RcTreeCellOf(lights, found, index);
+        g_rcWork.Store<RcCellLight>(params.workLights + (at * 24), leaf.light);
+        g_rcWork.Store(params.workTemperatures + (at * 4), leaf.temperatureMk);
     }
 }

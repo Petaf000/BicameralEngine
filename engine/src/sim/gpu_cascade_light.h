@@ -79,6 +79,8 @@ namespace bicameral::sim {
         // 0.5 m より細かい葉は書かずに Read の overflow に 4 を立てる。CreateFromTree でなければ false
         [[nodiscard]] bool RecordTreeGrid(ID3D12GraphicsCommandList10* list, GpuMultires& nest,
                                           D3D12_GPU_VIRTUAL_ADDRESS debugRing);
+        // 写しの形(比べ用・T-1117): false = 1 スレッド = 葉のセル 1 つ(既定)・true = 1 スレッド = 升目のセル 1 つ。結果は同じ
+        void SetTreeGridPerGridCell(bool perGridCell) { m_treeGridPerGridCell = perGridCell; }
 
         // --- 仮の世界用(CreateStandalone で作った時だけ)---
         // 初めの持ち越しは表 0(刻み 0 から始める世界)。作業のバッファは既定のヒープへ写し、UAV の状態で返す
@@ -165,6 +167,8 @@ namespace bicameral::sim {
 
         // --- 木を読む形(CreateFromTree の時だけ。T-1117)---
         ComPtr<ID3D12PipelineState> m_treeGrid;
+        ComPtr<ID3D12PipelineState> m_treeGridCells;
+        bool m_treeGridPerGridCell = false;
         uint32_t m_treeWorldBlocks = 0;
         uint32_t m_treeLightsOffset = 0;          // 作業の中の物質の光の値(バイト)
         std::vector<std::byte> m_workBytesImage;  // 作業の中身(初めの持ち越しの前まで)

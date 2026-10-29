@@ -7,6 +7,7 @@
 //   1. 刻みごとに GPU が木から写しを作って RC を流した結果(セルごとの吸った・放った・帳簿・光線・持ち越し)が、
 //      CPU の MakeCascadeTreeGrid の写しで StepCascadeLight を流した結果と全部の刻みでビット単位で同じ
 //   2. 0.5 m より細かい葉のある木は、GPU が溢れの印 4 を立てる(CPU は誤り。細かい葉へ配る規則は土台)
+// 1・2 を写しの 2 つの形(1 スレッド = 葉のセル 1 つ / 升目のセル 1 つ)の両方で確かめ、写しの段の費用を並べて出す。
 // 引数は gpu_test_options.h。
 #include <array>
 #include <bit>
@@ -149,7 +150,7 @@ namespace {
     };
 
     std::expected<WorldRun, std::string> PrepareWorld(const GpuContext& context, const sim::BakedReactionTable& table,
-                                                      const World& world) {
+                                                      const World& world, bool perGridCell) {
         auto nest = sim::GpuMultires::Create(context.device, table, world.nest.capacity);
         if (!nest)
             return std::unexpected(nest.error());
@@ -163,6 +164,7 @@ namespace {
         if (!light)
             return std::unexpected(light.error());
 
+        light->SetTreeGridPerGridCell(perGridCell);
         list = context.queue->Begin();
         if (list == nullptr || !light->RecordUpload(list, *nest, context.ring->GpuAddress(), {}) ||
             !context.queue->ExecuteAndWait())
@@ -203,12 +205,12 @@ namespace {
 
     // 1. 刻みごとに CPU の写しの結果とビット一致(比べた刻みの数を返す)
     std::expected<uint64_t, std::string> CompareWorld(const GpuContext& context, const sim::BakedReactionTable& table,
-                                                      const World& world) {
+                                                      const World& world, bool perGridCell) {
         const auto tree = sim::MakeCascadeTreeGrid(world.nest, table);
         if (!tree)
             return std::unexpected(tree.error());
 
-        auto run = PrepareWorld(context, table, world);
+        auto run = PrepareWorld(context, table, world, perGridCell);
         if (!run)
             return std::unexpected(run.error());
 
@@ -247,21 +249,21 @@ namespace {
                                  : 0.0;
         };
         Log(Channel::Gpu, Level::Info,
-            "{}: 升目 {} セル・葉の枠 {}・{} 刻み GPU の木を読む写しと CPU がビット一致(放った刻み {})。"
+            "{}({}): 升目 {} セル・葉の枠 {}・{} 刻み GPU の木を読む写しと CPU がビット一致(放った刻み {})。"
             "1 刻みの GPU 時間: 木を読む写し {:.1f} µs・RC {:.1f} µs",
-            world.name, tree->grid.CellCount(), world.nest.capacity.worldBlocks, TICKS, emitting,
-            averageUs(StageTreeGrid), averageUs(StageTick));
+            world.name, perGridCell ? "1 スレッド = 升目のセル" : "1 スレッド = 葉のセル", tree->grid.CellCount(),
+            world.nest.capacity.worldBlocks, TICKS, emitting, averageUs(StageTreeGrid), averageUs(StageTick));
 
         return TICKS;
     }
 
     // 2. 0.5 m より細かい葉: CPU は誤り・GPU は溢れの印 4
     std::expected<void, std::string> CheckFineLeaves(const GpuContext& context, const sim::BakedReactionTable& table,
-                                                     const World& world) {
+                                                     const World& world, bool perGridCell) {
         if (sim::MakeCascadeTreeGrid(world.nest, table))
             return std::unexpected("CPU が細かい葉の木を誤りにしない");
 
-        auto run = PrepareWorld(context, table, world);
+        auto run = PrepareWorld(context, table, world, perGridCell);
         if (!run)
             return std::unexpected(run.error());
 
@@ -314,21 +316,24 @@ namespace {
         };
 
         uint64_t compared = 0;
-        for (const World& world : worlds) {
-            const auto ticks = CompareWorld(context, table, world);
-            if (!ticks) {
-                Log(Channel::Gpu, Level::Error, "gpu_cascade_tree_grid_test: FAILED({}: {})", world.name,
-                    ticks.error());
-                return 1;
+        const World fine = MakeWorld(table, "0.5 m の根の一部を 0.25 m に", 0, {4, 2, 4}, true);
+        for (const bool perGridCell : {false, true}) {
+            for (const World& world : worlds) {
+                const auto ticks = CompareWorld(context, table, world, perGridCell);
+                if (!ticks) {
+                    Log(Channel::Gpu, Level::Error, "gpu_cascade_tree_grid_test: FAILED({}: {})", world.name,
+                        ticks.error());
+                    return 1;
+                }
+
+                compared += *ticks;
             }
 
-            compared += *ticks;
-        }
-
-        const World fine = MakeWorld(table, "0.5 m の根の一部を 0.25 m に", 0, {4, 2, 4}, true);
-        if (auto checked = CheckFineLeaves(context, table, fine); !checked) {
-            Log(Channel::Gpu, Level::Error, "gpu_cascade_tree_grid_test: FAILED({}: {})", fine.name, checked.error());
-            return 1;
+            if (auto checked = CheckFineLeaves(context, table, fine, perGridCell); !checked) {
+                Log(Channel::Gpu, Level::Error, "gpu_cascade_tree_grid_test: FAILED({}: {})", fine.name,
+                    checked.error());
+                return 1;
+            }
         }
 
         if (!test::PassesValidation(*device, "gpu_cascade_tree_grid_test"))
