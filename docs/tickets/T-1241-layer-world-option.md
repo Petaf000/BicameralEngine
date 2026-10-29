@@ -36,3 +36,4 @@
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-10-29(wt3・T-1241 の作業役): T-1236 の「司令塔へ」からファイルを作った。environment.cell_layers → WorldPhysics::cellLayers・
   使う世界だけ unsettledGrainNotes を表の警告に・ApplyCellLayersChoice。試験は environment_package・world_layout。ADR-0489 に 1 項追記。
+- 2026-10-29(wt3・T-1238 の作業役): `git rebase main`(daba09c9 の上)済み。release のビルド警告 0・world_layout・multires_layers・luau_type_check・environment_package 合格。**マージ可**。
