@@ -1,8 +1,20 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-29(本体の作業役 18 回目・T-1252 段 1 と wt2〜wt6 の 7 本を main へ・warm_start_save の原因は T-1206・Q179〜Q181)
+最終更新: 2026-10-30(本体の作業役 19 回目・gpu_object_shell_flow の確かめ・T-1272・wt2 T-1240 7 の 1・wt3 T-1278・wt6 T-1287 を main へ・Q182)
 
-## この仕事でしたこと(2026-10-29・本体の作業役・18 回目: 記録の取りこぼし・Q179〜Q181・runner/ready の印のマージ)
+## この仕事でしたこと(2026-10-30・本体の作業役・19 回目: 確かめ・T-1272・runner/ready の印のマージ)
+- **gpu_object_shell_flow(HW・release)を main で 1 本**: 合格(28 秒)。T-1222 を入れた main で初めて流した。
+- **T-1272(調べ・Done)**: warm_start_save の 1 つの系で、保存点 20 で持つ向きを捨てても同じ答えになるのは**正しい**(不具合ではない)。片持ち梁は刻み 20 頃に整数の釣り合いにほぼ着き、
+  持つ向きの大きさが 10 以下・β ≈ 0.094 で β p_前 が Q16 の切り捨てで全部 0 になる(刻み 10 では 767 / 768 の節で効く)。分母 p_前ᵀ r_前 は正で、読み戻しも使われている。直しなし・試験の保存点は 10 のまま(コメントだけ直した)。
+- **マージ(--no-ff・衝突なし)**: wt2 t-1240-layer-tree 44b163a1(T-1240 7 の 1。Doing のまま)/ wt3 t-1278-coarse-strain d442646f(研究 T-1278 Done・形 A 当たり・形 B 打ち切り・ADR-0509 Proposed = Q182)/ wt6 t-1287-coupling-regions aac550aa(T-1287 Done)/ wt6 t-1287-coupling-regions 05aaafcf(2 回目・T-1230 のチケットの詰めだけ)/ wt5 t-1285-multigrid-even 71ed8246(T-1285 研究は打ち切り → 退く道 3.73 → 3.65 ms・T-1284 Done = 試験の写しの大きさ違い・gpu_object_shell_flow_warp を足した)。印は runner/ready/done/ へ。
+- 試験(release・警告 0): CPU 18 本(warm_start_save・support_law・support_mixed・support_mixed_neighbor_strain・support_fracture_refine・support_cost・multires_layers・time_step_choose_dump 系 6 本・object_shell・dxil_alloca_check)・
+  GPU HW 7 本(gpu_object_shell_flow・gpu_multires_quiet・gpu_multires_layers・gpu_tree_refine_placement・gpu_time_step_choose_coupling_fire_2・_fire_4・_night_4)。lab_box は無効(Disabled)のまま。archmap --check OK。
+- QUESTIONS に **Q182**(支えの混ざった細かさの対を形 A にするか・仮 None・おすすめ 既定にする)・**Q183**(物の殻の流れの多重格子の規則を変えて速くするか・仮 (a) そのまま・おすすめ (b) を研究として試す)。ROADMAP に T-1272・T-1278・T-1284・T-1285 Done・T-1279(wt3)・T-1287 Done・T-1240 の 7 の 1。
+- **司令塔が仮で決めたもの(ユーザー未確認・取り消しやすい)**: ADR-0509 の既定は None のまま(Q182 の答えまで)。物の殻の流れの多重格子は規則そのままで T-1200 の 3.83 ms 以下を合格とする(Q183)。
+- 次の番号は **D-684・ADR-0479・Q184**(本体)。T は T-1273・T-1274(使っていない)。
+
+
+## 前の仕事でしたこと(2026-10-29・本体の作業役・18 回目: 記録の取りこぼし・Q179〜Q181・runner/ready の印のマージ)
 - **記録の取りこぼし**: wt5 が main に入れた **T-1233**(84511ac8。alloca 1909 → 1048)・**T-1234**(d20c43a4)を Done に。合わせた後の main の dxil_alloca の上限の表は **1144**(4d60f487。main で増えたシミュのシェーダー 3 本)。
   ROADMAP に T-1212(原因は境の面 → T-1269)・T-1257・T-1260(Done・退く道で閉じた)・T-1261・T-1266・T-1269・T-1270・T-1271 の行。COMMANDER に今巡の配り(**司令塔の次は T-1290・ADR-0513**)。
 - QUESTIONS に **Q179**(陰解法の段を既定の世界で持ち続けるか・ADR-0505・仮 (a) 残す)・**Q180**(T-1139 の最も粗い段の掃き出し 4 → 2・仮 4 回)・**Q181**(精度の予算 0.1 K を歩の終わりで守るか・ADR-0507・仮 = 読み替えない・既定 None)。
