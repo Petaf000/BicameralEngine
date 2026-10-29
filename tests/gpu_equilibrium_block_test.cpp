@@ -542,6 +542,17 @@ namespace {
                 return measured;
         }
 
+        // 同じ洞窟で、違う大きさの面の対に粗いセルの隣から読む歪みの項を足す形(ADR-0509 形 A。面が増える分の費用。T-1279)
+        sim::SupportOptions neighborStrain = support;
+        neighborStrain.mixedPairMaterial = sim::MixedPairMaterial::NeighborStrain;
+        const sim::SupportLaw strainCave(test::Marked(test::Cave(500), 14, 34, 6, 20), neighborStrain);
+        for (const sim::EquilibriumBlockOptions& solve : {sim::EquilibriumBlockOptions{}, support.blocks}) {
+            const auto measured = MeasureOne(context, "支えの洞窟 500 mm の天井を 250 mm・隣から読む歪み・k = 3",
+                                             strainCave.BlockSystem(), strainCave.BlockGrid(), false, solve);
+            if (!measured)
+                return measured;
+        }
+
         const sim::EquilibriumBlockSystem mixedBox = test::MixedSystem(3, true, false);
         const auto measuredBox = MeasureOne(context, "違うレベルの箱 一辺 8・k = 3", mixedBox,
                                             sim::BuildEquilibriumBlockGrid(mixedBox));
