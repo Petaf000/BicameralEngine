@@ -227,7 +227,7 @@ bicameral_add_shader(sim/object_heat.hlsl PROFILE cs_6_8 ENTRY OhPrepare NAME ob
 bicameral_add_shader(sim/object_heat.hlsl PROFILE cs_6_8 ENTRY OhFlowStep NAME object_heat_flow)
 bicameral_add_shader(sim/object_heat.hlsl PROFILE cs_6_8 ENTRY OhReduce NAME object_heat_reduce)
 bicameral_add_shader(sim/object_heat.hlsl PROFILE cs_6_8 ENTRY OhApplyCells NAME object_heat_apply_cells)
-bicameral_add_shader(sim/object_heat.hlsl PROFILE cs_6_8 ENTRY OhReact NAME object_heat_react)
+bicameral_add_shader(sim/object_heat.hlsl PROFILE cs_6_8 ENTRY OhReact NAME object_heat_react DEFINES RX_DIRECT_CANDIDATES=1)
 # 起きている物の一覧(印・グループの和の前の和・一覧に書く・反応の後に物の起こす刻みを直す。T-1077)
 bicameral_add_shader(sim/object_heat.hlsl PROFILE cs_6_8 ENTRY OhListMark NAME object_heat_list_mark)
 bicameral_add_shader(sim/object_heat.hlsl PROFILE cs_6_8 ENTRY OhListTotals NAME object_heat_list_totals)
