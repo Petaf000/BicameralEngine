@@ -7,7 +7,8 @@
 // 2. 費用(--measure): 出来事ごとに 1 本のリストへ続けて積んだ時間(GPU の時計が高いまま = 早送りの形)の平均・最大と、
 //    1 出来事を 4 回続けて積んだ最小。--events-total n で火事全体(n 出来事)の待ちへ伸ばす。
 // 3. 内訳(--breakdown。T-1213): 段のまとまりの間に時刻印を打った 1 出来事の固定費の内訳(GpuTimeTreeChoose::PhaseNames)。
-// 引数: --choices <ファイル> [--measure] [--breakdown] [--events-total n] と GPU の試験の共通の引数(--warp・--queue・--no-gbv)。
+// 4. --expect-crossing(T-1287): 区画が 2 つ以上で、区画をまたいで縮みが伝わった出来事があることも求める(区画をまたぐ道の確かめ)。
+// 引数: --choices <ファイル> [--measure] [--breakdown] [--events-total n] [--expect-crossing] と GPU の試験の共通の引数(--warp・--queue・--no-gbv)。
 #include <algorithm>
 #include <cstdint>
 #include <expected>
@@ -70,7 +71,7 @@ namespace {
     }
 
     std::expected<void, std::string> Compare(Context& context, const sim::GpuTimeTreeChoose& gpu,
-                                             const test::TimeStepChooseFile& file) {
+                                             const test::TimeStepChooseFile& file, bool expectCrossing) {
         uint32_t widestSweeps = 0;
         uint32_t widestInner = 0;
         uint32_t widestFixup = 0;
@@ -121,6 +122,15 @@ namespace {
             file.events.size(), file.tables.units, started, truncated,
             (file.tables.units + sim::GpuTimeTreeChoose::TILE_UNITS - 1) / sim::GpuTimeTreeChoose::TILE_UNITS,
             widestSweeps, widestInner, widestFixup);
+
+        // --expect-crossing(T-1287): 区画が 2 つ以上で、区画をまたいで縮みが伝わった出来事がある(1 回目の後の掃く回か仕上げで
+        // 区画が変わった = 隣の区画の結果を読んで変わった)。無ければ区画をまたぐ道を確かめていない
+        const uint32_t tiles = (file.tables.units + sim::GpuTimeTreeChoose::TILE_UNITS - 1) /
+                               sim::GpuTimeTreeChoose::TILE_UNITS;
+        if (expectCrossing && (tiles < 2 || (widestSweeps < 2 && widestFixup == 0)))
+            return std::unexpected(
+                std::format("区画をまたぐ道を通っていない(区画 {}・変わった掃く回の最大 {}・仕上げの区画の最大 {})",
+                            tiles, widestSweeps, widestFixup));
 
         return {};
     }
@@ -272,6 +282,7 @@ namespace {
         std::string path;
         bool measure = false;
         bool breakdown = false;
+        bool expectCrossing = false;
         uint64_t eventsTotal = 0;
         std::vector<char*> rest = {arguments[0]};
         for (size_t index = 1; index < arguments.size(); ++index) {
@@ -282,6 +293,8 @@ namespace {
                 measure = true;
             else if (argument == "--breakdown")
                 breakdown = true;
+            else if (argument == "--expect-crossing")
+                expectCrossing = true;
             else if (argument == "--events-total" && index + 1 < arguments.size())
                 eventsTotal = std::stoull(arguments[++index]);
             else
@@ -292,7 +305,7 @@ namespace {
         if (!options || path.empty()) {
             Log(Channel::Gpu, Level::Error,
                 "使い方: gpu_time_step_choose_test --choices <ファイル> [--warp] [--queue direct|compute] [--no-gbv] "
-                "[--measure] [--breakdown] [--events-total n]");
+                "[--measure] [--breakdown] [--events-total n] [--expect-crossing]");
             return 2;
         }
 
@@ -327,7 +340,7 @@ namespace {
         }
 
         Context context{.device = device->Get(), .queue = &*queue, .ring = &*ring, .frequency = frequency};
-        auto ran = Compare(context, *gpu, *file);
+        auto ran = Compare(context, *gpu, *file, expectCrossing);
         if (ran && measure)
             ran = Measure(context, *gpu, *file, eventsTotal);
 

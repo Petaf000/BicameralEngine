@@ -967,6 +967,21 @@ set_tests_properties(time_step_choose_dump_coupling_night PROPERTIES TIMEOUT 900
 bicameral_add_gpu_test_case(gpu_time_step_choose_coupling_night gpu_time_step_choose_test gpu --queue compute --no-gbv
                             --choices ${CMAKE_CURRENT_BINARY_DIR}/time_step_choices_coupling_night.bin)
 set_tests_properties(gpu_time_step_choose_coupling_night PROPERTIES FIXTURES_REQUIRED time_step_choices_coupling_night)
+# 同じ・区画(GPU 版の 1 グループが受け持つ 4,096 単位)が 2 つ以上(T-1287): 区画の境で隣の区画の値を読む道・掃く回の 2 回目以降・仕上げ(TtcFixup)。
+# 火事 16×1×1(2 区画が接する)・火事 8×2×2(4 区画が x に並ぶ = 接する区画と離れた区画)・池 32×1×1(4 区画)。--expect-crossing で区画をまたいで縮みが伝わったことも求める
+foreach(_case IN ITEMS "fire_2;fine;16x1x1;" "fire_4;fine;8x2x2;" "night_4;fine;32x1x1;scene=night")
+  list(GET _case 0 _tag)
+  list(GET _case 1 _shape)
+  list(GET _case 2 _roots)
+  list(GET _case 3 _scene)
+  set(_file ${CMAKE_CURRENT_BINARY_DIR}/time_step_choices_coupling_${_tag}.bin)
+  add_test(NAME time_step_choose_dump_coupling_${_tag}
+           COMMAND time_step_tree_test choose-dump shape=${_shape} roots=${_roots} ${_scene} every=16 border=c0 dump=${_file})
+  set_tests_properties(time_step_choose_dump_coupling_${_tag} PROPERTIES TIMEOUT 900 FIXTURES_SETUP time_step_choices_coupling_${_tag})
+  bicameral_add_gpu_test_case(gpu_time_step_choose_coupling_${_tag} gpu_time_step_choose_test gpu --queue compute --no-gbv
+                              --expect-crossing --choices ${_file})
+  set_tests_properties(gpu_time_step_choose_coupling_${_tag} PROPERTIES FIXTURES_REQUIRED time_step_choices_coupling_${_tag})
+endforeach()
 
 # 計測は job.py run -Preset release -Exe gpu_gas_projection_test -- --no-gbv --measure --edge 32
 bicameral_add_gpu_test(gpu_gas_projection_test)
