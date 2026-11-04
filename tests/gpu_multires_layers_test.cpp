@@ -400,13 +400,25 @@ namespace {
         return {};
     }
 
+    // 根の様子(食い違った時に見る): 一様か・子の数・一様の枠の層・層のある頁の数
+    std::string DescribeRoot(const sim::MultiresNest& nest) {
+        const MrBlock& root = nest.blocks[test::MULTIRES_ROOT_SLOT];
+        const auto children = std::ranges::count_if(root.children, [](uint32_t child) { return child != MR_NO_BLOCK; });
+
+        return std::format("根 {}・子 {}・一様の枠の層 {}・層のある頁 {}・畳んだ数 {}",
+                           MrIsUniform(root) ? "一様" : "頁", children,
+                           nest.cells.uniformLayers.Find(test::MULTIRES_ROOT_SLOT) != nullptr ? "あり" : "なし",
+                           LayeredPages(nest), nest.counters[MR_COUNTER_FOLDED]);
+    }
+
     // --- 7. 一様の枠の層(T-1240 の 3・4 段目)---
     // 畳む → 一様な根を細かくする → 粗くする: 層まで同じ静かな頁(燃えない空気)を毎刻み畳む段に通し(CPU は FoldQuietPages)、
     // 本物の鎖の場面を進める。畳んだら根は一様の枠の層を持つ(層の頁を返す)。鎖は一様(子は親と同じ一様の枠の層)
     std::expected<void, std::string> RunUniformFold(ID3D12Device5* device, gpu::ImmediateQueue& queue,
                                                     gpu::DebugRing& ring, const sim::BakedReactionTable& table) {
         sim::MultiresNest cpu = MakeUniformScene(table, InertAir(table), true);
-        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, GpuOptions(StepMode::Full, LAYER_PAGES));
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity,
+                                            GpuOptions(StepMode::Active, CHAIN_LAYER_PAGES));
         if (!gpu)
             return std::unexpected(gpu.error());
 
@@ -417,17 +429,26 @@ namespace {
                 if (tick == 0 && !gpu->RecordUpload(list, cpu))
                     return false;
 
+                // test::BeginQuietTick と同じ順(要求 → 畳む → 要求の処理 → 活性だけ刻む。眠る印は活性の刻みが付ける)
+                if (!gpu->RecordRequests(list, test::MultiresRequestsAt(test::MultiresScenario::Real, tick)))
+                    return false;
+
                 gpu->RecordFoldPages(list, ring.GpuAddress(), tick);
-                return RecordSceneTick(list, *gpu, ring.GpuAddress(), test::MultiresScenario::Real, tick);
+                gpu->RecordProcessRequests(list, ring.GpuAddress());
+                return gpu->RecordStepActive(list, ring.GpuAddress(), test::MULTIRES_TEST_SEED, tick);
             };
             auto read = Execute(queue, ring, *gpu, record);
             if (!read)
                 return std::unexpected(std::format("畳む 刻み {}: {}", tick, read.error()));
 
+            sim::SubmitRequests(cpu, test::MultiresRequestsAt(test::MultiresScenario::Real, tick));
             sim::FoldQuietPages(cpu, tick);
-            test::StepMultiresScene(cpu, table, test::MultiresScenario::Real, tick);
+            sim::ProcessRequests(cpu);
+            sim::StepActive(cpu, table, test::MULTIRES_TEST_SEED, tick);
             if (auto compared = Compare(cpu, *read, std::format("畳む 刻み {}", tick)); !compared)
-                return compared;
+                return std::unexpected(std::format("{}(cpu: {} / gpu: {}・層の頁の不足 {})", compared.error(),
+                                                   DescribeRoot(cpu), DescribeRoot(*read),
+                                                   gpu->ReadLayerShortage().value_or(~0u)));
 
             folded = folded || MrIsUniform(read->blocks[test::MULTIRES_ROOT_SLOT]);
             uint32_t count = 0;

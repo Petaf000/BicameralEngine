@@ -1007,6 +1007,13 @@ namespace bicameral::sim {
         // --- 層の置き場の像(層の頁を持つ世界だけ。写せなければ何も写さない。T-1221)---
         std::vector<uint32_t> layerWords;
         if (m_layerCapacity > 0) {
+            // 粒の印(EnableCellLayers)は GPU が知らない(畳む段が舞う粒を見ない。写すと CPU とずれるので断る。T-1240)
+            if (nest.cellLayers.enabled) {
+                Log(Channel::Gpu, Level::Error,
+                    "層を GPU に写せない: 粒の印を持つ世界(EnableCellLayers)はまだ(T-1240)");
+                return false;
+            }
+
             auto image = MakeGpuLayerImage(nest, m_layerCapacity);
             if (!image) {
                 Log(Channel::Gpu, Level::Error, "層を GPU に写せない: {}", image.error());
