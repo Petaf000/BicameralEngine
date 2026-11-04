@@ -1,6 +1,6 @@
 # T-1266 シミュの共通のコードの残りの局所の配列(T-1233・T-1234 の続き)
 
-- Status: Doing(2026-10-30 wt5。t-1266-multires-no-local-array)
+- Status: Review(2026-11-05 wt5。t-1266-multires-no-local-array を runner/ready/ に。残りの候補は下の「残り」)
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1〜2 回分
@@ -12,10 +12,10 @@ T-1233・T-1234 の後も DXIL の alloca が残るシミュの共通のコー�
 tools/dxil_alloca/limits.txt を下げる。結果はビット単位で同じ・費用は直す前を超えない(D-468)。
 
 ## 完了条件(チェックできる形で)
-- [ ] release のビルド(警告 0)・float_check・`dxil_alloca_check` を --update した表で通す(下がった数をチケットに)
-- [ ] 触ったシェーダーの GPU 試験(HW と WARP)が CPU リファレンスとビット一致・記録したハッシュが変わらない
-- [ ] 費用(多重解像度の `gpu_multires_test --measure-wide`・物の熱の `gpu_object_heat_test --measure-only`)が直す前以下。docs/perf.md へ
-- [ ] `python3 tools/archmap/archmap.py --check`
+- [x] release のビルド(警告 0)・float_check・`dxil_alloca_check` を --update した表で通す(1144 → 847)
+- [x] 触ったシェーダーの GPU 試験(HW 20 本と WARP 8 本)が CPU リファレンスとビット一致・記録したハッシュが変わらない
+- [x] 費用(多重解像度の `gpu_multires_test --measure-wide`・物の熱の `gpu_object_heat_test --measure-only`)が直す前以下。docs/perf.md へ
+- [x] `python3 tools/archmap/archmap.py --check`
 
 ## 候補(2026-10-29 の grep・T-1234 のメモから)
 - multires.hlsli: MrFraction の species・amounts(MrFractionAmountOf・次の種を探す回し)・MrSplit の parent.species[p]・
@@ -61,7 +61,7 @@ tools/dxil_alloca/limits.txt を下げる。結果はビット単位で同じ・
   刻みの費用は 3 つとも揺れの内で同じ(上限の種のセル・溢れ 伝導なし 827〜830 / 820〜827 / 768〜820 ns/セル・大きい形 伝導なし 467〜468 / 467〜520 / 469〜474・物の熱 燃える小枝 1000 本 1.108〜1.118 / 1.115〜1.123 / 1.111〜1.112 ms。
   表は runner/t1266/ab_result_1105.tsv)。違いはドライバのシェーダーの作成だけ: E10 の初回(冷えた)は Compute 1.07 s・Work Graph 1.46 s、e9 は上の通り数十秒〜数分。
   → 子 2³ の回しを開くのをやめた(E10。MR_CHILDREN_UNROLL を空に。仮・ユーザー未確認。下の【エンジン】)。alloca 合計 1144 → 847(e9 なら 821): graph / graph_place 60 → 11・tree_settle 27 → 6・
-  tree_resolve 26 → 8(ほかは e9 と同じ)。release ビルド警告 0・dxil_alloca_check を --update・archmap --check OK。**E10 の GPU の試験はまだ**(引き継ぎメモ)。
+  tree_resolve 26 → 8(ほかは e9 と同じ)。release ビルド警告 0・dxil_alloca_check を --update・archmap --check OK。E10 の GPU の試験 HW 20 本・WARP 8 本 合格(ビット一致)。
 
 ## 判断待ち
 - 【エンジン】子 2³ の回し(粗くする核・影の引き戻し・畳む集計)を GPU で開くか(T-1266。2026-11-05 wt5)。作り手から見た違い:
@@ -71,13 +71,13 @@ tools/dxil_alloca/limits.txt を下げる。結果はビット単位で同じ・
   - 刻みの費用・結果(ビット一致)はどちらも同じ。戻すのは multires.hlsli の MR_CHILDREN_UNROLL を FX_UNROLL にするだけ(溢れの世界 MR_WIDE_CELLS は開かないまま)。
   - おすすめ: 開かない(E10)。局所の配列がどれだけ残ると HW の Work Graph が止まるかの境は未確認なので、11 で止まりが出たら開く方へ戻す(1 行で戻せる)。
 
-## 引き継ぎメモ(2026-11-05 wt5・2 時間で区切った)
-- ブランチ t-1266-multires-no-local-array(main 244f7dd2 の上・このメモのコミットが先頭)。E10 の release ビルド済み(警告 0)・表は 847 で --update 済み。
-- 残り: (1) E10 の GPU の組を流す(下の 4 組。e9 では全部合格・quiet だけ作成の遅さで Timeout。E10 では quiet は ab の中で exit 0)→ 合格なら runner/ready/ に印。
-  組: HW `^(gpu_multires|gpu_multires_stress|gpu_multires_limits|gpu_multires_quiet|gpu_multires_uniform|gpu_multires_activity)$`・`^gpu_multires_wide_(limits|overflow|many|many_conduct|coarsen|uniform)$`・
-  `^(gpu_multires_conduction|gpu_multires_near_fold|gpu_lab_box|gpu_object_heat_nest|gpu_multires_layers|gpu_multires_implicit_build|gpu_sun_column|gpu_cascade_tree_grid)$`、
-  WARP `^(gpu_multires_warp|gpu_multires_wide_warp|gpu_multires_quiet_warp|gpu_multires_uniform_warp|gpu_multires_activity_warp|gpu_multires_conduction_warp|gpu_lab_box_warp|gpu_multires_implicit_build_warp)$`。
-  (2) 冷えたキャッシュでの作成の時間を main と比べる測り方は未(ドライバのキャッシュを消さずに測るには、シェーダーに結果を変えない違いを入れて作り直させる形が要る)。
+## 引き継ぎメモ(2026-11-05 wt5)
+- ブランチ t-1266-multires-no-local-array(main 244f7dd2 の上)。E10(子 2³ の回しを開かない・仮)で release ビルド警告 0・表 847・CPU 3 本(multires・multires_quiet・dxil_alloca_check)・
+  GPU の HW 20 本・WARP 8 本 合格(e9 で落ちた gpu_multires_quiet も 15.9 s で合格)。E10 の初回(この実行ファイルで冷えていた)の試験の時間: gpu_multires_uniform 17.7 s(e9 373 s)・
+  gpu_multires_implicit_build 26 s(e9 325 s)・gpu_lab_box 19 s(e9 420 s)。
+- 残りの候補(このチケットの続き。急がない): multires_graph / graph_place の 11(子の並び [64 x i32/i64] 2 つずつ・[8 x i64] 5)・multires_graph_wide 51・multires_step_wide_*(速い形 32 種。動的な添字のまま = ADR-0052 追記 14)・
+  multires_wide_conduct_* 15〜16・lab_box_apply 21・object_heat_react 15・physics_*。子の並びを消すなら「開く」以外の形(子を局所の配列に写さず、回しの中で頁から読み直す)を asm で試す。
+- 冷えたキャッシュでの作成の時間を main と同じ条件で比べる測り方は未(シェーダーに結果を変えない違いを入れて作り直させる形が要る)。
 - 道具(git の外・runner/t1266/): ab.ps1(版の入れ替えの費用。dxc の行は dxc_cmds.txt = build.ninja から作り直した 316 行)・sum.py(ab のログを表に)・asm2.ps1(tag.txt の「名前 DIR_xx」で写しのシェーダーを dxc にかける)・DIR_E10(E10 の写し)。
 
 ## 引き継ぎメモ(2026-10-30 wt5・入れ物の再起動で区切った)
