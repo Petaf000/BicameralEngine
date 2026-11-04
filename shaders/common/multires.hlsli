@@ -349,14 +349,11 @@ FX_FN void MrPutEntry(inout uint32_t species[RX_MAX_CELL_SPECIES], inout uint64_
 #define MR_SET_ENTRY(list, i, speciesId, amount) MrPutEntry((list).species, (list).amounts, i, speciesId, amount)
 #endif
 
-// 子 2³ の回しを開く印(T-1266): インラインの子(MrChildren・MrShadowFamily)は開いて子の番号を定数にする(子の並びを動的な添字で
-// 読まない)。溢れを使う世界の GPU(MR_WIDE_CELLS)の子は番地だけを持つ形(multires_graph.hlsl の GpuWideChildren)で、開くと
-// 溢れを読む回しが 8 倍に写って命令が 1.7 倍になるので開かない
-#if defined(MR_WIDE_CELLS)
+// 子 2³ の回しの印(T-1266): 今は開かない(空)。開くと(FX_UNROLL)子の並びの局所の配列([64 x i32/i64])は消えるが、
+// ドライバのシェーダーの作成(キャッシュの冷えた時)が 1 本 数秒〜数十秒に延びた(RTX 3070 Ti: multires_step_wait 74.5 s・
+// Work Graph Multires 41 s。開かない形は 1 s 前後)。刻みの費用はどちらも同じ。溢れを使う世界(MR_WIDE_CELLS)は開くと命令が
+// 1.7 倍になるので、どちらにしても開かない。仮(ユーザー未確認。チケット T-1266 の【エンジン】の問い)
 #define MR_CHILDREN_UNROLL
-#else
-#define MR_CHILDREN_UNROLL FX_UNROLL
-#endif
 
 // 端数・セルを読む道具は形(MrFraction・RxCell / C++ の MrWideFraction・RxWideCell)のテンプレート(T-0187)
 template <typename List>

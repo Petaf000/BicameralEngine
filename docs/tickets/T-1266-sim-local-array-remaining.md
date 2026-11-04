@@ -50,6 +50,35 @@ tools/dxil_alloca/limits.txt を下げる。結果はビット単位で同じ・
   全体の release のビルド(e8 の形・警告 0)で alloca 合計 1141 → 812: tree_settle 27 → 0・tree_resolve 26 → 2・graph / graph_place 60 → 4・graph_wide 82 → 45・
   tree_fold_check 21 → 4・tree_quiet_check 35 → 2・conduct_* 13〜16 → 6・activity_graph 9 → 3・sun_column / sky_port / implicit_build_* → 0 ほか。
   e8 では step_wide_wait 101 → 102 と増えたので MR_CHILD_OF を溢れの世界で配列に戻した(e9。dxc だけで step_wide_wait 101・graph_wide 51・tree_wide_fold_check 6)。
+- 2026-11-05 wt5(2 チャット目): main 244f7dd2 へ rebase・release ビルド警告 0・alloca の表を --update(1144 → 821。消えた lab_box_patch_boundaries の行も落とした。aa94bfc0)。
+  CPU の試験 15 本(multires 系 8・object_heat_nest・float_check 5・dxil_alloca_check)合格(lab_box は main でも Disabled)。
+  GPU の HW 20 本中 19 本合格・WARP 8 本合格(全部 CPU とビット一致)。**gpu_multires_quiet だけ ctest の上限 300 秒で Timeout**: ドライバのシェーダーの作り直し(冷えたキャッシュ)が
+  長い(multires_step_wait.cso 74.5 s・Compute のパイプラインの作成 合計 201 s・Work Graph 41 s。main の quiet は 10〜22 s)。ほかも初回は長い: gpu_multires 340 s(main 7〜9 s・冷えた時 42 s)・
+  gpu_multires_uniform 373 s(main 5 s)・gpu_multires_implicit_build 325 s(main 冷えた時 46 s)・gpu_lab_box 420 s。ほかの作業ツリー(wt2・wt4・wt6)の GPU の試験と重なっていた。
+  dxc だけの比べ(runner/t1266/asm2.ps1): 子 2³ の回しを開かない形(E10)でも multires_graph の dx.op は 1686(e9 1643・main 818)で、命令が増えたのは子を開いたせいではなく
+  成分を決まった数から選ぶ形(MR_SPECIES_AT など)の方。E10 は alloca が graph 11・tree_settle 6・tree_resolve 8 に戻る。graph の rawBufferLoad 298 → 815・atomicBinOp 20 → 50(関数の写しが増えた)。
+  費用(runner/t1266/ab.ps1: 同じ実行ファイルに main 244f7dd2・e9・E10 のシミュのシェーダー 61 本を入れ替えて main → e9 → E10 を 2 周。wt2・wt4・wt6 の GPU の試験と重なった):
+  刻みの費用は 3 つとも揺れの内で同じ(上限の種のセル・溢れ 伝導なし 827〜830 / 820〜827 / 768〜820 ns/セル・大きい形 伝導なし 467〜468 / 467〜520 / 469〜474・物の熱 燃える小枝 1000 本 1.108〜1.118 / 1.115〜1.123 / 1.111〜1.112 ms。
+  表は runner/t1266/ab_result_1105.tsv)。違いはドライバのシェーダーの作成だけ: E10 の初回(冷えた)は Compute 1.07 s・Work Graph 1.46 s、e9 は上の通り数十秒〜数分。
+  → 子 2³ の回しを開くのをやめた(E10。MR_CHILDREN_UNROLL を空に。仮・ユーザー未確認。下の【エンジン】)。alloca 合計 1144 → 847(e9 なら 821): graph / graph_place 60 → 11・tree_settle 27 → 6・
+  tree_resolve 26 → 8(ほかは e9 と同じ)。release ビルド警告 0・dxil_alloca_check を --update・archmap --check OK。**E10 の GPU の試験はまだ**(引き継ぎメモ)。
+
+## 判断待ち
+- 【エンジン】子 2³ の回し(粗くする核・影の引き戻し・畳む集計)を GPU で開くか(T-1266。2026-11-05 wt5)。作り手から見た違い:
+  - 開く(e9): 多重解像度の Work Graph(multires_graph)の局所の配列が 60 → 4(T-0397 の止まりの心配がいちばん小さい)。代わりに、ドライバのシェーダーのキャッシュが冷えている時
+    (初めて起動した時・ドライバを入れ替えた後・シェーダーを変えた後の試験)のパイプラインの作成が 1 本 数秒〜数十秒・試験 1 本が数分に延びる(gpu_multires_quiet が ctest の 300 秒で切れた)。
+  - 開かない(E10・**仮でこちら**): Work Graph の局所の配列は 60 → 11(子の並びの [64 x i32]・[64 x i64] が 2 つずつ残る)。パイプラインの作成は main と同じ程度(1 s 前後)。
+  - 刻みの費用・結果(ビット一致)はどちらも同じ。戻すのは multires.hlsli の MR_CHILDREN_UNROLL を FX_UNROLL にするだけ(溢れの世界 MR_WIDE_CELLS は開かないまま)。
+  - おすすめ: 開かない(E10)。局所の配列がどれだけ残ると HW の Work Graph が止まるかの境は未確認なので、11 で止まりが出たら開く方へ戻す(1 行で戻せる)。
+
+## 引き継ぎメモ(2026-11-05 wt5・2 時間で区切った)
+- ブランチ t-1266-multires-no-local-array(main 244f7dd2 の上・このメモのコミットが先頭)。E10 の release ビルド済み(警告 0)・表は 847 で --update 済み。
+- 残り: (1) E10 の GPU の組を流す(下の 4 組。e9 では全部合格・quiet だけ作成の遅さで Timeout。E10 では quiet は ab の中で exit 0)→ 合格なら runner/ready/ に印。
+  組: HW `^(gpu_multires|gpu_multires_stress|gpu_multires_limits|gpu_multires_quiet|gpu_multires_uniform|gpu_multires_activity)$`・`^gpu_multires_wide_(limits|overflow|many|many_conduct|coarsen|uniform)$`・
+  `^(gpu_multires_conduction|gpu_multires_near_fold|gpu_lab_box|gpu_object_heat_nest|gpu_multires_layers|gpu_multires_implicit_build|gpu_sun_column|gpu_cascade_tree_grid)$`、
+  WARP `^(gpu_multires_warp|gpu_multires_wide_warp|gpu_multires_quiet_warp|gpu_multires_uniform_warp|gpu_multires_activity_warp|gpu_multires_conduction_warp|gpu_lab_box_warp|gpu_multires_implicit_build_warp)$`。
+  (2) 冷えたキャッシュでの作成の時間を main と比べる測り方は未(ドライバのキャッシュを消さずに測るには、シェーダーに結果を変えない違いを入れて作り直させる形が要る)。
+- 道具(git の外・runner/t1266/): ab.ps1(版の入れ替えの費用。dxc の行は dxc_cmds.txt = build.ninja から作り直した 316 行)・sum.py(ab のログを表に)・asm2.ps1(tag.txt の「名前 DIR_xx」で写しのシェーダーを dxc にかける)・DIR_E10(E10 の写し)。
 
 ## 引き継ぎメモ(2026-10-30 wt5・入れ物の再起動で区切った)
 - ブランチ t-1266-multires-no-local-array(このメモのコミットが先頭)。直しは shaders/common/multires.hlsli・multires_tree.hlsli・shaders/sim/multires_tree.hlsl・multires_graph.hlsl だけ(読み書きの形だけ・順も答えも同じのつもり。**試験はまだ一度も流していない**)。
