@@ -1164,8 +1164,8 @@ FX_CONST uint32_t
     RC_GPU_RUN = 30;  // この刻みを流す印(RcPlanTick が書く。起動の予告のバッファにも同じ値。0 = 飛ばす。T-1229・T-1235)
 FX_CONST uint32_t RC_GPU_SKIPPED = 31;  // 飛ばした刻みの数(作ってから。測りの目安)
 FX_CONST uint32_t RC_GPU_HEADER_WORDS = 32;
-// 作業のバッファの頭(RcGpuParams の 256 バイト)の終わりの語(バイトの位置): 呼ぶ側の写しの段が「この刻みに放つセルがある」なら
-// 0 でない値を書き、RcPlanTick が読んで 0 に戻す(T-1229。sim/probe_sim の負の側の段)
+// 作業のバッファの頭(RcGpuParams の 256 バイト)の終わりの語(バイトの位置): 呼ぶ側の写しの段が持つ「作業の今の中身で放つセルの数」
+// (写したセルの増減を足す。作った時は 0)。RcPlanTick は 0 でないかだけ読む(T-1229・T-1228。sim/probe_sim の参照の温度の形の段)
 FX_CONST uint32_t RC_GPU_WORK_EMITTERS = 248;
 // 仮の世界の自分のルート署名の時だけ u3 へ書く(T-1235・ADR-0495)。書くのは g_external3 に RC_GPU_U3_OUTPUT の印がある起動だけ
 // (木のルート署名の u3 は木の数のバッファなので書かない): RcPlanTick は起動の予告のバッファ(uint64 1 語)へ「流す」の印を、

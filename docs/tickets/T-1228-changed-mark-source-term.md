@@ -1,6 +1,6 @@
 # T-1228 変わったブロックの印を費用の読み手へ・吸った分を当てる段の源の項に(ADR-0469 の 4-4・4-1。ADR-0500 改訂)
 
-- Status: Todo(2026-10-27 wt6 が T-1161 から分けた・2026-10-29 本体 16 回目〔設計〕が ADR-0500 で形を決めた)
+- Status: Doing(段 1 の RadiationGrid は 2026-11-05 wt4 で済み・RcSources の一覧が残り。2026-10-27 wt6 が T-1161 から分けた・2026-10-29 本体 16 回目〔設計〕が ADR-0500 で形を決めた)
 - 種類: 工学
 - PC: 必須(GPU)
 - 見積もり: チャット 2 回分(段 1 / 段 2)
@@ -19,6 +19,9 @@
 ## 完了条件(チェックできる形で)
 - [ ] **段 1(今すぐ・仮の世界・土台に触らない)**: RadiationGrid が変わったブロックだけ両側の作業へ写す・RcSources の放つセルの一覧を印で直す。
       **確かめ**: 印を全部「変わった」にした時と刻みごとのハッシュがビット一致(gpu_radiation_cost に場面)。費用を perf.md に(Grid 83 + Sources 固定 72 µs がどれだけ減るか)
+  - [x] RadiationGrid(2026-11-05 wt4・ブランチ t-1228-skip-grid): 前の刻みの写しの後で変わった印のブロックだけ写す。CPU の約束 `sim::ProbeRadiationBlockStale`・
+        CPU の確かめ `ProbeReference::CheckCascadeGridMarks`(probe_radiation の 8)・GPU は `ProbeSimOptions::radiationCopyAll` と比べる(gpu_radiation_cost)
+  - [ ] RcSources の放つセルの一覧(下の「段 1 の残り」)
 - [x] **受けのあった葉を印の相手として数える(2026-10-29 wt4・T-1227 と同じブランチ)**: `sim::CascadeTouchedSlots`(吸った・放ったが 0 でない升目の葉の枠。昇順・落とさない)。
       cascade_tree_grid の 6 で升目から数え直した枠と一致(0.5 m・1 m の根・混ざった木)。印(busyTick)を書くのは T-1252 の 1 つの関数なので、ここは数えるだけ
 - [ ] **段 2(T-1252 段 2 の後・T-1155 の残りと一緒)**: 多重解像度の世界で源の項を当てる段へ(4-1)。受けのあった葉が起きる・CPU と GPU のビット一致・保存の検査
@@ -44,6 +47,32 @@
   「前に放ったセル」の 0 戻しを落とさない(冷えたセルが一覧から抜ける刻みに 0 に)。一覧は印で直す(写したブロックのセルだけ出し入れ)。
 - 確かめ: ProbeSimOptions に「いつも全部写す」(比べる試験だけ切る)を足し、gpu_radiation_cost の SkipScenes と火の場面で刻みごとのハッシュが全部一致。
   保存点・写しの早送りの道は gpu_probe_rewind・gpu_world_copy(放射は既定で入る)。費用は perf.md(Grid 83・Sources 81 µs/側 がどれだけ減るか)。
+
+## 段 1 の RadiationGrid の作り(2026-11-05 wt4 5 本目)
+- **確かめた「RemapSpecies が印を書かない所」**: GPU の RemapSpecies(probe_tick.hlsl)を流すのは RecordSpeciesRemap だけで、呼ぶのは RecordTableSwap だけ
+  (probe_sim.cpp。保存点へ戻す道は RecordTableBuffers と RecordRadiationTableSwap だけで付け替えない)。RecordTableSwap の刻みは必ず tableSwapped で、
+  適用の単位の RefreshTable が全部のブロックに印 = 刻み t を付ける(Grid より前)。CPU も Advance の newTable で RemapSpecies → 全部の印を t に。
+  だから付け替え・表の差し替え(光の値が変わる)は印だけで全部写す。別の「全部」の道は要らない(保存点へ戻す・写しの早送りは印そのものが戻るので要る)。
+- セルの真実を書く道の照らし(全部が印を書く): 置く・つつく・物理の熱(probe_tick)・RefreshTable・気体(GasScatter)・液体(動かした後の段が changed の印で)・
+  放射の当てる段・伝導(変わったブロック)。眠っているブロックは 2 世代が同じ(変わったブロックは次の刻みに必ず伝導が流れて次の世代へ写す)。
+- 形: 写しの段は単位の引数 0 = 前の刻み(t − 1)の写しの後で変わったブロック(印 ≥ t − 1。32bit の上下で比べる)だけ・1 = 全部。
+  CPU(ProbeSim::RecordRadiation)が「最後に写した刻み」を持ち、前の刻みでなければ全部(作った直後・RecordOverwriteState〔保存点へ戻す・写しの早送り〕で無くす)。
+  GPU に新しい語は足していない(案の「作業の頭に L」は使わなかった。L は CPU が知っている)。
+- 注意 1(放つセルの印)の解き方: ブロックごとの語ではなく、**側ごとの放つセルの数**を作業の RC_GPU_WORK_EMITTERS に持つ(写したセルが前の値 → 新しい値の
+  増減を波の和で足す。作った時は作業の温度 0 = 放たない・数 0)。RcPlanTick は 0 でないかだけ読み、0 に戻さない(前は写しの段が毎刻み全部のセルで印を立てていた)。
+  数は「作業の今の中身で放つセル」と常に同じなので、飛ばす刻みは前と同じ(gpu_radiation_cost で飛ばした刻みの数も全部写す時と比べる)。
+- 1 側の形(0 K の空)は数を持たない(飛ばすのは参照の温度の形だけ。RadiationSkips)。
+
+## 段 1 の残り: RcSources の放つセルの一覧(次の作業役へ)
+- RcSources(cascade_light.hlsl)は全部のセルを回す。参照の温度の形では温度 0 でないセルはみな「hot」なので、放たないセルも面の回しに入り、
+  放った・吸ったの欄に 0 を書く(冷たいセルは前の値が 0 でなければ 0 に)。一覧にするには (a) 放たないセルの欄の 0 戻し と (b) 一覧の出し入れ の 2 つが要る。
+- (a) の案: 仮の世界の当てる段(RadiationApply)は全部のセルの放った・吸ったを読んでいるので、読んだ後に 0 でなければ 0 に戻す(この刻みだけの値。
+  ADR-0500 の「源の項はこの刻みだけ」と同じ向き)。そうすれば RcSources は放つセルだけ回せばよい(冷たいセルの 0 戻しも要らない)。
+  欄を読むのは当てる段だけか要確認(RcPlanTick は帳簿だけ・試験の読み戻しが欄を読むか: gpu_probe_sim・gpu_play_metric)。木の世界の RcSources は今のまま。
+- (b) の案: 写しの段が側ごとの「放つ」1 bit をセルごとに作業へ持つ(32 セル = 1 語。写したセルだけ InterlockedOr / And。ビットは重ならないので順番によらない)。
+  RcSources は語ごとに回して立っているビットのセルだけ処理(params に「一覧の語の位置」0 = 今のまま を足す。RcGpuParams の空き: 頭の 256 B の中)。
+  放つかは EmitSidesOf(写しの段の今の判定。RcCellEmissionRelative が 0 でないのと同じ。面の向こうは見ない = 多めに拾うだけ)。
+- 確かめ: gpu_radiation_cost の `radiationCopyAll` と同じく「一覧を使わない」の印で全部の場面のハッシュと飛ばした刻みが一致。費用は perf.md(Sources 81 µs/側)。
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-10-29(本体 16 回目・設計): チケットのファイルを作った(前は T-1161 の「分けたもの」の行だけ)。形は ADR-0500。

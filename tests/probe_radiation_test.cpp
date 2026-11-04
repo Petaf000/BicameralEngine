@@ -13,6 +13,8 @@
 //      ビット単位で一定・決定的・火の熱は向かいの壁へ届く
 //   7. 既定の外は環境の温度の物(D-671・ADR-0478): 参照の温度 = 表の基準の大気の高さ 0 の温度(試験の表は earth_environment の 288.15 K)。
 //      基準の大気を書かない表は 0 K の空。基準の大気を 300 K にした表では、何もしない 300 K の世界が既定の値のまま全部眠る
+//   8. 写しの印(T-1228 段 1・ADR-0500 決定 4): 前に写した刻みの後で変わった印のブロックだけを写し直した格子が、刻みの初めのセルから
+//      作った格子といつも同じ(火・外 3 通り・光の値の違う表への差し替えと戻し)。参照の温度の世界の火では写すブロックが全部より少ない
 // `--measure ticks` は比べずに、段あり / なしの燃え方(600 K 以上のセル・炭・CO2)と 1 刻みの時間を表示する(T-1113 の記録)。
 // `--measure-outside ticks` は世界の外の扱い 2 つ(0 K の空 / 参照の温度)で、何もしない世界と火の世界の起きたブロック・光線・時間を表示する(T-1164)。
 #include <algorithm>
@@ -226,6 +228,63 @@ namespace {
         EXPECT(first.facingTemperature > without.facingTemperature);
     }
 
+    // --- 写しの印(T-1228 段 1)---
+
+    constexpr uint64_t SWAP_TICK = 20;
+    constexpr uint64_t SWAP_BACK_TICK = 40;
+
+    struct MarkRun {
+        uint64_t copiedBlocks = 0;  // 写し直したブロックの和
+        uint64_t staleCells = 0;    // 印で写した格子が刻みの初めの格子と違ったセルの和(0 であること)
+    };
+
+    // swapTable があれば刻み SWAP_TICK にそれへ、SWAP_BACK_TICK に元の表へ差し替える(全部のブロックに今の刻みの印)
+    MarkRun RunMarked(const BakedReactionTable& table, uint32_t referenceMk, const BakedReactionTable* swapTable) {
+        ProbeReference reference(table);
+        reference.SetCascadeRadiation(Options(true, referenceMk));
+        reference.CheckCascadeGridMarks(true);
+        const std::vector<ProbeCommand> commands = MakeCommands();
+
+        MarkRun run;
+        for (uint64_t tick = 0; tick < TOTAL_TICKS; ++tick) {
+            const BakedReactionTable* newTable = nullptr;
+            if (swapTable != nullptr && tick == SWAP_TICK)
+                newTable = swapTable;
+            else if (swapTable != nullptr && tick == SWAP_BACK_TICK)
+                newTable = &table;
+
+            reference.Advance(tick, commands, newTable);
+            run.copiedBlocks += reference.LastCascadeReport().copiedBlocks;
+            run.staleCells += reference.LastCascadeReport().staleCells;
+        }
+
+        return run;
+    }
+
+    void TestGridMarks(const ReactionTableDefinition& definition, const BakedReactionTable& table) {
+        const BakedReactionTable noLight = WithoutLight(definition);
+        const MarkRun referenced = RunMarked(table, WORLD_MK, nullptr);
+        const MarkRun environment = RunMarked(table, ENVIRONMENT, nullptr);
+        const MarkRun space = RunMarked(table, 0, nullptr);
+        const MarkRun swapped = RunMarked(table, WORLD_MK, &noLight);
+        const uint64_t all = TOTAL_TICKS * PROBE_BLOCK_COUNT;
+
+        EXPECT(referenced.staleCells == 0);
+        EXPECT(environment.staleCells == 0);
+        EXPECT(space.staleCells == 0);
+        EXPECT(swapped.staleCells == 0);
+        EXPECT(referenced.copiedBlocks < all);                   // 参照の温度の世界は火の周りだけ写す
+        EXPECT(swapped.copiedBlocks > referenced.copiedBlocks);  // 差し替えの刻みは全部
+        std::printf(
+            "写し直したブロック(%llu 刻みの平均・全部 %u): 火・外 300 K %.1f・外 表の環境 %.1f・外 0 K %.1f・差し替え "
+            "%.1f\n",
+            static_cast<unsigned long long>(TOTAL_TICKS), PROBE_BLOCK_COUNT,
+            static_cast<double>(referenced.copiedBlocks) / TOTAL_TICKS,
+            static_cast<double>(environment.copiedBlocks) / TOTAL_TICKS,
+            static_cast<double>(space.copiedBlocks) / TOTAL_TICKS,
+            static_cast<double>(swapped.copiedBlocks) / TOTAL_TICKS);
+    }
+
     // --- 既定の外 = 環境の温度の物(D-671)---
 
     void TestEnvironmentDefault(const ReactionTableDefinition& definition, const BakedReactionTable& table) {
@@ -357,6 +416,7 @@ int main(int argc, char** argv) {
     TestNoLight(definition);
     TestOutside(*table);
     TestEnvironmentDefault(definition, *table);
+    TestGridMarks(definition, *table);
     if (failureCount != 0)
         return 1;
 

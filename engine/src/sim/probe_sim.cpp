@@ -1019,6 +1019,11 @@ namespace bicameral::sim {
         const D3D12_RESOURCE_BARRIER allUavs = gpu::UavBarrier(nullptr);
         const GpuCascadeLight& negative = m_cascadeNegative ? *m_cascadeNegative : *m_cascade;
         MarkRadiation(list, ProbeRadiationStage::Start);
+        // 写しは前の刻みに写した後で変わったブロックだけ(単位の引数 0。T-1228 段 1)。前の刻みに写していなければ全部(引数 1)
+        const bool previous = m_radiationGridTick && *m_radiationGridTick + 1 == tick;
+        const bool copyAll = m_options.radiationCopyAll || !previous;
+        m_radiationGridTick = tick;
+        SetUnitConstants(list, tick, copyAll ? 1 : 0);
         BindRadiationViews(list, m_cascade->Work(), negative.Work(), m_radiationLights.Get());
         list->SetPipelineState(m_radiationPipelines[0].Get());
         list->Dispatch(LINEAR_CELL_GROUPS, 1, 1);

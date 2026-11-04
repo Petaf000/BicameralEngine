@@ -8,6 +8,8 @@
 //   側が空の刻みを GPU が飛ばしても(負の側 T-1229・正の側 T-1235)、飛ばさない時と刻みごとのハッシュが全部同じ
 //   (側ごとにずっと空・時々要る・ずっと要るの場面。飛ばした刻みの数も見込みどおり)。段 1 からの間接の起動(T-1235)は
 //   どの場面でも入っていて、CPU リファレンスとの一致は gpu_play_metric・gpu_probe_sim が見る。
+//   写しの段が変わった印のブロックだけ写しても(T-1228 段 1)、毎刻み全部写す時と刻みごとのハッシュと飛ばした刻みの数が全部同じ
+//   (火の場面と飛ばす段の場面。飛ばした刻みの数が同じ = 側ごとの放つセルの数が写すブロックを減らしても合う)。
 // 引数: gpu_test_options.h(--warp・--no-gbv)と --ticks n(既定 48)・--measure(全部の場面を測ってログに。既定は火の場面だけ)
 #include <algorithm>
 #include <array>
@@ -166,12 +168,13 @@ namespace {
 
     std::optional<Run> RunScene(ID3D12Device5* device, gpu::Queue& queue, const BakedReactionTable& table,
                                 const Scene& scene, uint64_t ticks, bool timing, bool skipIdle = true,
-                                bool indirect = false) {
+                                bool indirect = false, bool copyAll = false) {
         auto created = ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, table,
                                         {.cascadeRadiation = scene.cascade,
                                          .radiationStageTiming = timing,
                                          .radiationSkipIdle = skipIdle,
-                                         .radiationIndirectLevels = indirect});
+                                         .radiationIndirectLevels = indirect,
+                                         .radiationCopyAll = copyAll});
         if (!created) {
             Log(Channel::Sim, Level::Error, "{}", created.error());
             return std::nullopt;
@@ -293,15 +296,29 @@ namespace {
         const std::optional<Run> plain = RunScene(device, *queue, table, scenes.front(), ticks, false);
         failures.Check(plain && plain->ok, "印なしで流せた");
 
+        // --- 写しを変わったブロックだけにしても結果が同じ(T-1228 段 1。毎刻み全部写す時と)---
+        const std::optional<Run> copyingAll = RunScene(device, *queue, table, scenes.front(), ticks, false, true, false,
+                                                       true);
+        failures.Check(plain && copyingAll && copyingAll->ok && copyingAll->hashes == plain->hashes,
+                       "変わったブロックだけ写しても全部写す時と刻みごとの世界のハッシュが全部同じ(火の場面)");
+
         // --- 側が空の刻みを飛ばしても結果が同じ(T-1229・T-1235。飛ばさない時と刻みごとのハッシュが全部一致)---
         for (const Scene& scene : SkipScenes()) {
             const std::optional<Run> skipping = RunScene(device, *queue, table, scene, ticks, false, true);
             const std::optional<Run> running = RunScene(device, *queue, table, scene, ticks, false, false);
             const std::optional<Run> indirect = RunScene(device, *queue, table, scene, ticks, false, true, true);
-            failures.Check(skipping && skipping->ok && running && running->ok && indirect && indirect->ok,
+            const std::optional<Run> copying = RunScene(device, *queue, table, scene, ticks, false, true, false, true);
+            failures.Check(skipping && skipping->ok && running && running->ok && indirect && indirect->ok && copying &&
+                               copying->ok,
                            std::format("流せた: {}", scene.name));
-            if (!skipping || !running || !indirect)
+            if (!skipping || !running || !indirect || !copying)
                 continue;
+
+            // 写しを変わったブロックだけにしても(T-1228 段 1)、全部写す時とハッシュも飛ばした刻みの数も同じ
+            failures.Check(
+                skipping->hashes == copying->hashes && skipping->skippedPositive == copying->skippedPositive &&
+                    skipping->skippedNegative == copying->skippedNegative,
+                std::format("変わったブロックだけ写しても全部写す時とハッシュ・飛ばした刻みが同じ: {}", scene.name));
 
             // 段 1 からの間接の起動(T-1235。既定は切る・ADR-0495)を入れても同じ
             failures.Check(skipping->hashes == indirect->hashes,

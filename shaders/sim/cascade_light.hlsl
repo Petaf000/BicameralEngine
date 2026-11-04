@@ -326,7 +326,7 @@ void WalkAndPass(RcGpuParams params, RcStepConstants constants, RcLevelRay level
 }
 
     // --- この刻みを流すか(T-1229。起動の予告の元。g_external1 = 入る持ち越しの表・g_external3 の RC_GPU_U3_OUTPUT = 予告のバッファ〔u3〕へも書く。1 スレッド)---
-    // 飛ばしてよい = 放つセルが無い(作業の RC_GPU_WORK_EMITTERS が 0)・入る持ち越しの表が空(0 でない鍵の数が 0。数は多めにしかずれない)・
+    // 飛ばしてよい = 放つセルが無い(作業の RC_GPU_WORK_EMITTERS = 呼ぶ側の写しの段が持つ放つセルの数が 0。T-1228 で読むだけに)・入る持ち越しの表が空(0 でない鍵の数が 0。数は多めにしかずれない)・
     // 前に流した刻みが何も放たず何も受けなかった(帳簿の放った・持ち越しを放った・そのまま送ったが 0 = 放った・吸ったの欄と出る表が 0)。
     // その時に流した刻みの結果は「頭の帳簿が 0・欄が 0・表が 0」で今の置き場と同じなので、飛ばしても結果は変わらない(D-428)
     [numthreads(RC_GROUP_THREADS, 1, 1)] void RcPlanTick(uint3 dispatchThreadId : SV_DispatchThreadID) {
@@ -352,8 +352,6 @@ void WalkAndPass(RcGpuParams params, RcStepConstants constants, RcLevelRay level
 
     if (!run)
         StoreWord(HeaderOffset(RC_GPU_SKIPPED), LoadWord(HeaderOffset(RC_GPU_SKIPPED)) + 1);
-
-    g_rcWork.Store(RC_GPU_WORK_EMITTERS, 0u);
 }
 
 // --- セルごとに 6 面の熱の放つ量(RcFaceEmission。CPU の CollectSources の前半)---

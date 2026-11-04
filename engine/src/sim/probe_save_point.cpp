@@ -312,6 +312,7 @@ namespace bicameral::sim {
 
     // from(StateRegions の順。resource の offset から bytes)を世界へ写し、コマンドキューを空にする(戻す・写しを取る)
     void ProbeSim::RecordOverwriteState(ID3D12GraphicsCommandList10* list, std::span<const StateRegion> from) {
+        m_radiationGridTick.reset();  // 変わった印が戻るので、次の放射の写しは全部(T-1228)
         const std::vector<StateRegion> regions = StateRegions(0);
         std::vector<ID3D12Resource*> sources = {m_zeroQueueHeader.Get()};
         std::vector<ID3D12Resource*> destinations = {m_commandQueue.Get()};

@@ -333,6 +333,9 @@ namespace bicameral::sim {
         // 放射の段の段 1 からを袋の数で間接に起動する(T-1235)。結果は変わらない。64³ では直の起動と ±8 µs で差がほぼ無く
         // 両側とも空の刻みは +14 µs だったので既定は切る(D-546「測って速い所だけ」・ADR-0495)。大きい世界で測り直す時に入れる
         bool radiationIndirectLevels = false;
+        // 放射の写しの段(RadiationGrid)が毎刻み全部のセルを写す(T-1228 段 1。比べる試験だけ。既定は前の刻みの写しの後で変わった印の
+        // ブロックだけ写す = 結果は同じ。ProbeRadiationBlockStale)
+        bool radiationCopyAll = false;
     };
 
     // --- GPU で走らせる ---
@@ -699,8 +702,10 @@ namespace bicameral::sim {
         std::optional<GpuCascadeLight> m_cascadeNegative;
         bool m_radiationOverflowLogged = false;             // 溢れを 1 度だけ Error に出す
         std::optional<gpu::StageStamps> m_radiationStamps;  // 段ごとの GPU 時間(測りの時だけ。T-1161)
-        ComPtr<ID3D12Resource> m_radiationLights;           // 物質の光の値(表ごと。段の間は u17 に結ぶ)
-        ComPtr<ID3D12Resource> m_radiationLightsUpload;     // その写しの元
+        // 放射の写しの段を最後に記録した刻み(T-1228。無い = 次は全部写す。保存点へ戻す・写しの早送りで無くす)
+        std::optional<uint64_t> m_radiationGridTick;
+        ComPtr<ID3D12Resource> m_radiationLights;        // 物質の光の値(表ごと。段の間は u17 に結ぶ)
+        ComPtr<ID3D12Resource> m_radiationLightsUpload;  // その写しの元
         std::array<ComPtr<ID3D12PipelineState>, 3>
             m_radiationPipelines;  // RadiationGrid・RadiationApply・RadiationHash
 
@@ -777,7 +782,18 @@ namespace bicameral::sim {
         uint32_t changedCells = 0;       // エネルギーが変わったセル
         uint32_t negativeCells = 0;      // 当てた後に温度が 0 K 以下になったセル(陽の段の安定の見張り。0 であること)
         uint64_t rays = 0;               // 歩いた光線の数(費用の目安)
+
+        // --- 写しの印の確かめ(T-1228 段 1。ProbeReference::CheckCascadeGridMarks を入れた時だけ)---
+        uint32_t copiedBlocks = 0;  // 変わった印で写し直したブロック(全部写した刻みは PROBE_BLOCK_COUNT)
+        uint32_t staleCells = 0;    // 印で写した格子が、刻みの初めのセルから作った格子と違ったセル(0 であること)
     };
+
+    // 熱の放射の写しの段が、前に写した刻み lastGridTick の後でブロックを写し直すか(T-1228 段 1・ADR-0500 決定 4。GPU の RadiationGrid と同じ)。
+    // 刻み t の写しより前の変化の印は ≤ t(t − 1 の伝導 = ProbeChangeMark(t − 1)・t の適用 = ProbeChangeMark(t) − 1)、写しの後
+    // (当てる段・伝導・次の刻みの適用)の印は ≥ t なので、印 ≥ 前に写した刻み のブロックを写せば落とさない(t のものを 2 回写すのは多めに拾うだけ)
+    [[nodiscard]] constexpr bool ProbeRadiationBlockStale(uint64_t changedMark, uint64_t lastGridTick) {
+        return changedMark >= lastGridTick;
+    }
 
     // 最後の Advance の放射の段で起きたこと
     struct ProbeRadiationReport {
@@ -833,6 +849,9 @@ namespace bicameral::sim {
         // 今の参照の温度(mK。0 = 外は 0 K の空)
         [[nodiscard]] uint32_t CascadeReferenceMk() const;
         [[nodiscard]] const ProbeCascadeOptions& CascadeRadiation() const { return m_cascade; }
+        // 写しの印の確かめ(T-1228 段 1。試験用。結果は変わらない): 刻みの初めの格子とは別に、前に写した刻みの後で変わった印の
+        // ブロックだけを写し直す格子を持ち、毎刻み比べて違ったセルを LastCascadeReport().staleCells に数える(GPU の RadiationGrid の約束)
+        void CheckCascadeGridMarks(bool enabled) { m_cascadeMarkCheck = enabled; }
         [[nodiscard]] const ProbeCascadeReport& LastCascadeReport() const { return m_cascadeReport; }
         [[nodiscard]] const CascadeCarry& CascadeRadiationCarry() const { return m_cascadeCarry; }
         // 参照の温度との差の負の側の持ち越し(referenceMk が 0 なら空。量はセルから借りた分 = 保存の和では引く)
@@ -889,6 +908,9 @@ namespace bicameral::sim {
         CascadeCarry m_cascadeCarry;               // 次の刻みへの持ち越し(照り返し・組を待つ光)
         CascadeCarry m_cascadeCarryNegative;       // 参照の温度との差の負の側の持ち越し(T-1164)
         uint64_t m_cascadeOutside = 0;             // これまでに世界の外へ出た分 + 丸めの端数(2^−16 mJ の mod 2^64)
+        bool m_cascadeMarkCheck = false;           // 写しの印の確かめ(T-1228)
+        CascadeGrid m_markedGrid;                  // 印で写し直す格子(確かめの時だけ)
+        std::optional<uint64_t> m_markedGridTick;  // 最後に写した刻み(無い = 次は全部)
         std::optional<ProbeLiquidField> m_liquid;  // 液体の区画(T-0609。無ければ流さない)
         ProbeLiquidStepReport m_liquidReport;
 
@@ -897,6 +919,8 @@ namespace bicameral::sim {
         void StepRadiation(uint64_t tick, size_t currentBase, std::vector<uint8_t>& seeds);
         // 熱の放射の既定の段(RC。sim/probe_reference_radiation.cpp)。刻みの初めの温度で放ち、current の世代のエネルギーへ当てる
         void StepCascadeRadiation(uint64_t tick, size_t currentBase, std::vector<uint8_t>& seeds);
+        // 写しの印の確かめ(T-1228): 印のブロックだけ grid から写し、写した格子が grid と同じか数える
+        void CheckMarkedGrid(uint64_t tick, const CascadeGrid& grid);
     };
 
     // ブロックごとの初めの起こす刻みの印(待ちの丸め。ADR-0018・T-0122): 刻み 0 を tc = 0 で計算してみて、変わるブロックは刻み 0 の印、

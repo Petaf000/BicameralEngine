@@ -5,8 +5,11 @@
 // engine/src/sim/probe_sim_radiation.cpp の RecordRadiation が次の順に投げる(段の間は全部の UAV の書き込みを待つ):
 //   RadiationGrid   刻みの初めのセル(成分)+ 熱のキャッシュ(温度)→ 距離ごとの段の作業のバッファの光の値と温度(CPU の CascadeGrid と同じ並び)。
 //                   参照の温度の形(世界の外 = 環境の温度の物。D-671)では負の側の作業へも同じ値を書く
-//                   (側ごとに放つセルがあればその側の作業の印 RC_GPU_WORK_EMITTERS も。T-1229・T-1235: 側が空の刻みはその側の段とハッシュを
-//                   GPU が起動の予告で飛ばす。GpuCascadeLight::RecordPlan)
+//                   (側ごとの放つセルの数を作業の RC_GPU_WORK_EMITTERS に持つ。T-1229・T-1235: 側が空の刻みはその側の段とハッシュを
+//                   GPU が起動の予告で飛ばす。GpuCascadeLight::RecordPlan)。
+//                   写すのは前に写した刻みの後で変わった印のブロックだけ(T-1228 段 1・ADR-0500 決定 4。単位の引数が 0 でない刻みは全部:
+//                   作った直後・保存点へ戻した・写しの早送りの後・前の刻みに写していない・比べる試験の「いつも全部」。CPU の約束は
+//                   sim::ProbeRadiationBlockStale。表の差し替えは RefreshTable が全部のブロックに今の刻みの印を付けるので印で拾う)
 //   (距離ごとの段の 1 刻み: shaders/sim/cascade_light.hlsl。sim/gpu_cascade_light の自分のルート署名で。参照の温度の形では側ごとに 1 回)
 //   RadiationApply  セルごとの 正(吸った − 放った)− 負(吸った − 放った)(2^−16 mJ)を最も近い mJ に丸めてエネルギーへ足し、
 //                   変わったセルの熱のキャッシュを作り直し、ブロックを「刻みの直前に変わった」にして起こす刻みを今にする(気体の GasScatter と同じ)
@@ -65,10 +68,35 @@ RadiationEmitSides EmitSidesOf(uint32_t temperatureMk, uint32_t referenceWord, R
     return sides;
 }
 
-// --- 刻みの初めの写し(1 スレッド = 1 セル)---
+// ブロックが前の刻み(tick − 1)の写しの後で変わったか(sim::ProbeRadiationBlockStale と同じ: 印 ≥ tick − 1)。
+// 64bit の引き算と比べを並べない(T-1078・T-1159)ので、tick − 1 も比べも 32bit の上下で(借りは手で回す)
+bool BlockChangedSincePreviousGrid(uint32_t block) {
+    const uint32_t word = PROBE_SCHEDULE_CHANGED_WORD + block * 2;
+    const uint32_t markLow = blockSchedule[word];
+    const uint32_t markHigh = blockSchedule[word + 1];
+    const uint32_t previousLow = tickLow - 1u;
+    const uint32_t previousHigh = tickHigh - (tickLow == 0u ? 1u : 0u);
+
+    return markHigh > previousHigh || (markHigh == previousHigh && markLow >= previousLow);
+}
+
+// 側ごとの放つセルの数の増減(放つ = 1。mod 2^32 で足す)
+uint32_t EmitDelta(bool before, bool after) {
+    if (before == after)
+        return 0u;
+
+    return after ? 1u : 0xFFFFFFFFu;
+}
+
+// --- 刻みの初めの写し(1 スレッド = 1 セル。単位の引数が 0 なら、前の刻みの写しの後で変わったブロックのセルだけ)---
 [numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void RadiationGrid(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const uint32_t cell = dispatchThreadId.x;
     if (cell >= PROBE_CELL_COUNT)
+        return;
+
+    const uint32_t block = ProbeBlockOfCell(cell % PROBE_GRID_SIZE, (cell / PROBE_GRID_SIZE) % PROBE_GRID_SIZE,
+                                            cell / PROBE_SLICE_CELL_COUNT);
+    if (argument == 0u && !BlockChangedSincePreviousGrid(block))
         return;
 
     const RcGpuParams params = LoadRcParams();
@@ -85,23 +113,34 @@ RadiationEmitSides EmitSidesOf(uint32_t temperatureMk, uint32_t referenceWord, R
     light.reflectanceShortQ16 = shortBand.reflectanceQ16;
     light.reflectanceLongQ16 = longBand.reflectanceQ16;
     const uint32_t temperatureMk = thermal[index].temperature;  // 負は 0(熱のキャッシュの約束)
-    rcWork.Store<RcCellLight>(params.workLights + (cell * RC_CELL_LIGHT_BYTES), light);
-    rcWork.Store(params.workTemperatures + (cell * 4), temperatureMk);
+    const uint32_t lightAt = params.workLights + (cell * RC_CELL_LIGHT_BYTES);
+    const uint32_t temperatureAt = params.workTemperatures + (cell * 4);
+    // 参照の温度の形の放つセルの数は、前に写した値(作業の今の中身)から写す値への増減で直す
+    const RcCellLight previousLight = rcWork.Load<RcCellLight>(lightAt);
+    const uint32_t previousMk = rcWork.Load(temperatureAt);
+    rcWork.Store<RcCellLight>(lightAt, light);
+    rcWork.Store(temperatureAt, temperatureMk);
 
     // 参照の温度の形(正の側の参照の語が 0 でない)は負の側の作業へも(並びは同じ)
     if (params.referenceWord == 0u)
         return;
 
-    rcSecond.Store<RcCellLight>(params.workLights + (cell * RC_CELL_LIGHT_BYTES), light);
-    rcSecond.Store(params.workTemperatures + (cell * 4), temperatureMk);
+    rcSecond.Store<RcCellLight>(lightAt, light);
+    rcSecond.Store(temperatureAt, temperatureMk);
 
-    // 側ごとに放つセルがあれば、その側の作業の印へ(波に 1 回。T-1229・T-1235)。印はその側の RcPlanTick が読んで 0 に戻す
-    const RadiationEmitSides sides = EmitSidesOf(temperatureMk, params.referenceWord, light);
-    if (WaveActiveAnyTrue(sides.positive) && WaveIsFirstLane())
-        rcWork.Store(RC_GPU_WORK_EMITTERS, 1u);
+    // 側ごとの放つセルの数(作業の RC_GPU_WORK_EMITTERS。T-1229・T-1235・T-1228)。数はいつも「作業の今の中身で放つセルの数」で、
+    // 作った時の作業は温度 0(放たない)・数 0。写さないブロックの値は変わらないので、写したセルの増減だけ足せば合う(波に 1 回)。
+    // その側の RcPlanTick は 0 でないかだけ読む
+    const RadiationEmitSides before = EmitSidesOf(previousMk, params.referenceWord, previousLight);
+    const RadiationEmitSides after = EmitSidesOf(temperatureMk, params.referenceWord, light);
+    const uint32_t positiveDelta = WaveActiveSum(EmitDelta(before.positive, after.positive));
+    const uint32_t negativeDelta = WaveActiveSum(EmitDelta(before.negative, after.negative));
+    uint32_t original;
+    if (WaveIsFirstLane() && positiveDelta != 0u)
+        rcWork.InterlockedAdd(RC_GPU_WORK_EMITTERS, positiveDelta, original);
 
-    if (WaveActiveAnyTrue(sides.negative) && WaveIsFirstLane())
-        rcSecond.Store(RC_GPU_WORK_EMITTERS, 1u);
+    if (WaveIsFirstLane() && negativeDelta != 0u)
+        rcSecond.InterlockedAdd(RC_GPU_WORK_EMITTERS, negativeDelta, original);
 }
 
 // 側 1 つのセルの 吸った(短い帯 + 長い帯)と 放った を 32bit の上下に分けて返す(足し算だけ)
