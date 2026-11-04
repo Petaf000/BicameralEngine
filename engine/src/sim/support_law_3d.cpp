@@ -5,10 +5,14 @@
 //     ずれ   ½ 6b (Δu_t − [(φ_a + φ_b) × n]_t)²(t ごと。面の点の動き = 中心の動き + 回り × 中心から面まで。ε は Levi-Civita で
 //            [(φ) × n]_t = Σ_k ε(k, n, t) φ_k。2 次元の「x の面で −・上の面で +」はこの式の奥行の回りの分)
 //     曲げ   ½ 2b (Δφ_k)²(k ≠ n の 2 つ。I = dx⁴/12)
-//     ねじれ ½ (27/16) b (Δφ_n)²(G = E/2・J = 9/64 dx⁴。SUPPORT3_TORSION_*)
-//   固定した面(軸 n・側 s。面の点の形 ADR-0491): 伸び ½ 12b u_n²・ずれ ½ 12b (u_t + s Σ_k ε(k, n, t) φ_k)²・曲げ ½ 4b φ_k²・ねじれ ½ (27/8) b φ_n²
-//   段の斜めの棒(辺で接する斜めの隣。面 (a, b) の中で c → c + e_b + s e_a、間の 2 セルの片方だけがある所): ½ q (s Δu_a + Δu_b)²
-//     (q = (b_a + b_b) × 3 × 分子 ÷ (2 × 分母)。2 次元の段の棒〔ADR-0415〕を 3 つの座標の面に。角で接する斜めは T-1293)
+//     ねじれ ½ (7/4) b (Δφ_n)²(G = E/2・J = 7/48 dx⁴。SUPPORT3_TORSION_*。T-1293)
+//   固定した面(軸 n・側 s。面の点の形 ADR-0491): 伸び ½ 12b u_n²・ずれ ½ 12b (u_t + s Σ_k ε(k, n, t) φ_k)²・曲げ ½ 4b φ_k²・ねじれ ½ (7/2) b φ_n²
+//   段の斜めの棒(辺で接する斜めの隣。面 (a, b) の中で c → c + e_b + s e_a、間の 2 セルの片方だけがある所):
+//     ½ q (s Δu_a + Δu_b)² + ½ q (w · (φ_c+ − φ_c))²(w = e_a − s e_b = 段の面の中で棒に直交する軸。q = (b_a + b_b) × 3 × 分子 ÷ (2 × 分母)。
+//     伸びは 2 次元の段の棒〔ADR-0415〕を 3 つの座標の面に。面の外の曲げ〔回りの差〕は T-1293: 段の継ぎ目の面の外の曲げを面の梁の
+//     ねじれと曲げだけで運ぶと、段の面の外へ曲がる斜めの梁が柔らかすぎた〔(1,0,1) の梁 +11 %・(1,1,1) +21 %〕)
+//   角の斜めの棒(T-1293。c → c + (s_x, 1, s_z) が、間の 6 セルのうち 2 つだけを通る 3 歩の階段でつながる所): ½ q_c (s · Δu)²
+//     (q_c = (b_x + b_上 + b_奥行) × 2 × 分子 ÷ (3 × 分母)。軸の硬さ 3 q_c は辺の斜めの棒 2 q と同じ ka/12)
 // 剛体の動き(並進 3・回り 3)では全部の項が 0(回り ω' = 角 × dx/2 で u = ω' × p・φ = ω'。p = 中心のセルの半分の単位の座標)。
 // 一様な歪み(対称 6 つ)では面ごとの力が同じ(つぎはぎの検査。support_3d_test)。延ばし方は 3 次元の剛体の動き(Rigid3DProlongation)。
 #include "sim/support_law_3d.h"
@@ -262,15 +266,6 @@ namespace bicameral::sim {
         const auto find = [&](std::array<int64_t, SUPPORT3_AXES> p) {
             return Index(p[0], p[1], p[2]);
         };
-        // p と +軸の隣の間の面の残りの硬さ(p の位置で読む)
-        const auto intactAt = [&](std::array<int64_t, SUPPORT3_AXES> p, uint32_t axis) {
-            const std::vector<uint32_t>& intact = m_scene.intact[axis];
-            if (intact.empty())
-                return SUPPORT_INTACT_FULL;
-
-            return intact[(size_t)p[0] +
-                          (size_t)m_scene.width * ((size_t)p[1] + (size_t)m_scene.height * (size_t)p[2])];
-        };
 
         for (uint32_t a = 0; a < SUPPORT3_AXES; ++a) {
             for (uint32_t b = a + 1; b < SUPPORT3_AXES; ++b) {
@@ -291,10 +286,10 @@ namespace bicameral::sim {
                     std::array<int64_t, SUPPORT3_AXES> lowAcross = across > 0 ? at : sidePosition;
                     uint32_t intact = 0;
                     if (side) {
-                        intact = std::min(intactAt(lowAcross, a), intactAt(sidePosition, b));
+                        intact = std::min(IntactAt(lowAcross, a), IntactAt(sidePosition, b));
                     } else {
                         ++lowAcross[b];
-                        intact = std::min(intactAt(at, b), intactAt(lowAcross, a));
+                        intact = std::min(IntactAt(at, b), IntactAt(lowAcross, a));
                     }
 
                     if (intact == 0)
@@ -308,10 +303,89 @@ namespace bicameral::sim {
                     brace.gradientHigh[a] = across;
                     brace.gradientHigh[b] = 1;
                     m_terms.push_back(brace);
+
+                    // 面の外の曲げ: w = e_a − s e_b の回りの回りの差
+                    Term bend{.low = cell, .high = diagonal, .coefficient = brace.coefficient};
+                    bend.gradientLow[SUPPORT3_TURN + a] = -1;
+                    bend.gradientLow[SUPPORT3_TURN + b] = across;
+                    bend.gradientHigh[SUPPORT3_TURN + a] = 1;
+                    bend.gradientHigh[SUPPORT3_TURN + b] = -across;
+                    m_terms.push_back(bend);
                     ++m_braceCount;
                 }
             }
         }
+
+        AddCornerBraces(cell, at);
+    }
+
+    // 角の斜めの棒: c → c + (s_x, 1, s_z) が、間の 6 セルのうち 2 つだけを通る 3 歩の階段(軸の順 o0 → o1 → o2)でつながる所
+    void SupportLaw3D::AddCornerBraces(uint32_t cell, const std::array<int64_t, SUPPORT3_AXES>& at) {
+        constexpr std::array<std::array<uint32_t, 3>, 6> ORDERS = {
+            {{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}}};
+        for (const int32_t acrossX : {-1, 1}) {
+            for (const int32_t acrossZ : {-1, 1}) {
+                const std::array<int64_t, SUPPORT3_AXES> step = {acrossX, 1, acrossZ};
+                const uint32_t diagonal = Index(at[0] + step[0], at[1] + step[1], at[2] + step[2]);
+                if (diagonal == NO_CELL)
+                    continue;
+
+                // 間の 6 セルのうちあるものの数(2 つだけ)
+                uint32_t present = 0;
+                for (uint32_t mask = 1; mask < 7; ++mask) {
+                    present += Index(at[0] + ((mask & 1) != 0 ? step[0] : 0), at[1] + ((mask & 2) != 0 ? step[1] : 0),
+                                     at[2] + ((mask & 4) != 0 ? step[2] : 0)) != NO_CELL
+                                   ? 1
+                                   : 0;
+                }
+
+                if (present != 2)
+                    continue;
+
+                for (const std::array<uint32_t, 3>& order : ORDERS) {
+                    std::array<int64_t, SUPPORT3_AXES> first = at;
+                    first[order[0]] += step[order[0]];
+                    std::array<int64_t, SUPPORT3_AXES> second = first;
+                    second[order[1]] += step[order[1]];
+                    if (Index(first[0], first[1], first[2]) == NO_CELL ||
+                        Index(second[0], second[1], second[2]) == NO_CELL)
+                        continue;
+
+                    // 道の 3 つの面の残りの硬さの小さい方
+                    const auto faceIntact = [&](std::array<int64_t, SUPPORT3_AXES> from, uint32_t axis) {
+                        if (step[axis] < 0)
+                            from[axis] -= 1;
+
+                        return IntactAt(from, axis);
+                    };
+                    const uint32_t intact = std::min(
+                        {faceIntact(at, order[0]), faceIntact(first, order[1]), faceIntact(second, order[2])});
+                    if (intact == 0)
+                        break;
+
+                    const uint64_t unit = (AxisUnit(0) + AxisUnit(1) + AxisUnit(2)) * 2 * m_options.braceNumerator /
+                                          (3 * m_options.braceDenominator);
+                    Term brace{.low = cell, .high = diagonal, .coefficient = Scaled(unit, intact)};
+                    for (uint32_t axis = 0; axis < SUPPORT3_AXES; ++axis) {
+                        brace.gradientLow[axis] = -step[axis];
+                        brace.gradientHigh[axis] = step[axis];
+                    }
+
+                    m_terms.push_back(brace);
+                    ++m_cornerBraceCount;
+                    break;
+                }
+            }
+        }
+    }
+
+    // p と +軸の隣の間の面の残りの硬さ(p の位置で読む)
+    uint32_t SupportLaw3D::IntactAt(const std::array<int64_t, SUPPORT3_AXES>& p, uint32_t axis) const {
+        const std::vector<uint32_t>& intact = m_scene.intact[axis];
+        if (intact.empty())
+            return SUPPORT_INTACT_FULL;
+
+        return intact[(size_t)p[0] + (size_t)m_scene.width * ((size_t)p[1] + (size_t)m_scene.height * (size_t)p[2])];
     }
 
     // --- 成分を持つ節の系(k = 6): 同じ 2 節の続いた項は 1 つの面へ ---

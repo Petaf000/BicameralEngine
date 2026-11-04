@@ -3,8 +3,9 @@
 //   2. 奥行 1 セルの場面(張り出し・梁・両端固定・アーチ・洞窟)が 2 次元(sim/support_law)と同じ答え(丸めの内 = 最大の値の 0.1 %)・
 //      奥行の向きの変位と面の外の回りが 0(同じ線)
 //   3. 向きを変えても同じ: 奥行の向きに伸びた張り出し・奥行 2 セルの張り出しが 2 次元の張り出しと同じたわみ
-//   4. ねじれ: 先に腕のある棒(腕の先に荷)の先の回りが T L ÷ (G J)(J = 9/64 dx⁴)と ±1 %・固定した面の回りの力が荷の回りの力と釣り合う
+//   4. ねじれ: 先に腕のある棒(腕の先に荷)の途中の回りの差が T L ÷ (G J)(J = 7/48 dx⁴)と ±1 %・Saint-Venant と ±5 %・固定した面の回りの力が荷の回りの力と釣り合う
 //   5. 帳簿(力 3 成分・回りの力 3 成分)が毎刻み厳密・2 回の実行でハッシュ一致
+//   6. (T-1293)段の形: 斜めの梁 3 向き・回したアーチ(0°・45°)の先 / 頂のたわみを同じ階段の形の連続体と ±5 %(0.5 m と 0.25 m)
 // 引数: [--ticks n](既定 300)
 #include <algorithm>
 #include <array>
@@ -132,6 +133,7 @@ namespace {
         const sim::EquilibriumBlockSystem& system = law.BlockSystem();
         const uint32_t count = law.CellCount();
         Expect(law.BraceCount() >= 3, "段の斜めの棒が 3 つの座標の面に立つ");
+        Expect(law.CornerBraceCount() >= 1, "角の斜めの棒が 3 歩の階段に立つ");
 
         std::vector<std::array<int64_t, 3>> positions(count);
         std::vector<bool> inside(count, false);
@@ -284,21 +286,73 @@ namespace {
 
         Expect(law.Hash() == again.Hash(), "2 回の実行でハッシュ一致");
 
-        // 先の回り θ = 2 φ_x ÷ dx・連続体 T L ÷ (G J)(T = P × 2 dx・L = 壁から先の中心まで 7.5 dx・G = E/2・J = 9/64 dx⁴)
+        // 棒の途中(x = 1〜5 の 4 セル。先の腕の付け根は段の斜めの棒が立つので外す)の回りの差 Δθ = 2 Δφ_x ÷ dx と、
+        // 格子の式 T × 4 dx ÷ (G J)(T = P × 2 dx・G = E/2・J = 7/48 dx⁴〔T-1293〕)。Saint-Venant の 1 × 1 の断面(0.1406 dx⁴)との比も
+        // (+3.7 % の見込み。太い棒は T-1293 の捨てる試作)
         const double cellM = 0.5;
-        const double angle = 2.0 * (double)law.Value(LENGTH - 1, 0, 0, sim::SUPPORT3_TURN + sim::SUPPORT3_X) / 65536.0 /
-                             1.0e9 / cellM;
+        const auto turnX = [&](uint32_t x) {
+            return (double)law.Value(x, 0, 0, sim::SUPPORT3_TURN + sim::SUPPORT3_X);
+        };
+        const double angle = 2.0 * (turnX(5) - turnX(1)) / 65536.0 / 1.0e9 / cellM;
         const double torque = (double)LOAD_MN / 1000.0 * 2.0 * cellM;
         const double modulus = test::STONE_KPA * 1000.0;
-        const double expected = torque * 7.5 * cellM / (modulus / 2.0 * 9.0 / 64.0 * std::pow(cellM, 4));
+        const double expected = torque * 4.0 * cellM / (modulus / 2.0 * 7.0 / 48.0 * std::pow(cellM, 4));
+        const double saintVenant = torque * 4.0 * cellM / (modulus / 2.0 * 0.140577 * std::pow(cellM, 4));
         const sim::SupportLedger3D ledger = law.Ledger();
         // 固定した面の x の回りの力(原点の回り。mN × dx/2)が重さと荷の回りの力の逆(着いた答えの回りの釣り合い)
         const double reaction = (double)ledger.reactionTurn[sim::SUPPORT3_X] / (double)ledger.loadTurn[sim::SUPPORT3_X];
         Log(Channel::Sim, Level::Info,
-            "  先の回り {:.6e} rad・連続体 {:.6e}(比 {:.5f})・壁の回りの力 ÷ 荷の回りの力 {:.6f}", angle, expected,
-            angle / expected, reaction);
-        Expect(std::abs(angle / expected - 1.0) <= 0.01, "ねじれの角が連続体と ±1 %");
+            "  途中 4 セルの回りの差 {:.6e} rad・格子の式 {:.6e}(比 {:.5f})・Saint-Venant との硬さの比 "
+            "{:.4f}・壁の回りの力 ÷ "
+            "荷の回りの力 {:.6f}",
+            angle, expected, angle / expected, saintVenant / angle, reaction);
+        Expect(std::abs(angle / expected - 1.0) <= 0.01, "ねじれの角が格子の式と ±1 %");
+        Expect(std::abs(saintVenant / angle - 1.0) <= 0.05, "ねじれの硬さが Saint-Venant と ±5 %");
         Expect(std::abs(reaction + 1.0) <= 1.0e-3, "壁の回りの力が荷の回りの力と釣り合う");
+    }
+
+    // --- 5. 段の形(T-1293): 斜めの梁・回したアーチを、同じ階段の形の連続体(H11 を m 分割・外挿。浮動小数点の捨てる試作)と比べる ---
+    // 基準の値は E = 1・ρg = 1 の単位の上の変位(m)。石では × ρg ÷ E。cells は捨てる試作の形のセルの数(形の作りが同じかの確かめ)
+    struct StairCase {
+        const char* name;
+        bool arch;
+        std::array<double, 3> direction;  // 梁の向き(アーチは回す角 = direction[0] 度)
+        uint64_t cellMm;
+        uint32_t cells;
+        double continuumRef;
+    };
+
+    constexpr StairCase STAIR_CASES[] = {
+        {"梁 (1,1,0) 0.5 m", false, {1, 1, 0}, 500, 52, -1830.9},
+        {"梁 (1,1,0) 0.25 m", false, {1, 1, 0}, 250, 340, -1867.9},
+        {"梁 (1,0,1) 0.5 m", false, {1, 0, 1}, 500, 52, -2445.7},
+        {"梁 (1,0,1) 0.25 m", false, {1, 0, 1}, 250, 340, -2230.0},
+        {"梁 (1,1,1) 0.5 m", false, {1, 1, 1}, 500, 49, -3109.7},
+        {"梁 (1,1,1) 0.25 m", false, {1, 1, 1}, 250, 322, -2622.9},
+        {"アーチ 0° 0.5 m", true, {0, 0, 0}, 500, 108, -118.9},
+        {"アーチ 0° 0.25 m", true, {0, 0, 0}, 250, 904, -94.36},
+        {"アーチ 45° 0.5 m", true, {45, 0, 0}, 500, 116, -145.6},
+        {"アーチ 45° 0.25 m", true, {45, 0, 0}, 250, 794, -96.62},
+    };
+
+    void TestStairs() {
+        const double stoneSagPerUnit = (double)test::STONE_DENSITY * 9.80665 / (test::STONE_KPA * 1000.0);
+        for (const StairCase& stair : STAIR_CASES) {
+            const test::StairScene built = stair.arch ? test::RotatedArch(stair.direction[0], stair.cellMm)
+                                                      : test::TiltedBeam(stair.direction, stair.cellMm);
+            sim::SupportLaw3D law(built.scene, {});
+            Expect(law.CellCount() == stair.cells, std::format("{}: 形のセルの数が捨てる試作と同じ", stair.name));
+            Run(law, stair.name);
+            double sum = 0;
+            for (const auto& c : built.probe)
+                sum += (double)law.Value(c[0], c[1], c[2], sim::SUPPORT3_UP);
+
+            const double sagM = sum / (double)built.probe.size() / 65536.0 / 1.0e9;
+            const double ratio = sagM / (stair.continuumRef * stoneSagPerUnit);
+            Log(Channel::Sim, Level::Info, "  {}: セル {}・辺の棒 {}・角の棒 {}・格子 ÷ 連続体 {:.4f}", stair.name,
+                law.CellCount(), law.BraceCount(), law.CornerBraceCount(), ratio);
+            Expect(std::abs(ratio - 1.0) <= 0.05, std::format("{}: 連続体と ±5 %", stair.name));
+        }
     }
 
     int RunAll(std::span<char*> arguments) {
@@ -321,6 +375,8 @@ namespace {
         TestOrientation();
         Log(Channel::Sim, Level::Info, "4. ねじれ");
         TestTwist();
+        Log(Channel::Sim, Level::Info, "5. 段の形と連続体(T-1293)");
+        TestStairs();
 
         if (failureCount != 0) {
             Log(Channel::Sim, Level::Error, "support_3d_test: FAILED ({} 件)", failureCount);
