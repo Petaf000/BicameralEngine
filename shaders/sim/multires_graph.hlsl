@@ -233,9 +233,11 @@ void RefineLevel(MrRefineRecord record, uint32_t t) {
     const bool uniformParentLayers = MrIsUniform(parent) && UniformHasLayers(record.parentSlot);
     if (childLayerPage != MR_LAYER_NO_PAGE && parentLayerPage != MR_LAYER_NO_PAGE)
         CopyLayerCell(parentLayerPage, parentCell, childLayerPage, t);
+#ifndef MR_WIDE_CELLS
     else if (childLayerPage != MR_LAYER_NO_PAGE && uniformParentLayers)
         WriteBoundLayers(UniformLayerBase(record.parentSlot), LoadBlockCell(parent, record.parentSlot, parentCell),
                          MrLayerEntryAddress(LayerPageCount(), LayerCapacity(), childLayerPage, t, 0));
+#endif
     else if (childLayerPage != MR_LAYER_NO_PAGE)
         ClearLayerCell(childLayerPage, t);
 
@@ -864,10 +866,12 @@ void CoarsenRequest(uint32_t request, uint32_t t) {
         if (expandParent)
             g_cells[PageCellAddress(parentPage, index)] = MrUniformCell(parent, g_cells[parentSlot], index);
 
-        // 広げた親の層は一様の枠の層(CPU の FillPageFromUniform。T-1240)
+#ifndef MR_WIDE_CELLS
+        // 広げた親の層は一様の枠の層(CPU の FillPageFromUniform。T-1240。溢れを使う世界は層を持たない)
         if (expandParent && parentLayerPage != MR_LAYER_NO_PAGE)
             WriteBoundLayers(UniformLayerBase(parentSlot), MrUniformCell(parent, g_cells[parentSlot], index),
                              MrLayerEntryAddress(LayerPageCount(), LayerCapacity(), parentLayerPage, index, 0));
+#endif
 
         if (parent.fraction == MR_NO_FRACTION)
             g_fractions[FractionAddress(parentFraction, index)] = MrMakeEmptyFraction();

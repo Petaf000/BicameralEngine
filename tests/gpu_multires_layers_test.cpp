@@ -330,6 +330,8 @@ namespace {
         if (tick == test::MULTIRES_REFINE_TICK && scenario == MultiresScenario::Shadow)
             gpu.RecordRefineShadow(list, ring, test::MULTIRES_ROOT_SLOT, test::MULTIRES_SHADOW_SLOT,
                                    test::MULTIRES_LEVELS, point);
+        else if (tick == test::MULTIRES_COARSEN_TICK && scenario == MultiresScenario::Shadow)
+            gpu.RecordRemoveShadow(list, ring, test::MULTIRES_SHADOW_SLOT, test::MULTIRES_LEVELS);
 
         gpu.RecordStep(list, ring, test::MULTIRES_TEST_SEED, tick);
         if (test::MultiresShadowExists(scenario, tick))

@@ -621,11 +621,16 @@ void ExpandLayers(uint32_t i, uint32_t slot, uint32_t freeLayers, inout uint32_t
     for (uint32_t n = 0; n < count; ++n) {
         const uint32_t expanded = gs_expandLayerSlots[n];
         const uint32_t layerPage = gs_expandLayerPages[n];
-        const MrBlock block = g_blocks[expanded];
-        const RxCell value = g_cells[expanded];
-        for (uint32_t index = i; index < MR_BLOCK_CELLS && layerPage != MR_LAYER_NO_PAGE; index += MR_MAX_REQUESTS)
-            WriteBoundLayers(UniformLayerBase(expanded), MrUniformCell(block, value, index),
+        const bool real = g_blocks[expanded].kind == MR_BLOCK_REAL;
+        for (uint32_t index = i; index < MR_BLOCK_CELLS && layerPage != MR_LAYER_NO_PAGE; index += MR_MAX_REQUESTS) {
+            // MrUniformCell と同じ(見出しを写すと子の並びを動的な添字で読むので、バッファから直に読む。T-0397)
+            RxCell cell = g_cells[expanded];
+            if (real && g_blocks[expanded].children[MrOctantOfCell(index)] != MR_NO_BLOCK)
+                cell = RxMakeEmptyCell(0);
+
+            WriteBoundLayers(UniformLayerBase(expanded), cell,
                              MrLayerEntryAddress(pageCount, capacity, layerPage, index, 0));
+        }
     }
 
     AllMemoryBarrierWithGroupSync();  // 全部が一様の枠の層を読み終えてから消す
