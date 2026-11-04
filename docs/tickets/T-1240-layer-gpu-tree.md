@@ -99,6 +99,8 @@ T-1221 の 1 段目は、層の頁を GPU に置き、刻みの段の後に層�
   粗くする(CoarsenRequest: 子の層の和 ÷ 8・層の無い子は前の層を結ぶ・広げる親は一様の枠の層を頁へ・親の層の頁は TreeAllocate が取る)・
   畳む(TreeFoldCheck: 層まで一様なら層ごと・0 でない層の頁は平均で畳まない。TreeFold が層の頁を返す)・広げる(TreeExpand)・一様な親の子。
   粒の印の世界は RecordUpload が断る。dxil_alloca の表は減った 2 つを下げた。
+  合格(release・RTX・main 034d503d の上): gpu_multires_layers〔HW・WARP〕・gpu_multires・gpu_tree_refine_placement・multires_layers・dxil_alloca_check。
+  rebase 前に gpu_multires_quiet・gpu_multires_near_fold・gpu_lab_box・gpu_multires_conduction も合格。release 警告 0・archmap --check OK。
 
 ## 7 の 3・4 の詰め(2026-11-05 wt2 作業役 4。t-1240-coarsen-layers)
 - **一様の枠の層の置き場 → 枠ごとに決まった場所(仮・ユーザー未確認)【エンジン】**: 置き場の最後に [枠 × 組 8 つ(物質・層の下位・上位)]。
