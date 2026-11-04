@@ -72,7 +72,10 @@ namespace bicameral::sim {
         // 刻み(RecordStep・RecordStepActive)の後に層を合わせる段が層 = min(前の層, 今の量) に付け替え、Read が CPU の頁の層を GPU の層で置き換える。
         // 細かくする(要求の鎖・影の鎖)は子の頁へ親の層を写す(層の頁は空きのスタックから取る。T-1240 の 2 段目)。層の頁が尽きたら
         // 層のある所を細かくする要求を断って ReadLayerShortage に数える(量は変わらない。仮・ユーザー未確認)。
-        // まだの所: 溢れを使う世界・一様の枠の層は写さない(RecordUpload が false)。粗くする・畳む・広げるは層を配らない(T-1240 の続き)
+        // 粗くする(子の層の和 ÷ 8)・畳む(層まで一様な時だけ。一様の枠の層へ)・広げる(一様の枠の層を頁へ)も CPU と同じに配る(T-1240 の 3 段目)。
+        // 一様の枠の層は枠ごとに決まった場所(枠 1 つ 96 B。layerPages > 0 の世界だけ。尽きない)。粗くする親に層の頁が要る時に尽きたら
+        // 粗くする要求も断る。影の鎖・広げる時は断れないので、尽きたら数えて層なし(layerPages を影の鎖・広げる分まで持つ約束)。
+        // まだの所: 溢れを使う世界の層は写さない(RecordUpload が false。T-1240 の 5)。粒の印(EnableCellLayers)は GPU が知らない
         uint32_t layerPages = 0;
 
         // 作ったルート署名・パイプライン・Work Graph のプログラムを使い回す置き場(T-0427。無ければ毎回作る)。同じデバイスで
@@ -201,6 +204,7 @@ namespace bicameral::sim {
         [[nodiscard]] uint64_t OverflowBytes() const;
         // 層の置き場のバイト数(層の頁を持たなければ 0。T-1221)
         [[nodiscard]] uint64_t LayerBytes() const;
+        [[nodiscard]] uint32_t LayerStoreWords() const;  // 層の置き場の語の数(一様の枠の層まで。T-1240)
 
         // 伝導の段を Work Graph で投げるか(計測で切り替える。conductionGraph で作っていなければ true にできず false を返す)
         [[nodiscard]] bool UseConductionGraph(bool use);

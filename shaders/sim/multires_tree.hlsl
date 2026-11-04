@@ -242,9 +242,30 @@ MrRequestState ResolveCoarsen(MrRequest request, MrRequestState state, uint32_t 
     g_states[i] = state;
 }
 
-    // --- 2. 確定 ---
+// --- 2. 確定 ---
 
-    [numthreads(TREE_THREADS, 1, 1)] void TreeSettle(uint3 dispatchThreadId : SV_DispatchThreadID) {
+// 一様な子 childSlot を一様な親へ粗くしても、親の一様の値の層が同じか(層の無い世界はいつも true。CPU の
+// CoarsenKeepsUniformLayers: 今の値と結んだ層の並びを比べる。64bit の比べは 32bit の 2 つで。T-1240)
+bool CoarsenKeepsUniformLayers(uint32_t childSlot, uint32_t parentSlot) {
+    if (!UniformHasLayers(childSlot) && !UniformHasLayers(parentSlot))
+        return true;
+
+    const RxCell childValue = g_cells[childSlot];
+    const RxCell parentValue = g_cells[parentSlot];
+    bool same = childValue.speciesCount == parentValue.speciesCount;
+    FX_UNROLL
+    for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i) {
+        if (i < childValue.speciesCount && i < parentValue.speciesCount) {
+            const uint64_t a = BoundLayerOf(UniformLayerBase(childSlot), childValue.species[i], childValue);
+            const uint64_t b = BoundLayerOf(UniformLayerBase(parentSlot), parentValue.species[i], parentValue);
+            same = same && (uint32_t)a == (uint32_t)b && (uint32_t)(a >> 32) == (uint32_t)(b >> 32);
+        }
+    }
+
+    return same;
+}
+
+[numthreads(TREE_THREADS, 1, 1)] void TreeSettle(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const uint32_t i = dispatchThreadId.x;
     if (i >= RequestCount())
         return;
@@ -263,6 +284,10 @@ MrRequestState ResolveCoarsen(MrRequest request, MrRequestState state, uint32_t 
         state.fractionNeed = g_blocks[parent].fraction == MR_NO_FRACTION ? 1u : 0u;
         state.pageNeed = MrCoarsenPageNeed(g_blocks[state.target], g_cells[state.target], g_blocks[parent],
                                            g_cells[parent]);
+
+        // 一様の値の層が違っても頁に広げる(同じ値の子 8 つの層の和 ÷ 8 = 子の層。T-1240)
+        if (state.pageNeed == 0 && MrIsUniform(g_blocks[parent]) && !CoarsenKeepsUniformLayers(state.target, parent))
+            state.pageNeed = 1;
     } else {
         // 一様な親の鎖は全部一様(頁なし)、頁を持つ親の鎖は全部頁を持つ(T-0102)
         state.blockNeed = state.levels;
@@ -283,17 +308,27 @@ void StoreGraphHeader(uint32_t header, uint32_t entry, uint32_t recordCount, uin
     g_graphInput.Store4(header + 8, uint4((uint32_t)records, (uint32_t)(records >> 32), strideBytes, 0));
 }
 
-// 細かくする要求 i(待ちのもの)が要る層の頁の数(T-1240): 親(鎖の最初の段)の頁が層の頁を持てば鎖の段の全部(どの段も親から写す)。
-// 一様な親は頁も層の頁も持たない(一様の枠の層は T-1240 の続き)。層を持たない世界は 0
-uint32_t RefineLayerNeed(uint32_t i, MrRequestState state) {
-    if (LayerCapacity() == 0 || g_requests[i].op != MR_REQUEST_REFINE)
+// 要求 i(待ちのもの)が要る層の頁の数(T-1240。層を持たない世界は 0)。
+// 細かくする: 親(鎖の最初の段)の頁が層の頁を持てば鎖の段の全部(どの段も親から写す)。一様な親の子は一様(一様の枠の層を写す)。
+// 粗くする: 層の頁を持たない親の頁(広げるなら新しい頁)に層が要る時 1(子に層がある・広げる一様な親に一様の枠の層がある)
+uint32_t RequestLayerNeed(uint32_t i, MrRequestState state) {
+    if (LayerCapacity() == 0)
         return 0;
 
     const MrBlock target = g_blocks[state.target];
-    if (MrIsUniform(target) || LayerPageOf(target.page) == MR_LAYER_NO_PAGE)
+    if (g_requests[i].op == MR_REQUEST_REFINE)
+        return !MrIsUniform(target) && LayerPageOf(target.page) != MR_LAYER_NO_PAGE ? state.levels : 0u;
+
+    const MrBlock parent = g_blocks[target.parent];
+    const bool childLayered = MrIsUniform(target) ? UniformHasLayers(state.target)
+                                                  : LayerPageOf(target.page) != MR_LAYER_NO_PAGE;
+    if (!MrIsUniform(parent))
+        return childLayered && LayerPageOf(parent.page) == MR_LAYER_NO_PAGE ? 1u : 0u;
+
+    if (state.pageNeed == 0)
         return 0;
 
-    return state.levels;
+    return childLayered || UniformHasLayers(target.parent) ? 1u : 0u;
 }
 
 void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot, uint32_t levels) {
@@ -321,7 +356,7 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
 
     uint32_t layerNeed = 0;
     if (pending)
-        layerNeed = RefineLayerNeed(i, state);
+        layerNeed = RequestLayerNeed(i, state);
 
     if (i == 0) {
         gs_grantedBlocks = 0;
@@ -335,7 +370,7 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
     InclusiveScan(i, pending ? state.blockNeed : 0u, pending ? state.fractionNeed : 0u, pending ? state.pageNeed : 0u);
     LayerInclusiveScan(i, layerNeed);  // 層の頁(4 つ目の値。要求の順のプレフィックス和。T-1240)
 
-    // --- 許可: 累積和が空きの数以下(許可は一覧の前から続く)。層の頁が尽きたら細かくしない(GPU だけ。仮【エンジン】T-1240)---
+    // --- 許可: 累積和が空きの数以下(許可は一覧の前から続く)。層の頁が尽きたら細かくしない・粗くしない(GPU だけ。仮【エンジン】T-1240)---
     const uint32_t blockSum = gs_blockScan[i];
     const uint32_t fractionSum = gs_fractionScan[i];
     const uint32_t pageSum = gs_pageScan[i];
@@ -554,16 +589,69 @@ void ReserveExpandChunks(uint32_t i, uint32_t granted) {
 }
 #endif
 
+// --- 広げた頁の層(T-1240 の 3・4 段目。CPU は FillPageFromUniform)---
+groupshared uint32_t gs_expandLayerSlots[MR_MAX_REQUESTS];
+groupshared uint32_t gs_expandLayerPages[MR_MAX_REQUESTS];
+
+// 1 区切り(全部のスレッドが呼ぶ): スレッド i が頁を配った一様な枠 slot(無ければ MR_NO_BLOCK)が一様の枠の層を持てば、枠の順に
+// 層の頁を空きのスタックの上から取り、一様の枠の層を各セルの値と結んで写し、一様の枠の層を消す。taken は取ろうとした数(グループで一様)。
+// 尽きたら数えて層なし(頁はもう配ったので断れない。CPU とずれる。layerPages を広げる分まで持つ約束。仮【エンジン】)
+void ExpandLayers(uint32_t i, uint32_t slot, uint32_t freeLayers, inout uint32_t taken) {
+    const uint32_t pageCount = LayerPageCount();
+    const uint32_t capacity = LayerCapacity();
+    const bool layered = slot != MR_NO_BLOCK && UniformHasLayers(slot);
+    LayerInclusiveScan(i, layered ? 1u : 0u);
+
+    const uint32_t count = gs_layerScan[MR_MAX_REQUESTS - 1];
+    if (layered) {
+        const uint32_t position = taken + gs_layerScan[i] - 1;
+        uint32_t layerPage = MR_LAYER_NO_PAGE;
+        if (position < freeLayers) {
+            layerPage = g_layers[MrLayerFreeAddress(pageCount, capacity, freeLayers - 1 - position)];
+            AttachLayerPage(g_blocks[slot].page, layerPage);
+        } else {
+            CountLayerShortage(1);
+        }
+
+        gs_expandLayerSlots[gs_layerScan[i] - 1] = slot;
+        gs_expandLayerPages[gs_layerScan[i] - 1] = layerPage;
+    }
+
+    AllMemoryBarrierWithGroupSync();
+    for (uint32_t n = 0; n < count; ++n) {
+        const uint32_t expanded = gs_expandLayerSlots[n];
+        const uint32_t layerPage = gs_expandLayerPages[n];
+        const MrBlock block = g_blocks[expanded];
+        const RxCell value = g_cells[expanded];
+        for (uint32_t index = i; index < MR_BLOCK_CELLS && layerPage != MR_LAYER_NO_PAGE; index += MR_MAX_REQUESTS)
+            WriteBoundLayers(UniformLayerBase(expanded), MrUniformCell(block, value, index),
+                             MrLayerEntryAddress(pageCount, capacity, layerPage, index, 0));
+    }
+
+    AllMemoryBarrierWithGroupSync();  // 全部が一様の枠の層を読み終えてから消す
+    for (uint32_t n = 0; n < count && i < MR_LAYER_CELL_WORDS; ++n)
+        g_layers[UniformLayerBase(gs_expandLayerSlots[n]) + i] = 0;
+
+    taken += count;
+    GroupMemoryBarrierWithGroupSync();  // 次の区切りが累積和と一覧を書き直す前に、全部が読み終える
+}
+
 [numthreads(MR_MAX_REQUESTS, 1, 1)] void TreeExpand(uint32_t i : SV_GroupIndex) {
     const uint32_t freePages = g_counters[MR_COUNTER_FREE_PAGES];
     uint32_t wanted = 0;  // ここまでの区切りで頁に広げたいブロックの数(グループで一様)
+    uint32_t freeLayers = 0;
+    if (LayerCapacity() > 0)
+        freeLayers = g_layers[MrLayerFreeCountAddress(LayerPageCount(), LayerCapacity())];
+
+    uint32_t layersTaken = 0;  // 広げた頁の層の頁(取ろうとした数。T-1240)
     for (uint32_t first = 0; first < g_worldBlocks; first += MR_MAX_REQUESTS) {
         const uint32_t slot = first + i;
         const bool wants = slot < g_worldBlocks && g_blocks[slot].page == MR_PAGE_WANTED;
         InclusiveScan(i, wants ? 1u : 0u, 0u, 0u);
 
         const uint32_t position = wanted + gs_blockScan[i] - 1;
-        if (wants && position < freePages) {
+        const bool granted = wants && position < freePages;
+        if (granted) {
             g_blocks[slot].page = g_treeWords[FreePageAddress(freePages - 1 - position)];
             g_graphInput.Store(MR_GRAPH_INPUT_EXPAND_RECORDS + 4 * (position + 1), slot);
             SetSubstepMark(slot, CONDUCT_MARK_EXPANDED);
@@ -572,6 +660,9 @@ void ReserveExpandChunks(uint32_t i, uint32_t granted) {
             AppendSeedOnce(slot);
             SetSubstepMark(slot, CONDUCT_MARK_FROZEN);  // 伝導: この小刻みは刻まず、面の流れも 0(T-0107)
         }
+
+        if (LayerCapacity() > 0)
+            ExpandLayers(i, granted ? slot : MR_NO_BLOCK, freeLayers, layersTaken);
 
         wanted += gs_blockScan[MR_MAX_REQUESTS - 1];
         GroupMemoryBarrierWithGroupSync();  // 次の区切りが累積和を書き直す前に、全部が読み終える
@@ -584,6 +675,10 @@ void ReserveExpandChunks(uint32_t i, uint32_t granted) {
         return;
 
     const uint32_t granted = min(wanted, freePages);
+    if (LayerCapacity() > 0)
+        g_layers[MrLayerFreeCountAddress(LayerPageCount(), LayerCapacity())] = freeLayers -
+                                                                               min(layersTaken, freeLayers);
+
     g_counters[MR_COUNTER_FREE_PAGES] = freePages - granted;
     g_counters[MR_COUNTER_EXPANDED] += granted;
     g_counters[MR_COUNTER_PAGE_SHORTAGE] += wanted - granted;
@@ -904,6 +999,57 @@ bool FoldsNearly(uint32_t slot, MrBlock block, uint32_t index, MrFoldTolerance t
     return true;
 }
 
+// --- 層のある頁を畳む(T-1240 の 3 段目。CPU は multires_activity.cpp の FoldLayeredPage・FoldNear)---
+static const uint32_t FOLD_LAYERS_NONZERO = 1;  // 0 でない層がある(平均では畳まない。CPU の PageHasLayers)
+static const uint32_t FOLD_LAYERS_DIFFER = 2;   // 覆われていないセルの層が値のセルの層と違う(層ごとには畳めない)
+
+groupshared uint32_t gs_foldLayerFlags;
+
+// 層の頁 layerPage を持つ頁の層の印(全部のスレッドが呼ぶ。グループで一様な結果)。層は今のセルと結んで読む
+uint32_t FoldLayerFlags(MrBlock block, uint32_t layerPage, uint32_t index) {
+    if (index == 0)
+        gs_foldLayerFlags = 0;
+
+    GroupMemoryBarrierWithGroupSync();
+    const RxCell cell = g_cells[PageCellAddress(block.page, index)];
+    const uint32_t base = MrLayerEntryAddress(LayerPageCount(), LayerCapacity(), layerPage, index, 0);
+    uint32_t mine = 0;
+    FX_UNROLL
+    for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES; ++k) {
+        const uint32_t address = base + (k * MR_LAYER_ENTRY_WORDS);
+        const uint64_t layer = MrLayerAfterWrite(cell, g_layers[address],
+                                                 FX_U64(g_layers[address + 2], g_layers[address + 1]));
+        if (((uint32_t)layer | (uint32_t)(layer >> 32)) != 0)
+            mine |= FOLD_LAYERS_NONZERO;
+    }
+
+    // 値のセルと同じ層か(CPU は覆われていないセルの層の並び〔今のセルの成分の順〕を値のセルの層の並びと比べる)
+    const uint32_t valueCell = MrFoldValueCell(block);
+    if (!MrIsCoveredCell(block, index) && valueCell != MR_BLOCK_CELLS) {
+        const RxCell value = g_cells[PageCellAddress(block.page, valueCell)];
+        const uint32_t valueBase = MrLayerEntryAddress(LayerPageCount(), LayerCapacity(), layerPage, valueCell, 0);
+        if (cell.speciesCount != value.speciesCount)
+            mine |= FOLD_LAYERS_DIFFER;
+
+        FX_UNROLL
+        for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i) {
+            if (i < cell.speciesCount && i < value.speciesCount) {
+                const uint64_t a = BoundLayerOf(base, cell.species[i], cell);
+                const uint64_t b = BoundLayerOf(valueBase, value.species[i], value);
+                if ((uint32_t)a != (uint32_t)b || (uint32_t)(a >> 32) != (uint32_t)(b >> 32))
+                    mine |= FOLD_LAYERS_DIFFER;
+            }
+        }
+    }
+
+    if (mine != 0)
+        InterlockedOr(gs_foldLayerFlags, mine);
+
+    GroupMemoryBarrierWithGroupSync();
+
+    return gs_foldLayerFlags;
+}
+
 [numthreads(MR_BLOCK_CELLS, 1, 1)] void TreeFoldCheck(uint32_t index : SV_GroupIndex, uint3 group : SV_GroupID) {
     const uint32_t slot = group.x;
     if (slot >= g_worldBlocks)
@@ -930,18 +1076,37 @@ bool FoldsNearly(uint32_t slot, MrBlock block, uint32_t index, MrFoldTolerance t
     //     畳むと溢れを落とす。仮。溢れまで畳むのは T-0312)---
     bool foldable = MrWantsFoldCheck(block, mark);
 
-    // 層の頁を持つ頁はまだ畳まない(層まで一様な時に層ごと畳む CPU の FoldLayeredPage は T-1240 の 3 段目。仮)
+    // 層の頁を持つ頁は層まで一様な時だけ層ごと畳み(CPU の FoldLayeredPage)、0 でない層があれば平均では畳まない(FoldNear。T-1240)
+    uint32_t layerPage = MR_LAYER_NO_PAGE;
+    uint32_t layerFlags = 0;
     if (foldable)
-        foldable = LayerPageOf(block.page) == MR_LAYER_NO_PAGE;
+        layerPage = LayerPageOf(block.page);
+
+    if (foldable && layerPage != MR_LAYER_NO_PAGE)
+        layerFlags = FoldLayerFlags(block, layerPage, index);
 #ifdef MR_WIDE_CELLS
     if (foldable)
         foldable = WideTotal(block.page) == 0;
 #endif
     if (foldable) {
-        if (FoldsExactly(block, index))
+        const bool exact = FoldsExactly(block, index);
+        if (exact && (layerFlags & FOLD_LAYERS_DIFFER) == 0)
             flags |= MR_CLAIM_FOLD_COPY;
-        else if (!MrIsExactFold(tolerance) && MrFoldValueCell(block) != MR_BLOCK_CELLS)
+        else if (!MrIsExactFold(tolerance) && MrFoldValueCell(block) != MR_BLOCK_CELLS &&
+                 (layerFlags & FOLD_LAYERS_NONZERO) == 0)
             flags |= FoldsNearly(slot, block, index, tolerance) ? MR_CLAIM_FOLD_WRITTEN : 0u;
+    }
+
+    // --- 一様の枠の層: 層ごと畳むなら値のセルの層を今の値と結んで書く・平均で畳むなら 0(CPU の SetUniformLayers・
+    //     ClearUniformLayers)。層の頁は TreeFold が頁と一緒に返す(T-1240)---
+    const bool folds = (flags & (MR_CLAIM_FOLD_COPY | MR_CLAIM_FOLD_WRITTEN)) != 0;
+    if (index == 0 && folds && LayerCapacity() > 0) {
+        const uint32_t valueCell = MrFoldValueCell(block);
+        if ((flags & MR_CLAIM_FOLD_COPY) != 0 && layerPage != MR_LAYER_NO_PAGE && valueCell != MR_BLOCK_CELLS)
+            WriteBoundLayers(MrLayerEntryAddress(LayerPageCount(), LayerCapacity(), layerPage, valueCell, 0),
+                             FoldValue(block), UniformLayerBase(slot));
+        else
+            ClearLayerWords(UniformLayerBase(slot));
     }
 
     if (index == 0 && flags != 0)
@@ -987,6 +1152,15 @@ void FoldBlock(uint32_t slot, uint32_t claim, uint32_t position) {
         if (returns) {
             g_freeFractions[freeFractions + returned + gs_fractionScan[i] - 1] = g_blocks[slot].fraction;
             g_blocks[slot].fraction = MR_NO_FRACTION;
+        }
+
+        // 畳む頁の層の頁も返す(CPU の ReleaseFoldedPage の ClearPageLayers。層を持たない世界は何もしない。T-1240)
+        if (LayerCapacity() > 0) {
+            uint32_t foldedPage = MR_NO_PAGE;
+            if (folds)
+                foldedPage = g_blocks[slot].page;
+
+            ReleaseLayerPages(i, foldedPage);
         }
 
         if (folds)

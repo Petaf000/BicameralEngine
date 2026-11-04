@@ -55,13 +55,45 @@ namespace bicameral::sim {
             return layers;
         }
 
+        // 一様な枠 slot の層(CPU の組。物質で結ぶ生の値)を置き場の組に書く(前から詰める。組は 8 つまで = 溢れを使わない世界)
+        void WriteUniformLayers(const MultiresNest& nest, uint32_t slot, uint32_t capacity, std::span<uint32_t> words) {
+            const MultiresUniformLayers* stored = nest.cells.uniformLayers.Find(slot);
+            const auto pageCount = static_cast<uint32_t>(nest.cells.pages.size());
+            FX_ASSERT(stored != nullptr && stored->species.size() <= RX_MAX_CELL_SPECIES);
+            for (uint32_t k = 0; k < stored->species.size(); ++k) {
+                const uint32_t address = MrLayerUniformAddress(pageCount, capacity, slot, k);
+                words[address] = stored->species[k];
+                words[address + 1] = static_cast<uint32_t>(stored->layers[k]);
+                words[address + 2] = static_cast<uint32_t>(stored->layers[k] >> 32);
+            }
+        }
+
+        // 置き場の一様な枠 slot の層を、今の一様の値の成分の並びに結ぶ(0 でない組だけ。物質がセルに無ければ 0)
+        std::vector<uint64_t> ReadUniformLayers(const RxCell& value, std::span<const uint32_t> words,
+                                                uint32_t pageCount, uint32_t capacity, uint32_t slot) {
+            std::vector<uint64_t> layers(value.speciesCount, 0);
+            for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES; ++k) {
+                const uint32_t address = MrLayerUniformAddress(pageCount, capacity, slot, k);
+                const uint64_t layer = (uint64_t{words[address + 2]} << 32) | words[address + 1];
+                if (layer == 0)
+                    continue;
+
+                for (uint32_t i = 0; i < value.speciesCount; ++i) {
+                    if (value.species[i] == words[address])
+                        layers[i] = std::min(layer, value.amounts[i]);
+                }
+            }
+
+            return layers;
+        }
+
         bool AnyLayer(const MrCellLayers& layers) {
             return std::ranges::any_of(layers.amounts, [](uint64_t layer) { return layer != 0; });
         }
 
         // 空の置き場(頁の索引・持ち主は無し・空きのスタックは全部。上から 0, 1, … の順に取れる並び)
-        std::vector<uint32_t> EmptyLayerStore(uint32_t pageCount, uint32_t capacity) {
-            std::vector<uint32_t> words(MrLayerStoreWords(pageCount, capacity), 0);
+        std::vector<uint32_t> EmptyLayerStore(uint32_t pageCount, uint32_t capacity, uint32_t slotCount) {
+            std::vector<uint32_t> words(MrLayerStoreWords(pageCount, capacity, slotCount), 0);
             std::fill_n(words.begin(), pageCount + capacity, MR_LAYER_NO_PAGE);
             for (uint32_t position = 0; position < capacity; ++position)
                 words[MrLayerFreeAddress(pageCount, capacity, position)] = capacity - 1 - position;
@@ -75,12 +107,24 @@ namespace bicameral::sim {
 
     std::expected<GpuLayerImage, std::string> MakeGpuLayerImage(const MultiresNest& nest, uint32_t capacity) {
         const auto pageCount = static_cast<uint32_t>(nest.cells.pages.size());
+        const auto slotCount = static_cast<uint32_t>(nest.blocks.size());
         GpuLayerImage image;
-        image.words = EmptyLayerStore(pageCount, capacity);
+        image.words = EmptyLayerStore(pageCount, capacity, slotCount);
 
-        // --- まだの所: 一様の枠の層は写さない(T-1240 の続き)---
-        if (!nest.cells.uniformLayers.Empty())
-            return std::unexpected("一様の枠の層はまだ GPU に写せない(T-1240)");
+        // --- 一様の枠の層(T-1240 の 4 段目。枠ごとに決まった場所)---
+        for (uint32_t slot = 0; slot < slotCount && !nest.cells.uniformLayers.Empty(); ++slot) {
+            if (nest.cells.uniformLayers.Find(slot) == nullptr)
+                continue;
+
+            if (nest.wideCells)
+                return std::unexpected("溢れを使う世界の層はまだ GPU に写せない(T-1240)");
+
+            if (capacity == 0)
+                return std::unexpected("層の頁を持たない GPU には一様の枠の層を写せない(T-1240)");
+
+            WriteUniformLayers(nest, slot, capacity, image.words);
+            ++image.uniformSlots;
+        }
 
         for (uint32_t page = 0; page < pageCount; ++page) {
             if (!nest_detail::PageHasLayers(nest, page))
@@ -107,7 +151,20 @@ namespace bicameral::sim {
 
     void ApplyGpuLayerImage(MultiresNest& nest, std::span<const uint32_t> words, uint32_t capacity) {
         const auto pageCount = static_cast<uint32_t>(nest.cells.pages.size());
-        FX_ASSERT(words.size() == MrLayerStoreWords(pageCount, capacity));
+        const auto slotCount = static_cast<uint32_t>(nest.blocks.size());
+        FX_ASSERT(words.size() == MrLayerStoreWords(pageCount, capacity, slotCount));
+
+        // --- 一様の枠の層: 一様な枠だけ、今の一様の値と結んで置き換える(頁を持つ枠・空いた枠は層なし)---
+        for (uint32_t slot = 0; slot < slotCount && capacity > 0; ++slot) {
+            nest_detail::ClearUniformLayers(nest, slot);
+            if (!MrIsUniform(nest.blocks[slot]))
+                continue;
+
+            const RxCell value = nest.cells.uniform[slot];
+            const std::vector<uint64_t> layers = ReadUniformLayers(value, words, pageCount, capacity, slot);
+            if (std::ranges::any_of(layers, [](uint64_t layer) { return layer != 0; }))
+                nest_detail::SetUniformLayers(nest, slot, RxWidenCell(value), layers);
+        }
 
         // --- GPU の層が真実: CPU の頁の層を一度全部消してから、索引が層の頁を指す頁へ写す ---
         for (uint32_t page = 0; page < pageCount; ++page)

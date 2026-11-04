@@ -10,6 +10,9 @@
 //      毎刻み比べる(子の頁の層 = 親のセルの層・覆った親のセルの層は 0・影は引き戻しの後に層を合わせる)。粗くする前の刻みまで
 //      (粗くする・畳む・広げるの層は T-1240 の 3 段目)
 //   6. 層の頁が尽きる場面: 層の頁を小さくした世界では、層のある所を細かくする要求を断って数える(木と量は細かくしない世界と同じ)
+//   5 は粗くする刻み(COARSEN_TICK から 1 段ずつ)まで比べる(T-1240 の 3 段目: 子の層の和 ÷ 8・子の層の頁を返す)。
+//   7. 一様の枠の層(T-1240 の 3・4 段目): 層まで同じ静かな頁を畳む(層ごと一様の枠の層へ)→ 一様な根を本物の鎖で細かくする(子は親と同じ
+//      一様の枠の層)→ 粗くして戻す。燃える一様な根(一様の枠の層)を刻むと頁に広げる(一様の枠の層を頁へ)。毎刻み比べる
 // 時間(WARP では測らない): 層のある場面の 1 刻み(全部を刻む)を層の頁あり・なしで測り、層を合わせる段の分を見る(docs/perf.md)。
 // 場面は tests/multires_test_scene.h の根と鎖。引数は gpu_test_options.h。
 #include <algorithm>
@@ -45,7 +48,8 @@ namespace {
     constexpr uint64_t BATCH_TICKS = 12;                               // まとめて刻む場面の刻みの数
     constexpr uint32_t LAYER_PAGES = 4;                                // GPU の層の頁の数
     constexpr uint32_t CHAIN_LAYER_PAGES = 1 + test::MULTIRES_LEVELS;  // 細かくする場面: 根 + 鎖の 9 段(ちょうど足りる)
-    constexpr uint64_t CHAIN_TICKS = test::MULTIRES_REFINE_TICK + 8;   // 細かくする場面の刻みの数(粗くする前)
+    constexpr uint64_t CHAIN_TICKS = test::MULTIRES_END_TICK;          // 細かくする場面の刻みの数(粗くして戻すまで)
+    constexpr uint64_t EXPAND_TICKS = 24;                              // 一様な根を広げる場面の刻みの数
     constexpr uint32_t WARMUP_STEPS = 200;                             // 計測の前の刻み(GPU のクロックを上げる)
     constexpr uint32_t MEASURE_STEPS = 64;                             // 計測の刻み
 
@@ -86,6 +90,35 @@ namespace {
         }
 
         return nest;
+    }
+
+    // 全部のセルが同じ cell・同じ 3/4 の層の根(一様の枠の層。T-1240)。paged なら頁に広げる(頁の層 = 一様の枠の層)
+    sim::MultiresNest MakeUniformScene(const sim::BakedReactionTable& table, const RxCell& cell, bool paged) {
+        sim::MultiresNest nest = sim::MakeMultiresNest(test::MakeMultiresCapacity(
+            table, test::MULTIRES_WORLD_BLOCKS, test::MULTIRES_LEVELS, test::MULTIRES_FRACTION_CAPACITY));
+        const std::vector<RxCell> cells(MR_BLOCK_CELLS, cell);
+        const std::vector<sim::MrCellLayers> layers(MR_BLOCK_CELLS, ThreeQuarterLayers(cell));
+        const uint32_t root = sim::PlaceRootBlock(nest, 0, 0, 0, cells, layers);
+        if (paged) {
+            [[maybe_unused]] const bool expanded = sim::ExpandNestPage(nest, root);
+            FX_ASSERT(expanded);
+        }
+
+        return nest;
+    }
+
+    // 燃えない空気(300 K)・燃え始めの木箱(600 K。multires_test_scene の点のセル)
+    RxCell InertAir(const sim::BakedReactionTable& table) {
+        const std::vector<sim::SpeciesAmount> air = {{.species = table.SpeciesId("oxygen"), .amount = 983000},
+                                                     {.species = table.SpeciesId("nitrogen"), .amount = 3697000}};
+        return sim::MakeReactionCell(table, air, 300000);
+    }
+
+    RxCell BurningCrate(const sim::BakedReactionTable& table) {
+        const std::vector<sim::SpeciesAmount> crate = {{.species = table.SpeciesId("cellulose"), .amount = 38600000},
+                                                       {.species = table.SpeciesId("oxygen"), .amount = 983000},
+                                                       {.species = table.SpeciesId("nitrogen"), .amount = 3697000}};
+        return sim::MakeReactionCell(table, crate, 600000);
     }
 
     // 根の 0 でない層の和(試験が空でないかを見る)
@@ -180,7 +213,8 @@ namespace {
     uint32_t LayerStoreWords(const sim::BakedReactionTable& table) {
         const sim::MultiresNest nest = MakeScene(table, false);
 
-        return MrLayerStoreWords(static_cast<uint32_t>(nest.cells.pages.size()), LAYER_PAGES);
+        return MrLayerStoreWords(static_cast<uint32_t>(nest.cells.pages.size()), LAYER_PAGES,
+                                 static_cast<uint32_t>(nest.blocks.size()));
     }
 
     // 像の頁の索引・持ち主・空きのスタックが食い違わないか(層の頁は索引か空きのどちらか 1 つだけにある。T-1240)
@@ -230,6 +264,17 @@ namespace {
 
         if (sim::MakeGpuLayerImage(nest, 0))
             return std::unexpected("像: 層の頁が 0 なのに写せてしまう");
+
+        // --- 一様の枠の層(T-1240): 枠ごとの組に写して戻すと同じ ---
+        sim::MultiresNest uniform = MakeUniformScene(table, InertAir(table), false);
+        const uint64_t uniformBefore = sim::HashWholeNest(uniform);
+        auto uniformImage = sim::MakeGpuLayerImage(uniform, LAYER_PAGES);
+        if (!uniformImage || uniformImage->used != 0 || uniformImage->uniformSlots != 1)
+            return std::unexpected("像: 一様の枠の層 1 つを写せない");
+
+        sim::ApplyGpuLayerImage(uniform, uniformImage->words, LAYER_PAGES);
+        if (sim::HashWholeNest(uniform) != uniformBefore || uniform.cells.uniformLayers.Empty())
+            return std::unexpected("像: 一様の枠の層を写して戻すと状態の要約が変わる");
 
         return {};
     }
@@ -312,6 +357,7 @@ namespace {
 
         const std::string scene = scenario == test::MultiresScenario::Real ? "本物の鎖" : "影の鎖";
         uint32_t layered = 0;
+        uint32_t mostLayered = 0;
         for (uint64_t tick = 0; tick < CHAIN_TICKS; ++tick) {
             const auto record = [&](ID3D12GraphicsCommandList10* list) {
                 if (tick == 0 && !gpu->RecordUpload(list, cpu))
@@ -336,13 +382,101 @@ namespace {
                 return std::unexpected(std::format("{} 刻み {}: 足りるはずの層の頁が尽きた", scene, tick));
 
             layered = LayeredPages(*read);
+            mostLayered = std::max(mostLayered, layered);
         }
 
-        // 根と鎖の 9 段の頁が層を持つ(試験が空でない)
-        if (layered != CHAIN_LAYER_PAGES)
-            return std::unexpected(std::format("{}: 層のある頁が {}(期待 {})", scene, layered, CHAIN_LAYER_PAGES));
+        // 根と鎖の 9 段の頁が層を持つ(試験が空でない)。本物の鎖は粗くして根だけに戻る(子の層の頁を返した)
+        if (mostLayered != CHAIN_LAYER_PAGES)
+            return std::unexpected(std::format("{}: 層のある頁が {}(期待 {})", scene, mostLayered, CHAIN_LAYER_PAGES));
 
-        Log(Channel::Gpu, Level::Info, "{}: {} 刻み毎回一致(層のある頁 {})", scene, CHAIN_TICKS, layered);
+        if (scenario == test::MultiresScenario::Real && layered != 1)
+            return std::unexpected(std::format("{}: 粗くした後の層のある頁が {}(期待 1)", scene, layered));
+
+        Log(Channel::Gpu, Level::Info, "{}: {} 刻み毎回一致(層のある頁 最大 {}・終わり {})", scene, CHAIN_TICKS,
+            mostLayered, layered);
+
+        return {};
+    }
+
+    // --- 7. 一様の枠の層(T-1240 の 3・4 段目)---
+    // 畳む → 一様な根を細かくする → 粗くする: 層まで同じ静かな頁(燃えない空気)を毎刻み畳む段に通し(CPU は FoldQuietPages)、
+    // 本物の鎖の場面を進める。畳んだら根は一様の枠の層を持つ(層の頁を返す)。鎖は一様(子は親と同じ一様の枠の層)
+    std::expected<void, std::string> RunUniformFold(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                    gpu::DebugRing& ring, const sim::BakedReactionTable& table) {
+        sim::MultiresNest cpu = MakeUniformScene(table, InertAir(table), true);
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, GpuOptions(StepMode::Full, LAYER_PAGES));
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        bool folded = false;
+        uint32_t uniformLayered = 0;
+        for (uint64_t tick = 0; tick < test::MULTIRES_END_TICK; ++tick) {
+            const auto record = [&](ID3D12GraphicsCommandList10* list) {
+                if (tick == 0 && !gpu->RecordUpload(list, cpu))
+                    return false;
+
+                gpu->RecordFoldPages(list, ring.GpuAddress(), tick);
+                return RecordSceneTick(list, *gpu, ring.GpuAddress(), test::MultiresScenario::Real, tick);
+            };
+            auto read = Execute(queue, ring, *gpu, record);
+            if (!read)
+                return std::unexpected(std::format("畳む 刻み {}: {}", tick, read.error()));
+
+            sim::FoldQuietPages(cpu, tick);
+            test::StepMultiresScene(cpu, table, test::MultiresScenario::Real, tick);
+            if (auto compared = Compare(cpu, *read, std::format("畳む 刻み {}", tick)); !compared)
+                return compared;
+
+            folded = folded || MrIsUniform(read->blocks[test::MULTIRES_ROOT_SLOT]);
+            uint32_t count = 0;
+            for (uint32_t slot = 0; slot < read->blocks.size(); ++slot)
+                count += read->cells.uniformLayers.Find(slot) != nullptr ? 1 : 0;
+
+            uniformLayered = std::max(uniformLayered, count);
+        }
+
+        // 根を層ごと畳み、鎖の 9 段も一様の枠の層を持った(試験が空でない)
+        if (!folded || uniformLayered != 1 + test::MULTIRES_LEVELS)
+            return std::unexpected(
+                std::format("畳む: 根を層ごと畳めない・鎖に一様の枠の層が無い(一様の枠の層 最大 {})", uniformLayered));
+
+        Log(Channel::Gpu, Level::Info, "畳む・一様な鎖: {} 刻み毎回一致(一様の枠の層 最大 {})", test::MULTIRES_END_TICK,
+            uniformLayered);
+
+        return {};
+    }
+
+    // 広げる: 燃える一様な根(一様の枠の層)を刻むと頁に広げる(層の頁を取り、一様の枠の層を頁へ写す)
+    std::expected<void, std::string> RunUniformExpand(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                      gpu::DebugRing& ring, const sim::BakedReactionTable& table) {
+        sim::MultiresNest cpu = MakeUniformScene(table, BurningCrate(table), false);
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, GpuOptions(StepMode::Full, LAYER_PAGES));
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        for (uint64_t tick = 0; tick < EXPAND_TICKS; ++tick) {
+            const auto record = [&](ID3D12GraphicsCommandList10* list) {
+                if (tick == 0 && !gpu->RecordUpload(list, cpu))
+                    return false;
+
+                return RecordSceneTick(list, *gpu, ring.GpuAddress(), test::MultiresScenario::None, tick);
+            };
+            auto read = Execute(queue, ring, *gpu, record);
+            if (!read)
+                return std::unexpected(std::format("広げる 刻み {}: {}", tick, read.error()));
+
+            test::StepMultiresScene(cpu, table, test::MultiresScenario::None, tick);
+            if (auto compared = Compare(cpu, *read, std::format("広げる 刻み {}", tick)); !compared)
+                return compared;
+
+            if (gpu->ReadLayerShortage() != 0u)
+                return std::unexpected(std::format("広げる 刻み {}: 足りるはずの層の頁が尽きた", tick));
+        }
+
+        if (MrIsUniform(cpu.blocks[test::MULTIRES_ROOT_SLOT]) || RootLayerSum(cpu) == 0)
+            return std::unexpected("広げる: 根が頁に広がらない・層が無い(試験が空)");
+
+        Log(Channel::Gpu, Level::Info, "広げる: {} 刻み毎回一致(根の層の和 {})", EXPAND_TICKS, RootLayerSum(cpu));
 
         return {};
     }
@@ -471,6 +605,12 @@ namespace {
 
         if (auto shortage = RunShortage(device, queue, ring, table); !shortage)
             return shortage;
+
+        if (auto fold = RunUniformFold(device, queue, ring, table); !fold)
+            return fold;
+
+        if (auto expand = RunUniformExpand(device, queue, ring, table); !expand)
+            return expand;
 
         return RunBatch(device, queue, ring, table);
     }

@@ -79,6 +79,64 @@ void CopyLayerCell(uint32_t fromLayerPage, uint32_t fromIndex, uint32_t toLayerP
         g_layers[to + word] = g_layers[from + word];
 }
 
+// --- 物質で結んで読む・一様の枠の層(T-1240 の 3・4 段目)---
+
+// 組の並びの始まり base(層の頁の 1 セルか一様の枠 1 つ)の、物質 species の層(0 でない組。無ければ 0)を、セル cell と結んで
+// min(層, 量)(物質がセルに無ければ 0。CPU の RebindLayers・LoadWidePageCellLayers と同じ)
+uint64_t BoundLayerOf(uint32_t base, uint32_t species, RxCell cell) {
+    uint64_t raw = 0;
+    FX_UNROLL
+    for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES; ++k) {
+        const uint32_t address = base + (k * MR_LAYER_ENTRY_WORDS);
+        const bool nonzero = (g_layers[address + 1] | g_layers[address + 2]) != 0;
+        if (g_layers[address] == species && nonzero)
+            raw = FX_U64(g_layers[address + 2], g_layers[address + 1]);
+    }
+
+    return MrLayerAfterWrite(cell, species, raw);
+}
+
+// 組の並び from を cell と結んで(物質ごとに min(層, 量))to へ書く(from と to は同じでもよい)
+void WriteBoundLayers(uint32_t from, RxCell cell, uint32_t to) {
+    FX_UNROLL
+    for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES; ++k) {
+        const uint32_t source = from + (k * MR_LAYER_ENTRY_WORDS);
+        const uint32_t species = g_layers[source];
+        const uint64_t bound = MrLayerAfterWrite(cell, species, FX_U64(g_layers[source + 2], g_layers[source + 1]));
+        const uint32_t target = to + (k * MR_LAYER_ENTRY_WORDS);
+        g_layers[target] = species;
+        g_layers[target + 1] = (uint32_t)bound;
+        g_layers[target + 2] = (uint32_t)(bound >> 32);
+    }
+}
+
+// 組の並び base を 0 に(1 スレッドで)
+void ClearLayerWords(uint32_t base) {
+    for (uint32_t word = 0; word < MR_LAYER_CELL_WORDS; ++word)
+        g_layers[base + word] = 0;
+}
+
+// 一様な枠 slot の層の組の始まり
+uint32_t UniformLayerBase(uint32_t slot) {
+    return MrLayerUniformAddress(LayerPageCount(), LayerCapacity(), slot, 0);
+}
+
+// 一様な枠 slot が 0 でない層を持つか(CPU の uniformLayers.Find != nullptr。層を持たない世界は false)
+bool UniformHasLayers(uint32_t slot) {
+    if (LayerCapacity() == 0)
+        return false;
+
+    const uint32_t base = UniformLayerBase(slot);
+    bool any = false;
+    FX_UNROLL
+    for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES; ++k) {
+        const uint32_t address = base + (k * MR_LAYER_ENTRY_WORDS);
+        any = any || (g_layers[address + 1] | g_layers[address + 2]) != 0;
+    }
+
+    return any;
+}
+
 // 1 グループ(MR_MAX_REQUESTS スレッド。全部のスレッドが呼ぶ)で、スレッド i の頁 page(返さないなら MR_NO_PAGE)の層の頁を
 // スレッドの番号の順に空きのスタックへ積む(CPU は頁を返す順に ClearPageLayers。層の頁の番号は CPU に無いので順は結果に効かないが、
 // 決まった順にする)。頁の索引・持ち主を外し、返した層の頁の中身を 0 にする

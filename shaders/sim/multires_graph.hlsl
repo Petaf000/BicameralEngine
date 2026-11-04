@@ -160,7 +160,8 @@ uint32_t ChildLayerPage(MrRefineRecord record, MrBlock parent, uint32_t childPag
     }
 
     const uint32_t existing = LayerPageOf(childPage);
-    const bool parentLayers = !MrIsUniform(parent) && LayerPageOf(parent.page) != MR_LAYER_NO_PAGE;
+    const bool parentLayers = MrIsUniform(parent) ? UniformHasLayers(record.parentSlot)
+                                                  : LayerPageOf(parent.page) != MR_LAYER_NO_PAGE;
     if (existing != MR_LAYER_NO_PAGE || !parentLayers)
         return existing;
 
@@ -225,13 +226,21 @@ void RefineLevel(MrRefineRecord record, uint32_t t) {
     if (childFraction != MR_NO_FRACTION)
         g_fractions[FractionAddress(childFraction, t)] = LoadFraction(parent.fraction, parentCell);
 
-    // --- 層: 子のセルは親のセルと同じ層(CPU の CopyCellToPage。親に層が無ければ子の層の頁の古い層を消す。T-1240)---
+    // --- 層: 子のセルは親のセルと同じ層(CPU の CopyCellToPage。親に層が無ければ子の層の頁の古い層を消す。T-1240)。
+    //     一様な親の影の子は一様の枠の層を今の値と結んで写す。一様な子は一様の枠の層を親から写す(CPU の uniformLayers.Set)---
     const uint32_t childLayerPage = gs_childLayerPage;
     const uint32_t parentLayerPage = uniformChild ? MR_LAYER_NO_PAGE : LayerPageOf(parent.page);
+    const bool uniformParentLayers = MrIsUniform(parent) && UniformHasLayers(record.parentSlot);
     if (childLayerPage != MR_LAYER_NO_PAGE && parentLayerPage != MR_LAYER_NO_PAGE)
         CopyLayerCell(parentLayerPage, parentCell, childLayerPage, t);
+    else if (childLayerPage != MR_LAYER_NO_PAGE && uniformParentLayers)
+        WriteBoundLayers(UniformLayerBase(record.parentSlot), LoadBlockCell(parent, record.parentSlot, parentCell),
+                         MrLayerEntryAddress(LayerPageCount(), LayerCapacity(), childLayerPage, t, 0));
     else if (childLayerPage != MR_LAYER_NO_PAGE)
         ClearLayerCell(childLayerPage, t);
+
+    if (uniformChild && LayerCapacity() > 0 && t < MR_LAYER_CELL_WORDS)
+        g_layers[UniformLayerBase(childSlot) + t] = g_layers[UniformLayerBase(record.parentSlot) + t];
 
 #ifdef MR_REFINE_PLACE
     // --- 寄せるセルの中身は置かれ方で(T-1188・T-1176。CPU の PlaceRefineOctantCells。端数は上で写した SAME のまま。
@@ -703,6 +712,100 @@ void WriteCoarsenTails(MrBlock child, uint32_t childSlot, uint32_t ownPage, uint
 }
 #endif
 
+// --- 粗くする時の層(T-1240 の 3 段目。CPU は multires_tree.cpp の CoarsenLayers・ApplyCoarsenOf)---
+
+groupshared uint32_t gs_parentLayerPage;
+
+// 粗くする要求の親の頁の層の頁(スレッド 0 だけ)。頁を持つ親が前から持てばそれ、無ければ TreeAllocate が割り当てた層の頁を
+// 親の頁(広げるなら新しい頁)に結ぶ。一様のままの親・層の要らない要求は無し
+uint32_t CoarsenParentLayerPage(uint32_t request, MrRequestState state, MrBlock parent) {
+    const uint32_t pageCount = LayerPageCount();
+    const uint32_t capacity = LayerCapacity();
+    if (capacity == 0)
+        return MR_LAYER_NO_PAGE;
+
+    const bool expand = state.pageNeed != 0;
+    const uint32_t page = expand ? PoppedPage(state, 0) : parent.page;
+    if (page == MR_NO_PAGE)
+        return MR_LAYER_NO_PAGE;
+
+    if (!expand && LayerPageOf(page) != MR_LAYER_NO_PAGE)
+        return LayerPageOf(page);
+
+    const uint32_t base = g_layers[MrLayerRequestAddress(pageCount, capacity, request)];
+    if (base == MR_LAYER_NO_PAGE)
+        return MR_LAYER_NO_PAGE;
+
+    const uint32_t layerPage = g_layers[MrLayerFreeAddress(pageCount, capacity, base - 1)];
+    AttachLayerPage(page, layerPage);
+
+    return layerPage;
+}
+
+#ifndef MR_WIDE_CELLS
+// 子 2³(親の八分の一のセル t の子)の層を物質で結んで和 ÷ 8 の切り捨て、粗いセル coarse の量で抑えて target へ書く
+// (組 c = coarse の成分 c。CPU の CoarsenLayers: 子の層 ≤ 子の量なので 層の和 ÷ 8 ≤ 粗いセルの量。切り捨ての余りは残りへ)。
+// 和は決まった数の回しで成分の位置を選ぶ(動的な添字で構造体の配列を読まない。T-0397)
+void WriteCoarsenedLayers(MrBlock child, uint32_t childSlot, uint32_t t, RxCell coarse, uint32_t target) {
+    uint64_t sums[RX_MAX_CELL_SPECIES];
+    FX_UNROLL
+    for (uint32_t c = 0; c < RX_MAX_CELL_SPECIES; ++c)
+        sums[c] = 0;
+
+    const uint32_t childLayerPage = MrIsUniform(child) ? MR_LAYER_NO_PAGE : LayerPageOf(child.page);
+    for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
+        const uint32_t index = MrChildCell(t, j);
+        const RxCell cell = LoadBlockCell(child, childSlot, index);
+        uint32_t base = UniformLayerBase(childSlot);
+        if (childLayerPage != MR_LAYER_NO_PAGE)
+            base = MrLayerEntryAddress(LayerPageCount(), LayerCapacity(), childLayerPage, index, 0);
+
+        FX_UNROLL
+        for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES; ++k) {
+            const uint32_t address = base + (k * MR_LAYER_ENTRY_WORDS);
+            const uint32_t species = g_layers[address];
+            const uint64_t layer = MrLayerAfterWrite(cell, species,
+                                                     FX_U64(g_layers[address + 2], g_layers[address + 1]));
+            FX_UNROLL
+            for (uint32_t c = 0; c < RX_MAX_CELL_SPECIES; ++c) {
+                if (c < coarse.speciesCount && coarse.species[c] == species)
+                    sums[c] += layer;
+            }
+        }
+    }
+
+    FX_UNROLL
+    for (uint32_t c = 0; c < RX_MAX_CELL_SPECIES; ++c) {
+        const bool present = c < coarse.speciesCount;
+        const uint64_t amount = present ? coarse.amounts[c] : 0;
+        const uint64_t mean = sums[c] / MR_CHILDREN_PER_CELL;
+        const uint64_t layer = MrLayerLess(amount, mean) ? amount : mean;
+        const uint32_t address = target + (c * MR_LAYER_ENTRY_WORDS);
+        g_layers[address] = present ? coarse.species[c] : 0u;
+        g_layers[address + 1] = (uint32_t)layer;
+        g_layers[address + 2] = (uint32_t)(layer >> 32);
+    }
+}
+
+// 粗くした親のセル index(八分の一)の層: 子に層があれば子の層の和 ÷ 8、無ければ前の層(広げた親は一様の枠の層)を今の値と結ぶ
+// (CPU の StoreWidePageCellWithLayers・StoreCellAt の付け替え)
+void WriteCoarsenOctantLayers(MrBlock child, uint32_t childSlot, MrBlock parent, uint32_t parentSlot,
+                              uint32_t parentLayerPage, bool expandParent, uint32_t t, uint32_t index, RxCell coarse) {
+    const uint32_t target = MrLayerEntryAddress(LayerPageCount(), LayerCapacity(), parentLayerPage, index, 0);
+    const bool childLayered = MrIsUniform(child) ? UniformHasLayers(childSlot)
+                                                 : LayerPageOf(child.page) != MR_LAYER_NO_PAGE;
+    if (childLayered) {
+        WriteCoarsenedLayers(child, childSlot, t, coarse, target);
+        return;
+    }
+
+    if (expandParent)
+        WriteBoundLayers(UniformLayerBase(parentSlot), MrUniformCell(parent, g_cells[parentSlot], index), target);
+
+    WriteBoundLayers(target, coarse, target);
+}
+#endif
+
 // 許可した粗くする要求の 1 段(1 スレッド = 親の八分の一のセル t。multires_tree.cpp の ApplyCoarsen)
 void CoarsenRequest(uint32_t request, uint32_t t) {
     const MrRequestState state = g_states[request];
@@ -745,10 +848,12 @@ void CoarsenRequest(uint32_t request, uint32_t t) {
     if (t == 0) {
         gs_octantFraction = 0;
         gs_restFraction = 0;
+        gs_parentLayerPage = CoarsenParentLayerPage(request, state, parent);  // 層(T-1240)
     }
 
     GroupMemoryBarrierWithGroupSync();
     const bool expandParent = state.pageNeed != 0;
+    const uint32_t parentLayerPage = gs_parentLayerPage;
     const uint32_t parentPage = expandParent ? PoppedPage(state, 0) : parent.page;
     const uint32_t parentFraction = parent.fraction != MR_NO_FRACTION ? parent.fraction : PoppedFraction(state, 0);
     for (uint32_t k = 0; k < MR_BLOCK_CELLS / MR_OCTANT_CELLS; ++k) {
@@ -758,6 +863,11 @@ void CoarsenRequest(uint32_t request, uint32_t t) {
 
         if (expandParent)
             g_cells[PageCellAddress(parentPage, index)] = MrUniformCell(parent, g_cells[parentSlot], index);
+
+        // 広げた親の層は一様の枠の層(CPU の FillPageFromUniform。T-1240)
+        if (expandParent && parentLayerPage != MR_LAYER_NO_PAGE)
+            WriteBoundLayers(UniformLayerBase(parentSlot), MrUniformCell(parent, g_cells[parentSlot], index),
+                             MrLayerEntryAddress(LayerPageCount(), LayerCapacity(), parentLayerPage, index, 0));
 
         if (parent.fraction == MR_NO_FRACTION)
             g_fractions[FractionAddress(parentFraction, index)] = MrMakeEmptyFraction();
@@ -773,6 +883,22 @@ void CoarsenRequest(uint32_t request, uint32_t t) {
         g_cells[PageCellAddress(parentPage, index)] = result.cell;
 
     g_fractions[FractionAddress(parentFraction, index)] = result.fraction;
+
+#ifndef MR_WIDE_CELLS
+    if (parentLayerPage != MR_LAYER_NO_PAGE)
+        WriteCoarsenOctantLayers(child, childSlot, parent, parentSlot, parentLayerPage, expandParent, t, index,
+                                 result.cell);
+
+    // 返す子の枠・広げた親の一様の枠の層を消す(全部のスレッドが読み終えてから。CPU の ClearUniformLayers。T-1240)
+    if (LayerCapacity() > 0) {
+        DeviceMemoryBarrierWithGroupSync();
+        if (t < MR_LAYER_CELL_WORDS) {
+            g_layers[UniformLayerBase(childSlot) + t] = 0;
+            if (expandParent)
+                g_layers[UniformLayerBase(parentSlot) + t] = 0;
+        }
+    }
+#endif
 
     GroupMemoryBarrierWithGroupSync();
 
