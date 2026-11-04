@@ -90,22 +90,36 @@ uint32_t EmitDelta(bool before, bool after) {
     return after ? 1u : 0xFFFFFFFFu;
 }
 
-// --- 刻みの初めの写し(1 スレッド = 1 セル。単位の引数が 0 なら、前の刻みの写しの後で変わったブロックのセルだけ)---
-// 1 グループ = 1 ブロック(4³ = 64 セル)に並べる(セルの番号の順に並べると、波 1 つが 16 ブロックにまたがり、写すブロックが少なくても
-// ほとんどの波が流れた。2026-11-05 の測りで Grid が減らなかった)。セルごとの書き先は決まっているので並べ方で結果は変わらない
-[numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void RadiationGrid(uint3 dispatchThreadId : SV_DispatchThreadID) {
-    const uint32_t block = dispatchThreadId.x / RADIATION_BLOCK_CELLS;
-    if (block >= PROBE_BLOCK_COUNT)
-        return;
+// 写しの段のスレッドのセル(全部写す刻みはセルの番号の順。変わったブロックだけの刻みは 1 グループ = 1 ブロック〔4³ = 64 セル〕に並べ、
+// 変わっていないブロックのグループは丸ごと返る)。セルの番号の順だと波 1 つが 16 ブロックにまたがり、写すブロックが少なくても
+// ほとんどの波が流れた。ブロックに並べると全部写す刻みの読み書きが散らばって重くなった(2026-11-05 の測り)ので、刻みごとに選ぶ。
+// セルごとの書き先は決まっているので、並べ方で結果は変わらない。PROBE_CELL_COUNT = 写さない
+uint32_t GridCellOf(uint32_t thread, bool copyAll) {
+    if (copyAll)
+        return thread < PROBE_CELL_COUNT ? thread : PROBE_CELL_COUNT;
 
-    if (argument == 0u && !BlockChangedSincePreviousGrid(block))
-        return;
+    const uint32_t block = thread / RADIATION_BLOCK_CELLS;
+    if (block >= PROBE_BLOCK_COUNT || !BlockChangedSincePreviousGrid(block))
+        return PROBE_CELL_COUNT;
 
-    const uint32_t local = dispatchThreadId.x % RADIATION_BLOCK_CELLS;
+    const uint32_t local = thread % RADIATION_BLOCK_CELLS;
     const uint3 corner = BlockCoordinates(block) * PROBE_BLOCK_SIZE;
-    const uint32_t cell = ProbeCellIndex(corner.x + (local % PROBE_BLOCK_SIZE),
-                                         corner.y + ((local / PROBE_BLOCK_SIZE) % PROBE_BLOCK_SIZE),
-                                         corner.z + (local / (PROBE_BLOCK_SIZE * PROBE_BLOCK_SIZE)));
+
+    return ProbeCellIndex(corner.x + (local % PROBE_BLOCK_SIZE),
+                          corner.y + ((local / PROBE_BLOCK_SIZE) % PROBE_BLOCK_SIZE),
+                          corner.z + (local / (PROBE_BLOCK_SIZE * PROBE_BLOCK_SIZE)));
+}
+
+bool SameLight(RcCellLight left, RcCellLight right) {
+    return left.depthShortQ32 == right.depthShortQ32 && left.depthLongQ32 == right.depthLongQ32 &&
+           left.reflectanceShortQ16 == right.reflectanceShortQ16 && left.reflectanceLongQ16 == right.reflectanceLongQ16;
+}
+
+// --- 刻みの初めの写し(1 スレッド = 1 セル。単位の引数が 0 なら、前の刻みの写しの後で変わったブロックのセルだけ)---
+[numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void RadiationGrid(uint3 dispatchThreadId : SV_DispatchThreadID) {
+    const uint32_t cell = GridCellOf(dispatchThreadId.x, argument != 0u);
+    if (cell >= PROBE_CELL_COUNT)
+        return;
 
     const RcGpuParams params = LoadRcParams();
     const uint32_t index = GenerationBase(CurrentTick()) + cell;
@@ -123,26 +137,39 @@ uint32_t EmitDelta(bool before, bool after) {
     const uint32_t temperatureMk = thermal[index].temperature;  // 負は 0(熱のキャッシュの約束)
     const uint32_t lightAt = params.workLights + (cell * RC_CELL_LIGHT_BYTES);
     const uint32_t temperatureAt = params.workTemperatures + (cell * 4);
-    // 参照の温度の形の放つセルの数は、前に写した値(作業の今の中身)から写す値への増減で直す
+
+    // 1 側の形(0 K の空。参照の語が 0)は書くだけ(放つセルの数を持たないので前の値は読まない)
+    if (params.referenceWord == 0u) {
+        rcWork.Store<RcCellLight>(lightAt, light);
+        rcWork.Store(temperatureAt, temperatureMk);
+        return;
+    }
+
+    // 参照の温度の形の放つセルの数は、前に写した値(作業の今の中身)から写す値への増減で直す。値が同じセル(全部写す刻みのほとんど)は
+    // 増減 0 なので、放つかを求めず、書きもしない(作業の中身はもうその値)
     const RcCellLight previousLight = rcWork.Load<RcCellLight>(lightAt);
     const uint32_t previousMk = rcWork.Load(temperatureAt);
-    rcWork.Store<RcCellLight>(lightAt, light);
-    rcWork.Store(temperatureAt, temperatureMk);
+    const bool same = previousMk == temperatureMk && SameLight(previousLight, light);
+    uint32_t positiveStep = 0;
+    uint32_t negativeStep = 0;
+    if (!same) {
+        // 負の側の作業へも(並びは同じ)
+        rcWork.Store<RcCellLight>(lightAt, light);
+        rcWork.Store(temperatureAt, temperatureMk);
+        rcSecond.Store<RcCellLight>(lightAt, light);
+        rcSecond.Store(temperatureAt, temperatureMk);
 
-    // 参照の温度の形(正の側の参照の語が 0 でない)は負の側の作業へも(並びは同じ)
-    if (params.referenceWord == 0u)
-        return;
-
-    rcSecond.Store<RcCellLight>(lightAt, light);
-    rcSecond.Store(temperatureAt, temperatureMk);
+        const RadiationEmitSides before = EmitSidesOf(previousMk, params.referenceWord, previousLight);
+        const RadiationEmitSides after = EmitSidesOf(temperatureMk, params.referenceWord, light);
+        positiveStep = EmitDelta(before.positive, after.positive);
+        negativeStep = EmitDelta(before.negative, after.negative);
+    }
 
     // 側ごとの放つセルの数(作業の RC_GPU_WORK_EMITTERS。T-1229・T-1235・T-1228)。数はいつも「作業の今の中身で放つセルの数」で、
-    // 作った時の作業は温度 0(放たない)・数 0。写さないブロックの値は変わらないので、写したセルの増減だけ足せば合う(波に 1 回)。
+    // 作った時の作業は温度 0(放たない)・数 0。写さないセルの値は変わらないので、写したセルの増減だけ足せば合う(波に 1 回)。
     // その側の RcPlanTick は 0 でないかだけ読む
-    const RadiationEmitSides before = EmitSidesOf(previousMk, params.referenceWord, previousLight);
-    const RadiationEmitSides after = EmitSidesOf(temperatureMk, params.referenceWord, light);
-    const uint32_t positiveDelta = WaveActiveSum(EmitDelta(before.positive, after.positive));
-    const uint32_t negativeDelta = WaveActiveSum(EmitDelta(before.negative, after.negative));
+    const uint32_t positiveDelta = WaveActiveSum(positiveStep);
+    const uint32_t negativeDelta = WaveActiveSum(negativeStep);
     uint32_t original;
     if (WaveIsFirstLane() && positiveDelta != 0u)
         rcWork.InterlockedAdd(RC_GPU_WORK_EMITTERS, positiveDelta, original);
