@@ -701,7 +701,13 @@ namespace bicameral::sim {
     }
 
     uint64_t GpuMultires::LayerBytes() const {
-        return uint64_t{MrLayerStoreWords(static_cast<uint32_t>(PageCount()), m_layerCapacity)} * sizeof(uint32_t);
+        return uint64_t{LayerStoreWords()} * sizeof(uint32_t);
+    }
+
+    uint32_t GpuMultires::LayerStoreWords() const {
+        const uint32_t slotCount = m_capacity.worldBlocks + m_capacity.observerBlocks;
+
+        return MrLayerStoreWords(static_cast<uint32_t>(PageCount()), m_layerCapacity, slotCount);
     }
 
     uint64_t GpuMultires::PageCount() const {
@@ -1001,13 +1007,20 @@ namespace bicameral::sim {
         // --- 層の置き場の像(層の頁を持つ世界だけ。写せなければ何も写さない。T-1221)---
         std::vector<uint32_t> layerWords;
         if (m_layerCapacity > 0) {
+            // 粒の印(EnableCellLayers)は GPU が知らない(畳む段が舞う粒を見ない。写すと CPU とずれるので断る。T-1240)
+            if (nest.cellLayers.enabled) {
+                Log(Channel::Gpu, Level::Error,
+                    "層を GPU に写せない: 粒の印を持つ世界(EnableCellLayers)はまだ(T-1240)");
+                return false;
+            }
+
             auto image = MakeGpuLayerImage(nest, m_layerCapacity);
             if (!image) {
                 Log(Channel::Gpu, Level::Error, "層を GPU に写せない: {}", image.error());
                 return false;
             }
 
-            m_layerUsed = image->used;
+            m_layerUsed = image->used + image->uniformSlots;  // 一様の枠の層も広げると層の頁になる(T-1240)
             layerWords = std::move(image->words);
         }
 
@@ -1473,7 +1486,7 @@ namespace bicameral::sim {
         RecordWideRetry(list, debugRing);
 
         // --- 一様で反応が進むブロックを頁に広げて刻む(数は GPU が決めるので、世界の枠の数だけグループを投げる)---
-        RecordTreePass(list, debugRing, PassExpand, 1);
+        RecordExpandPass(list, debugRing);
         list->SetPipelineState(m_wideCells ? m_stepWideExpandedWaitPipeline.Get() : m_stepExpandedWaitPipeline.Get());
         list->Dispatch(std::max(1u, m_capacity.worldBlocks), 1, 1);
         UavBarrier(list);
@@ -1600,7 +1613,7 @@ namespace bicameral::sim {
     void GpuMultires::RecordConductSubstep(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                                            const MultiresStepOptions& options) {
         RecordConductPass(list, debugRing, ConductPassMark, std::max(1u, m_blockCapacity));
-        RecordTreePass(list, debugRing, PassExpand, 1);
+        RecordExpandPass(list, debugRing);
         RecordTreePass(list, debugRing, PassFractions, 1);
         RecordConductStage(list, debugRing, ConductPassPrepare);
         if ((m_constants.stepFlags & STEP_FLAG_IMPLICIT) != 0 && m_implicit != nullptr)
@@ -1686,12 +1699,16 @@ namespace bicameral::sim {
     }
 
     void GpuMultires::RecordExpandPass(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
+        const ExternalBinding saved = BindLayers();  // 広げた頁へ一様の枠の層を写す(T-1240)
         RecordTreePass(list, debugRing, PassExpand, 1);
+        RestoreExternal(saved);
+        if (m_layerCapacity > 0)
+            BindRoot(list, debugRing);  // 続く段(パイプラインだけ替えて投げる所がある)へ元の結び先を
     }
 
     void GpuMultires::RecordExpandPages(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
         // --- 頁を配る(枠の順)→ 埋めて刻む(Work Graph の GPU の入力)---
-        RecordTreePass(list, debugRing, PassExpand, 1);
+        RecordExpandPass(list, debugRing);
         ID3D12Resource* graphInput = m_buffers[BufferGraphInput].Get();
         const D3D12_RESOURCE_BARRIER toInput = gpu::Transition(graphInput, D3D12_RESOURCE_STATE_UNORDERED_ACCESS,
                                                                D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE);
@@ -1827,7 +1844,7 @@ namespace bicameral::sim {
 
         // --- 層(層の頁を持つ世界は GPU の層が真実。T-1221)---
         if (m_layerCapacity > 0) {
-            std::vector<uint32_t> layerWords(MrLayerStoreWords(static_cast<uint32_t>(PageCount()), m_layerCapacity));
+            std::vector<uint32_t> layerWords(LayerStoreWords());
             if (!gpu::ReadBuffer(m_layerReadback.Get(), std::as_writable_bytes(std::span(layerWords))))
                 return false;
 
@@ -1870,7 +1887,7 @@ namespace bicameral::sim {
         if (m_layerCapacity == 0)
             return 0u;
 
-        std::vector<uint32_t> layerWords(MrLayerStoreWords(static_cast<uint32_t>(PageCount()), m_layerCapacity));
+        std::vector<uint32_t> layerWords(LayerStoreWords());
         if (!gpu::ReadBuffer(m_layerReadback.Get(), std::as_writable_bytes(std::span(layerWords))))
             return std::nullopt;
 
