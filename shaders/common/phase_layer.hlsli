@@ -10,6 +10,7 @@
 // データの流れ:
 //   セル(RxCell)+ Ec → 層の見立て(PlLayerOf: 体積・高さ)→ 2 つの部分の熱(PlPartsOf)
 //   → 面ごとの側(PlFaceSide: 下の面 = 層・上の面 = 気体・横の面 = 高さで分けた 2 つ)→ heat_conduction.hlsli の HcFaceFlow
+//   (世界の面: 部分つきの片側 PlPartSideOf → 重なりで組む面の式 PlPartFaceFlow。混ざらない面は今の HcFaceFlow の 1 回。ADR-0512 の 2)
 //   → 層の上の面の対の面(PlInnerFlow: 層 ⇄ 気体)
 //   → 反応は 2 回(PlCondensedView → 凝縮相の項を持つ規則 / 気体だけのセル → 気体だけの規則)。気体の項の出入りは PlGasEnergyAfter で気体の側へ
 //   → セルの段の形(T-1211): PlInnerFlowOf → PlBeginReact・反応の核・PlEndReact → PlRemixCondensedEnergy(1 セルだけの刻みは PlStepLoneCell)
@@ -236,6 +237,166 @@ FX_FN int64_t PlInnerFlow(PlParts parts, PlLayer layer) {
     const uint64_t series = halves == 0 ? 0 : FxDivU128By64(FxMulU64Full(condensedHalf, gasHalf), halves).quotient;
 
     return HcFaceFlow(PlSide(parts.condensed, series, PL_FULL_Q16), PlSide(parts.gas, series, PL_FULL_Q16));
+}
+
+// --- 部分つきの面の片側と、重なりで組む面の式(伝導の面を部分ごとに。ADR-0512 の 2・T-1230 段 2)-------------------------
+// 面 1 つの片側は、面の上の範囲 [0, 境)・[境, 1) を受け持つ部分 2 つまで(下の面 = 層だけ・上の面 = 気体だけ・横の面 = 層 [0, 高さ)・気体 [高さ, 1)。
+// 混ざらないセルは部分 1 つ・範囲 [0, 1))。面の流れは両側の部分の組ごとに、範囲の重なりの割合 o で 流れ = HcFaceFlow(片側 × o, 片側 × o)。
+// 両側とも部分 1 つなら重なりは 1 = 今の HcFaceFlow の 1 回(混ざらないセル同士の面はビット単位で同じ)。
+// 組ごとの式は両側から同じ値(重なりは対称・HcFaceFlow は向きだけ逆)なので、面の流れは構造的に保存される。
+// 安定: 部分の上限は 熱容量 ÷ 8 × 重なり。部分の面の重なりの和は受け持つ割合なので、部分ごとの重みの和は PlSide と同じ 7/8 以下。
+// 構造体の配列を動的な添字で読まない(CLAUDE.md §4)ので、部分は名前の付いた 2 つの欄(lower・upper)に持つ。
+FX_CONST uint32_t PL_PART_CONDENSED = 0;  // 層(Ec)
+FX_CONST uint32_t PL_PART_GAS = 1;        // 気体(E − Ec)
+FX_CONST uint32_t PL_PART_WHOLE = 2;      // 混ざらないセル(Ec を持たない)
+
+struct PlSideSlot {
+    uint64_t faceLimit;       // 面の全部を受け持つ時の係数(HcThermalCache の faceLimit と同じ値)
+    uint64_t capacityPerQ16;  // 熱容量の上限の係数 ÷ 2^16(重なり Q16 を掛けて上限)
+    uint32_t temperature;     // mK
+    uint32_t conductance;     // 面の全部を受け持つ時の片側の値(mW/K)
+    uint32_t part;            // PL_PART_*
+    uint32_t pad;
+};
+
+struct PlPartSide {
+    PlSideSlot lower;   // 面の上の範囲 [0, splitQ16)
+    PlSideSlot upper;   // [splitQ16, 1)。splitQ16 = PL_FULL_Q16 なら使わない
+    uint32_t splitQ16;  // 部分 1 つなら PL_FULL_Q16
+    uint32_t pad;
+};
+
+// 面の流れ(自分 → 隣が正、mJ)と、そのうち層の部分が出した・受けた分(Ec の変化。自分の層 −= selfCondensed・隣の層 += neighborCondensed)
+struct PlFaceFlow {
+    int64_t total;
+    int64_t selfCondensed;
+    int64_t neighborCondensed;
+};
+
+FX_FN uint64_t PlCapacityPerQ16(uint64_t heatCapacity) {
+    return ((heatCapacity >> HC_CAPACITY_SHIFT) * HC_LIMIT_PER_CAPACITY) >> 16;
+}
+
+// 混ざらないセルの片側: 今の HcMakeCache と同じ値(面の全部を受け持つ時はビット単位で同じ)
+FX_FN PlSideSlot PlWholeSlot(RxThermal thermal, uint32_t conductance) {
+    PlSideSlot slot;
+    slot.temperature = HcCacheTemperature(thermal);
+    slot.conductance = conductance;
+    slot.faceLimit = HcFaceLimit(conductance, thermal.heatCapacity);
+    slot.capacityPerQ16 = PlCapacityPerQ16(thermal.heatCapacity);
+    slot.part = PL_PART_WHOLE;
+    slot.pad = 0;
+
+    return slot;
+}
+
+// 部分の片側(PlSide と同じ上限: 熱容量の上限は 2^16 単位に切り捨ててから割合を掛ける)
+FX_FN PlSideSlot PlPartSlot(RxThermal part, uint64_t conductance, uint32_t partId) {
+    PlSideSlot slot;
+    slot.temperature = HcCacheTemperature(part);
+    slot.conductance = PlClampU32(conductance);
+    slot.capacityPerQ16 = PlCapacityPerQ16(part.heatCapacity);
+    const uint64_t byConductance = (uint64_t)slot.conductance * HC_LIMIT_PER_CONDUCTANCE;
+    const uint64_t byCapacity = slot.capacityPerQ16 * (uint64_t)PL_FULL_Q16;
+    slot.faceLimit = byConductance < byCapacity ? byConductance : byCapacity;
+    slot.part = partId;
+    slot.pad = 0;
+
+    return slot;
+}
+
+FX_FN PlPartSide PlSingleSide(PlSideSlot slot) {
+    PlPartSide side;
+    side.lower = slot;
+    side.upper = slot;
+    side.splitQ16 = PL_FULL_Q16;
+    side.pad = 0;
+
+    return side;
+}
+
+// 混ざったセルの面 face の片側(下の面 = 層・上の面 = 気体・横の面 = 高さで分けた 2 つ)。pathHeightQ16 = 層の下の面の道の高さ(PlBottomSide)
+FX_FN PlPartSide PlMixedSide(PlParts parts, PlLayer layer, uint32_t face, uint32_t pathHeightQ16) {
+    if (face == PL_FACE_BOTTOM) {
+        const uint64_t conductance = (parts.condensedConductivity << PL_HALF_SHIFT) / (uint64_t)pathHeightQ16;
+        return PlSingleSide(PlPartSlot(parts.condensed, conductance, PL_PART_CONDENSED));
+    }
+
+    if (face == PL_FACE_TOP) {
+        const uint32_t gasHeight = PL_FULL_Q16 - layer.heightQ16;
+        const uint64_t conductance = (parts.gasConductivity << PL_HALF_SHIFT) / (uint64_t)gasHeight;
+        return PlSingleSide(PlPartSlot(parts.gas, conductance, PL_PART_GAS));
+    }
+
+    // 横の面(面の中心までは 0.25 m のまま): 面の全部を受け持つ時の片側の値 = 伝導率 × 0.5
+    PlPartSide side;
+    side.lower = PlPartSlot(parts.condensed, parts.condensedConductivity >> HC_CONDUCTANCE_SHIFT, PL_PART_CONDENSED);
+    side.upper = PlPartSlot(parts.gas, parts.gasConductivity >> HC_CONDUCTANCE_SHIFT, PL_PART_GAS);
+    side.splitQ16 = layer.heightQ16;
+    side.pad = 0;
+
+    return side;
+}
+
+// セルの面 face の片側(混ざらないセルは今の熱のキャッシュと同じ値の部分 1 つ)。condensedEnergy は混ざったセルの時だけ読む
+template <typename Table, typename Cell>
+FX_FN PlPartSide PlPartSideOf(Table table, Cell cell, int64_t condensedEnergy, uint32_t face) {
+    const PlLayer layer = PlLayerOf(table, cell);
+    if (layer.mixed == 0) {
+        const RxThermal thermal = RxComputeThermal(table, cell);
+        return PlSingleSide(PlWholeSlot(thermal, HcCellConductance(table, cell, HcCacheTemperature(thermal))));
+    }
+
+    return PlMixedSide(PlPartsOf(table, cell, condensedEnergy), layer, face, layer.heightQ16);
+}
+
+// 重なり overlapQ16 を受け持つ片側(重なり 1 なら面の全部の値そのもの)
+FX_FN HcThermalCache PlSlotCache(PlSideSlot slot, uint32_t overlapQ16) {
+    HcThermalCache cache;
+    cache.temperature = slot.temperature;
+    if (overlapQ16 >= PL_FULL_Q16) {
+        cache.conductance = slot.conductance;
+        cache.faceLimit = slot.faceLimit;
+        return cache;
+    }
+
+    cache.conductance = (uint32_t)(((uint64_t)slot.conductance * (uint64_t)overlapQ16) >> 16);
+    const uint64_t byConductance = (uint64_t)cache.conductance * HC_LIMIT_PER_CONDUCTANCE;
+    const uint64_t byCapacity = slot.capacityPerQ16 * (uint64_t)overlapQ16;
+    cache.faceLimit = byConductance < byCapacity ? byConductance : byCapacity;
+
+    return cache;
+}
+
+FX_FN int64_t PlPairFlow(PlSideSlot self, PlSideSlot neighbor, uint32_t overlapQ16) {
+    if (overlapQ16 == 0)
+        return 0;
+
+    return HcFaceFlow(PlSlotCache(self, overlapQ16), PlSlotCache(neighbor, overlapQ16));
+}
+
+// 面の流れ: 両側の部分の組 4 つを重なりで(下どうし [0, min)・上どうし [max, 1)・自分の下 × 隣の上 [隣の境, 自分の境)・自分の上 × 隣の下)。
+// 境は 32bit で比べる(64bit の引き算と比べを並べない)
+FX_FN PlFaceFlow PlPartFaceFlow(PlPartSide self, PlPartSide neighbor) {
+    const uint32_t selfSplit = self.splitQ16;
+    const uint32_t neighborSplit = neighbor.splitQ16;
+    const uint32_t lowerEnd = selfSplit < neighborSplit ? selfSplit : neighborSplit;
+    const uint32_t upperStart = selfSplit < neighborSplit ? neighborSplit : selfSplit;
+    const int64_t lowerLower = PlPairFlow(self.lower, neighbor.lower, lowerEnd);
+    const int64_t upperUpper = PlPairFlow(self.upper, neighbor.upper, PL_FULL_Q16 - upperStart);
+    const int64_t lowerUpper = PlPairFlow(self.lower, neighbor.upper,
+                                          selfSplit > neighborSplit ? selfSplit - neighborSplit : 0u);
+    const int64_t upperLower = PlPairFlow(self.upper, neighbor.lower,
+                                          neighborSplit > selfSplit ? neighborSplit - selfSplit : 0u);
+
+    PlFaceFlow flow;
+    flow.total = lowerLower + upperUpper + lowerUpper + upperLower;
+    flow.selfCondensed = (self.lower.part == PL_PART_CONDENSED ? lowerLower + lowerUpper : 0) +
+                         (self.upper.part == PL_PART_CONDENSED ? upperUpper + upperLower : 0);
+    flow.neighborCondensed = (neighbor.lower.part == PL_PART_CONDENSED ? lowerLower + upperLower : 0) +
+                             (neighbor.upper.part == PL_PART_CONDENSED ? upperUpper + lowerUpper : 0);
+
+    return flow;
 }
 
 // --- 反応: 凝縮相の項を持つ規則は層の温度で(接する面の反応。溶ける・沸く・露・炭が燃える)--------------------------
