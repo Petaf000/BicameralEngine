@@ -1,6 +1,6 @@
 # T-1230 層のエネルギー Ec の欄を世界の木へ・伝導の面を部分ごとに(T-1211 から分けた)
 
-- Status: Doing(2026-11-05 wt6 2 回目: 段 2 ② の系の形と費用の測りが入った〔ブランチ t-1230-implicit-two-node〕。打ち切り条件に当たらない。世界の当てる段〔①〕と木の陰の系へのつなぎは続き。2026-11-05 wt6: 段 2 の 1 回目 = 面の式〔部分つきの片側・重なりで組む面の式〕と陰の領域の測りが入った〔ブランチ t-1230-conduction-face〕。世界の当てる段へのつなぎと陰の系は続き。2026-10-30 wt6: 段 1 = 欄 + T-1231 の CPU の配りが入った。伝導の面は段 2。前: 2026-10-29 wt4 が T-1211 から分けた。**ADR-0500 改訂〔2026-10-29 本体 16 回目〕で形が決まった: T-1252 段 1 の後**)
+- Status: Doing(2026-11-05 wt6 3 回目: 段 2 ① 陽の世界の当てる段へのつなぎが CPU で入った〔ブランチ t-1230-part-faces〕。木の陰の系〔②〕と GPU〔③〕は続き。2026-11-05 wt6 2 回目: 段 2 ② の系の形と費用の測りが入った〔ブランチ t-1230-implicit-two-node〕。打ち切り条件に当たらない。世界の当てる段〔①〕と木の陰の系へのつなぎは続き。2026-11-05 wt6: 段 2 の 1 回目 = 面の式〔部分つきの片側・重なりで組む面の式〕と陰の領域の測りが入った〔ブランチ t-1230-conduction-face〕。世界の当てる段へのつなぎと陰の系は続き。2026-10-30 wt6: 段 1 = 欄 + T-1231 の CPU の配りが入った。伝導の面は段 2。前: 2026-10-29 wt4 が T-1211 から分けた。**ADR-0500 改訂〔2026-10-29 本体 16 回目〕で形が決まった: T-1252 段 1 の後**)
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 2 回分
@@ -50,6 +50,9 @@
 - 2026-11-05 wt6(2 回目。ブランチ t-1230-implicit-two-node。司令塔が (b) を一旦の決定に): 陰の系(sim/implicit_conduction)は節・面の一般の形なので、**系の作りを変えずに 2 節が入る**ことを確かめた
   (同じ座標の 2 節 = 多重格子の縮約で同じ親へ・同じ色の隣は掃き出しの初めの値)。面の組の値の口(PlPairOverlapsOf・PlSlotConductance・PlInnerConductance)を phase_layer.hlsli に分けた(PlPartFaceFlow・PlInnerFlow はビット単位で同じ)。
   試験 phase_layer_implicit(2 節の系の保存・安全網なし・打ち切り条件・費用)。**費用: 節 +12.5 %(見込みどおり)・面 +5〜17 %・V サイクル ×0.69〜1.76・節の計算 ×0.77〜1.98**。①(陽の世界の当てる段)は引き継ぎ。
+- 2026-11-05 wt6(3 回目。ブランチ t-1230-part-faces。司令塔が世界の口 2 つを一旦の決定に): ① 陽の世界の当てる段へつないだ(CPU)。
+  伝導の種類だけの当てる段 TxFlowConductionCell(shaders/common/transport_conduction_parts.hlsli)・見立ての部分 CV_VIEW_PHASE_LAYER(CellViews::Parts)・層の部分の変化 AddCondensed(nest.phaseLayer.conductionDeltas → Ec の欄)。
+  違うレベルの面の層の高さの写しは clamp(h × 2^d − j, 0, 1)(仮)。21 §3 との照らしは ADR-0512 の「段 2 ① 世界の当てる段の口」。試験 phase_layer_world。
 
 ## 引き継ぎメモ(2026-10-30 wt6。ブランチ t-1230-ec-field。司令塔の会話の入れ物の再起動で区切った)
 - **入った(段 1 = 欄 + T-1231 の CPU)**: 配り手の表に SF_OWNER_PHASE_LAYER(一般の形 = 子は親と同じ数・粗く = 和 ÷ 8 の床)。EnablePhaseLayerEnergy で欄「phase_layer_energy」(セル・I64・真実・ハッシュ・保存量でない)と物質の表。
@@ -128,3 +131,14 @@
   系の大きさの見込み ImBlockCellBound は混ざったセルを 2 つと数える(土台の共通部分 = 司令塔に印。上限の超え方は今の Q22 の案 A のまま)。
 - **③ GPU**: ② の CPU が通ってから。式は phase_layer.hlsli のまま呼ぶ(HLSL の配列を動的な添字で読まない形にしてある)。
 - 運転: `job.py run -Exe <CPU だけの試験>` も GPU の順番待ちに入る(ランナーが止まる)。試験の表示を見るのは `job.py test -Filter ... -Show`。
+
+## 引き継ぎメモ(2026-11-05 wt6 3 回目。ブランチ t-1230-part-faces)
+- **入った(CPU)**: 相の層の欄がある世界の伝導は ComputeConduction が TxFlowConductionCell を呼ぶ(無い世界は今の TxFlowCell のまま)。混ざらない面は TxSideFaceFlow そのもの(ビット単位で同じ。試験 1)。
+  混ざったセルの面は TxPartFaceFlow(片側の係数は MrSubstepFaceLimit・MrSubstepCoarseLimit と同じ置き方 × 重なり)・層の上の面は TxPartInnerFlow。Ec の変化は AddCondensed → 伝導の変化を足す所(StepPagedBlock・ApplyEndingDeltas)で欄へ。
+  印の回(MarkConductionWants)は混ざったセルの面なら粗い側を頁に広げ端数の枠を求める(部分の道の流れは丸ごとの流れと違うので)・層と気体の温度が違う混ざったセルは一様なブロックでも頁に広げる。
+  PlSideSlot の faceLimit を capacityLimit(熱容量の上限)に持ち替えた(値はビット単位で同じ。木のレベルの係数を組むため)。
+- **試験 phase_layer_world**: 1 混ざったセルの無い世界は欄の有無でビット単位で同じ / 2 1 刻みの混ざったセルのエネルギーと Ec が面の式(PlPartFaceFlow・PlInnerFlowOf)の手計算とビット単位で同じ(平ら・段違い)/
+  3 120 刻みで保存量(ComputeConservedTotals)が一定・部分の熱が負にならない / 4 八分の一を細かくした木(違うレベルの面)でも同じ。
+- **まだ(この順)**: ② 木の陰の系(multires_implicit_conduction.cpp)で混ざったセルを 2 節に(phase_layer_implicit の Build と同じ形・安全網で陽に戻す時は TxPartFaceFlow・流れの当て先は AddCondensed・ImBlockCellBound は 2 と数える)。
+  今は陰のブロックの混ざったセルは丸ごと 1 節のまま(陰の領域の混ざったセルの部分は動かない = 未対応)。/ 溢れを使う世界(wideCells)は部分の道を通らない(未対応)/ ③ GPU(式は同じ hlsli・世界の口 2 つを GPU の伝導の世界にも)。
+- 問い: 無し(写しの式・口の形は作り手から見た違いが無い)。

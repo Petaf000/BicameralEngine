@@ -257,7 +257,8 @@ FX_CONST uint32_t PL_PART_GAS = 1;        // 気体(E − Ec)
 FX_CONST uint32_t PL_PART_WHOLE = 2;      // 混ざらないセル(Ec を持たない)
 
 struct PlSideSlot {
-    uint64_t faceLimit;       // 面の全部を受け持つ時の係数(HcThermalCache の faceLimit と同じ値)
+    uint64_t
+        capacityLimit;  // 面の全部を受け持つ時の熱容量の上限の係数(混ざらないセルは HcFaceLimit と同じ・部分は PlSide と同じ)
     uint64_t capacityPerQ16;  // 熱容量の上限の係数 ÷ 2^16(重なり Q16 を掛けて上限)
     uint32_t temperature;     // mK
     uint32_t conductance;     // 面の全部を受け持つ時の片側の値(mW/K)
@@ -288,7 +289,7 @@ FX_FN PlSideSlot PlWholeSlot(RxThermal thermal, uint32_t conductance) {
     PlSideSlot slot;
     slot.temperature = HcCacheTemperature(thermal);
     slot.conductance = conductance;
-    slot.faceLimit = HcFaceLimit(conductance, thermal.heatCapacity);
+    slot.capacityLimit = (thermal.heatCapacity >> HC_CAPACITY_SHIFT) * HC_LIMIT_PER_CAPACITY;
     slot.capacityPerQ16 = PlCapacityPerQ16(thermal.heatCapacity);
     slot.part = PL_PART_WHOLE;
     slot.pad = 0;
@@ -302,9 +303,7 @@ FX_FN PlSideSlot PlPartSlot(RxThermal part, uint64_t conductance, uint32_t partI
     slot.temperature = HcCacheTemperature(part);
     slot.conductance = PlClampU32(conductance);
     slot.capacityPerQ16 = PlCapacityPerQ16(part.heatCapacity);
-    const uint64_t byConductance = (uint64_t)slot.conductance * HC_LIMIT_PER_CONDUCTANCE;
-    const uint64_t byCapacity = slot.capacityPerQ16 * (uint64_t)PL_FULL_Q16;
-    slot.faceLimit = byConductance < byCapacity ? byConductance : byCapacity;
+    slot.capacityLimit = slot.capacityPerQ16 * (uint64_t)PL_FULL_Q16;
     slot.part = partId;
     slot.pad = 0;
 
@@ -364,19 +363,21 @@ FX_FN uint32_t PlSlotConductance(PlSideSlot slot, uint32_t overlapQ16) {
     return (uint32_t)(((uint64_t)slot.conductance * (uint64_t)overlapQ16) >> 16);
 }
 
-// 重なり overlapQ16 を受け持つ片側(重なり 1 なら面の全部の値そのもの)
+// 重なり overlapQ16 を受け持つ時の熱容量の上限の係数(重なり 1 なら面の全部の値そのもの)
+FX_FN uint64_t PlSlotCapacityLimit(PlSideSlot slot, uint32_t overlapQ16) {
+    if (overlapQ16 >= PL_FULL_Q16)
+        return slot.capacityLimit;
+
+    return slot.capacityPerQ16 * (uint64_t)overlapQ16;
+}
+
+// 重なり overlapQ16 を受け持つ片側(0.5 m のセルの面。重なり 1 なら面の全部の値そのもの。木のレベルの面は transport_conduction_parts.hlsli)
 FX_FN HcThermalCache PlSlotCache(PlSideSlot slot, uint32_t overlapQ16) {
     HcThermalCache cache;
     cache.temperature = slot.temperature;
-    if (overlapQ16 >= PL_FULL_Q16) {
-        cache.conductance = slot.conductance;
-        cache.faceLimit = slot.faceLimit;
-        return cache;
-    }
-
     cache.conductance = PlSlotConductance(slot, overlapQ16);
     const uint64_t byConductance = (uint64_t)cache.conductance * HC_LIMIT_PER_CONDUCTANCE;
-    const uint64_t byCapacity = slot.capacityPerQ16 * (uint64_t)overlapQ16;
+    const uint64_t byCapacity = PlSlotCapacityLimit(slot, overlapQ16);
     cache.faceLimit = byConductance < byCapacity ? byConductance : byCapacity;
 
     return cache;

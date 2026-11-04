@@ -482,8 +482,10 @@ namespace bicameral::sim {
                 const RxCell before = cell;
                 const uint64_t fractionBefore = FractionEnergy(nest, block.fraction, index);
 
-                // --- 伝導 ---
+                // --- 伝導(相の層の欄がある世界は層の部分の変化も。T-1230 段 2 ①)---
+                bool condensedChanged = false;
                 if (!deltas.empty()) {
+                    condensedChanged = nest_detail::ApplyCondensedDelta(nest, slot, index);
                     const MrEnergyDelta& delta = deltas[nest_detail::PageCellAddress(nest, block.page, index)];
                     if (!MrEnergyDeltaIsZero(delta)) {
                         nest_detail::ApplyEnergyDelta(nest, slot, index, cell, delta);
@@ -509,7 +511,7 @@ namespace bicameral::sim {
                     tally = MrAddLimits(tally, step.limits);
                 }
 
-                result.changed = result.changed || wideChanged || MrCellChanged(before, cell) ||
+                result.changed = result.changed || wideChanged || condensedChanged || MrCellChanged(before, cell) ||
                                  FractionEnergy(nest, block.fraction, index) != fractionBefore;
             }
 
