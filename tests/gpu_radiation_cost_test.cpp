@@ -345,13 +345,15 @@ namespace {
 
             LogRun(scene, *run, ticks, frequency);
             // 測りの時は同じ場面を別の形でも(段 1 からを間接の起動・側を飛ばさない。T-1235 の前後を同じ回の中で比べる)
-            for (const auto& [skipIdle, indirect, label] :
-                 {std::tuple{true, true, "間接の起動"}, std::tuple{false, false, "飛ばさない・直の起動"}}) {
+            // (T-1228: 写しを毎刻み全部にした時も)
+            for (const auto& [skipIdle, indirect, copyAll, label] :
+                 {std::tuple{true, true, false, "間接の起動"}, std::tuple{false, false, false, "飛ばさない・直の起動"},
+                  std::tuple{true, false, true, "写しは毎刻み全部"}}) {
                 if (!measureAll || !scene.cascade.enabled)
                     break;
 
                 const std::optional<Run> before = RunScene(device, *queue, table, scene, ticks, true, skipIdle,
-                                                           indirect);
+                                                           indirect, copyAll);
                 const std::string name = std::format("{}・{}", scene.name, label);
                 Scene labeled = scene;
                 labeled.name = name;

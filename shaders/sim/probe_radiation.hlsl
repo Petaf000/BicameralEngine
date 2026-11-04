@@ -31,6 +31,8 @@ RWByteAddressBuffer rcThird
 
 static const uint32_t RC_CELL_LIGHT_BYTES = 24;  // RcCellLight
 static const uint32_t RC_SPECIES_LIGHT_BYTES = 16;
+static const uint32_t RADIATION_BLOCK_CELLS = PROBE_BLOCK_SIZE * PROBE_BLOCK_SIZE *
+                                              PROBE_BLOCK_SIZE;  // = グループの幅(64)
 
 struct ProbeRadiationLights {
     uint32_t unused;
@@ -89,15 +91,21 @@ uint32_t EmitDelta(bool before, bool after) {
 }
 
 // --- 刻みの初めの写し(1 スレッド = 1 セル。単位の引数が 0 なら、前の刻みの写しの後で変わったブロックのセルだけ)---
+// 1 グループ = 1 ブロック(4³ = 64 セル)に並べる(セルの番号の順に並べると、波 1 つが 16 ブロックにまたがり、写すブロックが少なくても
+// ほとんどの波が流れた。2026-11-05 の測りで Grid が減らなかった)。セルごとの書き先は決まっているので並べ方で結果は変わらない
 [numthreads(PROBE_LINEAR_GROUP_SIZE, 1, 1)] void RadiationGrid(uint3 dispatchThreadId : SV_DispatchThreadID) {
-    const uint32_t cell = dispatchThreadId.x;
-    if (cell >= PROBE_CELL_COUNT)
+    const uint32_t block = dispatchThreadId.x / RADIATION_BLOCK_CELLS;
+    if (block >= PROBE_BLOCK_COUNT)
         return;
 
-    const uint32_t block = ProbeBlockOfCell(cell % PROBE_GRID_SIZE, (cell / PROBE_GRID_SIZE) % PROBE_GRID_SIZE,
-                                            cell / PROBE_SLICE_CELL_COUNT);
     if (argument == 0u && !BlockChangedSincePreviousGrid(block))
         return;
+
+    const uint32_t local = dispatchThreadId.x % RADIATION_BLOCK_CELLS;
+    const uint3 corner = BlockCoordinates(block) * PROBE_BLOCK_SIZE;
+    const uint32_t cell = ProbeCellIndex(corner.x + (local % PROBE_BLOCK_SIZE),
+                                         corner.y + ((local / PROBE_BLOCK_SIZE) % PROBE_BLOCK_SIZE),
+                                         corner.z + (local / (PROBE_BLOCK_SIZE * PROBE_BLOCK_SIZE)));
 
     const RcGpuParams params = LoadRcParams();
     const uint32_t index = GenerationBase(CurrentTick()) + cell;
