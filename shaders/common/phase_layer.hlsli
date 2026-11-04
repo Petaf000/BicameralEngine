@@ -230,11 +230,17 @@ FX_FN HcThermalCache PlLateralSide(RxThermal part, uint64_t conductivity, uint32
 // --- 層の上の面(層 ⇄ 気体。セルの中の対の面)---------------------------------------------------------
 // 2 つの半分の道の直列: G_層 = k_層 ÷ 高さ・G_気体 = k_気体 ÷ (1 − 高さ)(どちらも 伝導率 × 2^16 ÷ 高さ(Q16)。面積 0.25 m²)。
 // 流れ(層 → 気体が正、mJ)は HcFaceFlow(両側の上限は自分の熱容量の 1/8)
-FX_FN int64_t PlInnerFlow(PlParts parts, PlLayer layer) {
+// 層の上の面の値(mW/K。2 つの半分の道の直列。陽の PlInnerFlow と陰の系の面〔ADR-0512 の 2〕が同じ値を使う)
+FX_FN uint64_t PlInnerConductance(PlParts parts, PlLayer layer) {
     const uint64_t condensedHalf = (parts.condensedConductivity << 16) / (uint64_t)layer.heightQ16;
     const uint64_t gasHalf = (parts.gasConductivity << 16) / (uint64_t)(PL_FULL_Q16 - layer.heightQ16);
     const uint64_t halves = condensedHalf + gasHalf;
-    const uint64_t series = halves == 0 ? 0 : FxDivU128By64(FxMulU64Full(condensedHalf, gasHalf), halves).quotient;
+
+    return halves == 0 ? 0 : FxDivU128By64(FxMulU64Full(condensedHalf, gasHalf), halves).quotient;
+}
+
+FX_FN int64_t PlInnerFlow(PlParts parts, PlLayer layer) {
+    const uint64_t series = PlInnerConductance(parts, layer);
 
     return HcFaceFlow(PlSide(parts.condensed, series, PL_FULL_Q16), PlSide(parts.gas, series, PL_FULL_Q16));
 }
@@ -350,6 +356,14 @@ FX_FN PlPartSide PlPartSideOf(Table table, Cell cell, int64_t condensedEnergy, u
     return PlMixedSide(PlPartsOf(table, cell, condensedEnergy), layer, face, layer.heightQ16);
 }
 
+// 重なり overlapQ16 を受け持つ時の片側の値(mW/K。重なり 1 なら面の全部の値そのもの。陰の系の面の組の係数もこの値の小さい方)
+FX_FN uint32_t PlSlotConductance(PlSideSlot slot, uint32_t overlapQ16) {
+    if (overlapQ16 >= PL_FULL_Q16)
+        return slot.conductance;
+
+    return (uint32_t)(((uint64_t)slot.conductance * (uint64_t)overlapQ16) >> 16);
+}
+
 // 重なり overlapQ16 を受け持つ片側(重なり 1 なら面の全部の値そのもの)
 FX_FN HcThermalCache PlSlotCache(PlSideSlot slot, uint32_t overlapQ16) {
     HcThermalCache cache;
@@ -360,7 +374,7 @@ FX_FN HcThermalCache PlSlotCache(PlSideSlot slot, uint32_t overlapQ16) {
         return cache;
     }
 
-    cache.conductance = (uint32_t)(((uint64_t)slot.conductance * (uint64_t)overlapQ16) >> 16);
+    cache.conductance = PlSlotConductance(slot, overlapQ16);
     const uint64_t byConductance = (uint64_t)cache.conductance * HC_LIMIT_PER_CONDUCTANCE;
     const uint64_t byCapacity = slot.capacityPerQ16 * (uint64_t)overlapQ16;
     cache.faceLimit = byConductance < byCapacity ? byConductance : byCapacity;
@@ -375,19 +389,34 @@ FX_FN int64_t PlPairFlow(PlSideSlot self, PlSideSlot neighbor, uint32_t overlapQ
     return HcFaceFlow(PlSlotCache(self, overlapQ16), PlSlotCache(neighbor, overlapQ16));
 }
 
-// 面の流れ: 両側の部分の組 4 つを重なりで(下どうし [0, min)・上どうし [max, 1)・自分の下 × 隣の上 [隣の境, 自分の境)・自分の上 × 隣の下)。
-// 境は 32bit で比べる(64bit の引き算と比べを並べない)
-FX_FN PlFaceFlow PlPartFaceFlow(PlPartSide self, PlPartSide neighbor) {
+// 両側の部分の組 4 つの重なり(Q16): 下どうし [0, min)・上どうし [max, 1)・自分の下 × 隣の上 [隣の境, 自分の境)・自分の上 × 隣の下。
+// 陽の面の式(PlPartFaceFlow)と陰の系の面の組(ADR-0512 の 2 の改め)が同じ値を使う。境は 32bit で比べる(64bit の引き算と比べを並べない)
+struct PlPairOverlaps {
+    uint32_t lowerLower;
+    uint32_t upperUpper;
+    uint32_t lowerUpper;
+    uint32_t upperLower;
+};
+
+FX_FN PlPairOverlaps PlPairOverlapsOf(PlPartSide self, PlPartSide neighbor) {
     const uint32_t selfSplit = self.splitQ16;
     const uint32_t neighborSplit = neighbor.splitQ16;
-    const uint32_t lowerEnd = selfSplit < neighborSplit ? selfSplit : neighborSplit;
-    const uint32_t upperStart = selfSplit < neighborSplit ? neighborSplit : selfSplit;
-    const int64_t lowerLower = PlPairFlow(self.lower, neighbor.lower, lowerEnd);
-    const int64_t upperUpper = PlPairFlow(self.upper, neighbor.upper, PL_FULL_Q16 - upperStart);
-    const int64_t lowerUpper = PlPairFlow(self.lower, neighbor.upper,
-                                          selfSplit > neighborSplit ? selfSplit - neighborSplit : 0u);
-    const int64_t upperLower = PlPairFlow(self.upper, neighbor.lower,
-                                          neighborSplit > selfSplit ? neighborSplit - selfSplit : 0u);
+    PlPairOverlaps overlaps;
+    overlaps.lowerLower = selfSplit < neighborSplit ? selfSplit : neighborSplit;
+    overlaps.upperUpper = PL_FULL_Q16 - (selfSplit < neighborSplit ? neighborSplit : selfSplit);
+    overlaps.lowerUpper = selfSplit > neighborSplit ? selfSplit - neighborSplit : 0u;
+    overlaps.upperLower = neighborSplit > selfSplit ? neighborSplit - selfSplit : 0u;
+
+    return overlaps;
+}
+
+// 面の流れ: 両側の部分の組 4 つを重なりで
+FX_FN PlFaceFlow PlPartFaceFlow(PlPartSide self, PlPartSide neighbor) {
+    const PlPairOverlaps overlaps = PlPairOverlapsOf(self, neighbor);
+    const int64_t lowerLower = PlPairFlow(self.lower, neighbor.lower, overlaps.lowerLower);
+    const int64_t upperUpper = PlPairFlow(self.upper, neighbor.upper, overlaps.upperUpper);
+    const int64_t lowerUpper = PlPairFlow(self.lower, neighbor.upper, overlaps.lowerUpper);
+    const int64_t upperLower = PlPairFlow(self.upper, neighbor.lower, overlaps.upperLower);
 
     PlFaceFlow flow;
     flow.total = lowerLower + upperUpper + lowerUpper + upperLower;
