@@ -4,6 +4,7 @@
 //    両端を固定した梁 8 × 1 m(0.5 m)・アーチ(0.5 / 0.25 m)・洞窟の天井(1 / 0.5 / 0.25 m)・掘った直後(16 × 8 m の下を掘り、前の答えから)。
 //    CPU の SupportLaw::Step と同じ系を GPU で 1 刻みずつ解き(1 本のリストに --ticks 刻み。答えは次の刻みの温めた始まり)、毎刻み節 × 3 の値を比べる。
 //    値が同じなので、帳簿(Σ セルの上向きの力 = 固定した面の力 − 重さ)と面の力も CPU と同じ(support_law_test が CPU で確かめる)。
+// 1'. 3 次元の支え(sim/support_law_3d。k = 6。T-0960): 奥行 1・2 セルの場面・アーチ(奥行 2。段の斜めの棒)・ねじれの腕を --ticks 刻み、同じく比べる。
 // 2. 成分の数 k = 1・2・3・6 の箱(一辺 8。軸の面の k × k の結合・下の面を固定・区分的に一定の延ばし方)を 5 刻み、同じく比べる。
 //    違うレベルの節が混ざる系(T-1104・ADR-0462): equilibrium_block_test の箱(k = 1・3。真ん中 2 × 2 × 2 をレベル 1)を V 2 回・
 //    V 4 回 + 共役勾配・V 2 回 + 刻みをまたぐ共役勾配(D-649)で 12 刻み、節と面の並びを逆にした系も。支えの違う大きさのセルの場面
@@ -23,6 +24,7 @@
 #include <span>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "core/log.h"
@@ -35,6 +37,7 @@
 #include "sim/equilibrium_block.h"
 #include "sim/gpu_equilibrium_block.h"
 #include "sim/support_law.h"
+#include "sim/support_law_3d.h"
 #include "support_scenes.h"
 
 using namespace bicameral;
@@ -283,6 +286,33 @@ namespace {
             return compared;
 
         return TestMixedSupport(context, options, ticks);
+    }
+
+    // --- 1'. 3 次元の支え(sim/support_law_3d。k = 6。T-0960): 奥行 1・2 セルの場面・段の斜めの棒の立つアーチ・ねじれの腕 ---
+    std::expected<void, std::string> TestSupport3D(Context& context, uint32_t ticks) {
+        const sim::SupportOptions options;
+        const std::pair<const char*, sim::SupportScene3D> scenes[] = {
+            {"3 次元: 1 セルの張り出し 4 m(奥行 1)", test::Extruded(test::Beam(8, 1, 500, false))},
+            {"3 次元: 両端を固定した梁 8 × 1 m(奥行 2)", test::Extruded(test::Beam(16, 2, 500, true), 2)},
+            {"3 次元: アーチ 0.5 m(奥行 2)", test::Extruded(test::Arch(500), 2)},
+            {"3 次元: ねじれの腕", test::TwistArm(8, 1000000)},
+        };
+        for (const auto& [name, scene] : scenes) {
+            sim::SupportLaw3D law(scene, options);
+            const std::vector<int64_t> warm = law.BlockValues();
+            std::vector<std::vector<int64_t>> cpuTicks;
+            for (uint32_t tick = 0; tick < ticks; ++tick) {
+                law.Step();
+                cpuTicks.push_back(law.BlockValues());
+            }
+
+            const auto compared = CompareRuns(context, name, law.BlockSystem(), law.BlockGrid(), options.blocks, warm,
+                                              cpuTicks);
+            if (!compared)
+                return compared;
+        }
+
+        return {};
     }
 
     // --- 2. k 成分の箱 ---
@@ -605,6 +635,9 @@ namespace {
 
         if (ran)
             ran = TestSupport(context, ticks);
+
+        if (ran)
+            ran = TestSupport3D(context, ticks);
 
         if (ran && measure)
             ran = Measure(context);

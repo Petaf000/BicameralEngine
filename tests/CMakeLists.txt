@@ -383,6 +383,12 @@ add_executable(support_law_test support_law_test.cpp)
 target_link_libraries(support_law_test PRIVATE bicameral_multires bicameral_core)
 add_test(NAME support_law COMMAND support_law_test)
 set_tests_properties(support_law PROPERTIES TIMEOUT 3000)
+
+# 支えの法則の 3 次元の格子の梁(T-0960): 剛体の動き・一様な歪み・奥行 1 セルが 2 次元と同じ・向き・ねじれ・帳簿(力 3・回り 3)・決定性
+add_executable(support_3d_test support_3d_test.cpp)
+target_link_libraries(support_3d_test PRIVATE bicameral_multires bicameral_core)
+add_test(NAME support_3d COMMAND support_3d_test)
+set_tests_properties(support_3d PROPERTIES TIMEOUT 3000)
 # T-1120: 0.5 m と 0.25 m のセルが混ざる場面(違う大きさの梁 2 通り)を全部 0.25 m と比べる
 add_executable(support_mixed_test support_mixed_test.cpp)
 target_link_libraries(support_mixed_test PRIVATE bicameral_multires bicameral_core)

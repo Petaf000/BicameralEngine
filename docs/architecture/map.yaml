@@ -394,6 +394,9 @@ views:
       - { id: supportlaw, group: simlib, label: "SupportLaw::Step<br/>支えの法則の試作(R-B1・T-0871)<br/>格子の梁・成分ごとに C-0 で解き結合は遅らせる",
           code: "engine/src/sim/support_law.cpp::SupportLaw::Step", ticket: T-0871, doc: docs/design/22-support-law.md,
           note: "縦の面・ν = 0・1 つの細かさ。節 = セル(横・上・回り φ)。既定は成分を持つ節で 1 つの系(SupportSolve::Coupled。T-0919)、成分の間の結合を右辺の項へ遅らせる形(Lagged)は比べ用に残す。階段の段に斜めの棒(ADR-0415・T-0944)。面の力と縁の力(FaceForces。表面の引きの応力 R-B2 へ)。support_law_test が梁の式・アーチ・洞窟の天井の連続体と比べ・帳簿・決定性・釣り合いに着く刻みを記録" }
+      - { id: supportlaw3d, group: simlib, label: "SupportLaw3D::Step<br/>支えの法則の 3 次元(T-0960)<br/>変位 3 + 回り 3 の格子の梁・k = 6 の 1 つの系",
+          code: "engine/src/sim/support_law_3d.cpp::SupportLaw3D::Step", ticket: T-0960, doc: docs/decisions/ADR-0514-support-3d-lattice.md,
+          note: "1 つの細かさ(1 本目)。面ごとに伸び・ずれ 2・曲げ 2・ねじれ(J = 9/64 dx⁴)・固定した面は面の点の形・段の斜めの棒は辺の斜め(3 つの座標の面)。延ばし方は 3 次元の剛体の動き。帳簿は力 3・回りの力 3 が毎刻み厳密。support_3d_test が奥行 1 セルで 2 次元と同じ答え・ねじれ・剛体の動きを確かめる。違う大きさのセルは T-1294" }
       - { id: timesteplab, group: simlib, label: "StepTimeStepLab<br/>研究 R-T2 の試作(T-0856)<br/>状態が変わる速さで刻みの長さ 2^e を選ぶ",
           code: "engine/src/sim/time_step_lab.cpp::StepTimeStepLab", ticket: T-0856, doc: docs/decisions/ADR-0410-step-length-rule-trial.md,
           note: "捨てる試作(CPU・1 本の列)。歩の終わりの刻みだけを回すので早送り = 待ったがビット一致。運ぶ・広がるは後ろ向きの Euler(長さを C・g・源に)・反応は閉じた形。式は shaders/common/time_step.hlsli" }
@@ -704,6 +707,7 @@ views:
       - [equilibriumtest, equilibrium, "ビット一致"]
       - [supportlaw, equilibrium, "成分ごとに解く(使い手)"]
       - [supportlaw, equilibriumblock, "成分を持つ節で 1 つの系(既定。T-0919)"]
+      - [supportlaw3d, equilibriumblock, "k = 6 の 1 つの系(T-0960)"]
       - [equilibrium, equilibriumfields, "温めた始まりを欄から読む・書く(T-0922)"]
       - [equilibriumblock, equilibriumfields, "同(k 成分)"]
       - [timesteplabtest, timesteplab, "精度・細かさ・早送り"]

@@ -1,10 +1,11 @@
 // support_scenes.h — 支えの法則(sim/support_law)の試験の場面(石の張り出し・梁・アーチ・洞窟)。support_law_test(CPU。T-0871・T-0919)と
-// gpu_equilibrium_block_test(成分を持つ節の GPU 版と CPU のビット一致。T-0970・T-1104・T-1279)・support_mixed_test(T-1120)が同じ場面を使う。縦の面・奥行 1 セル。
+// gpu_equilibrium_block_test(成分を持つ節の GPU 版と CPU のビット一致。T-0970・T-1104・T-1279)・support_mixed_test(T-1120)が同じ場面を使う。縦の面・奥行 1 セル(3 次元の support_3d_test へは Extruded。T-0960)。
 #pragma once
 
 #include <cstdint>
 
 #include "sim/support_law.h"
+#include "sim/support_law_3d.h"
 
 namespace bicameral::test {
 
@@ -83,6 +84,64 @@ namespace bicameral::test {
                                              (wall && up == 0 ? sim::SUPPORT_CLAMP_BOTTOM : 0));
             }
         }
+
+        return scene;
+    }
+
+    // 縦の面の場面を奥行 depth セルの 3 次元の場面に(T-0960。固定した面は同じ向き・荷は同じ値をどの奥行のセルにも)
+    inline sim::SupportScene3D Extruded(const sim::SupportScene& scene, uint32_t depth = 1) {
+        sim::SupportScene3D extruded;
+        extruded.width = scene.width;
+        extruded.height = scene.height;
+        extruded.depth = depth;
+        extruded.cellMm = scene.cellMm;
+        extruded.stiffnessKpa = scene.stiffnessKpa;
+        extruded.stiffnessUpKpa = scene.stiffnessUpKpa;
+        extruded.densityKgPerM3 = scene.densityKgPerM3;
+        extruded.gravityUmPerS2 = scene.gravityUmPerS2;
+        const size_t plane = (size_t)scene.width * scene.height;
+        for (uint32_t z = 0; z < depth; ++z) {
+            for (size_t at = 0; at < plane; ++at) {
+                const uint8_t clamps = scene.clamps[at];
+                uint8_t clamps3 = 0;
+                if ((clamps & sim::SUPPORT_CLAMP_LEFT) != 0)
+                    clamps3 |= sim::Support3Clamp(sim::SUPPORT3_X, -1);
+
+                if ((clamps & sim::SUPPORT_CLAMP_RIGHT) != 0)
+                    clamps3 |= sim::Support3Clamp(sim::SUPPORT3_X, 1);
+
+                if ((clamps & sim::SUPPORT_CLAMP_BOTTOM) != 0)
+                    clamps3 |= sim::Support3Clamp(sim::SUPPORT3_UP, -1);
+
+                extruded.solid.push_back(scene.solid[at]);
+                extruded.clamps.push_back(clamps3);
+                if (!scene.loadMn.empty())
+                    extruded.loadMn.push_back(scene.loadMn[at]);
+            }
+        }
+
+        return extruded;
+    }
+
+    // ねじれ(T-0960): x の向きの棒(length セル・断面 1 セル・根を壁に固定)の先に奥行の向きの腕(2 セル)・腕の先に荷(重さ 0)
+    inline sim::SupportScene3D TwistArm(uint32_t length, int64_t loadMn) {
+        sim::SupportScene3D scene;
+        scene.width = length;
+        scene.height = 1;
+        scene.depth = 3;
+        scene.cellMm = 500;
+        scene.stiffnessKpa = STONE_KPA;
+        scene.densityKgPerM3 = 0;
+        scene.solid.assign((size_t)length * 3, 0);
+        scene.clamps.assign(scene.solid.size(), 0);
+        scene.loadMn.assign(scene.solid.size(), 0);
+        for (uint32_t x = 0; x < length; ++x)
+            scene.solid[x] = 1;
+
+        scene.solid[length - 1 + (size_t)length * 1] = 1;
+        scene.solid[length - 1 + (size_t)length * 2] = 1;
+        scene.loadMn[length - 1 + (size_t)length * 2] = loadMn;
+        scene.clamps[0] = sim::Support3Clamp(sim::SUPPORT3_X, -1);
 
         return scene;
     }
