@@ -184,7 +184,7 @@ bool CoarsenFits(uint32_t childSlot) {
     bool fits = true;
     for (uint32_t local = 0; local < MR_OCTANT_CELLS && fits; ++local) {
         MrChildren children;
-        for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
+        [unroll] for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
             const uint32_t index = MrChildCell(local, j);
             children.cells[j] = LoadBlockCell(child, childSlot, index);
             children.fractions[j] = LoadFraction(child.fraction, index);
@@ -770,8 +770,12 @@ void AddLedgerCarrying(int32_t ledgerLevel, uint32_t column, uint64_t bits) {
 void ReturnFractionCell(MrBlock block, uint32_t index) {
     const MrFraction fraction = g_fractions[FractionAddress(block.fraction, index)];
     AddLedgerCarrying(block.level, 0, fraction.energy);
-    for (uint32_t i = 0; i < fraction.speciesCount; ++i)
+    [unroll] for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i) {  // 決まった数まで回して成分の数で抜ける(T-1266)
+        if (i >= fraction.speciesCount)
+            break;
+
         AddLedgerCarrying(block.level, 1 + fraction.species[i], fraction.amounts[i]);
+    }
 
 #ifdef MR_WIDE_CELLS
     const uint32_t area = WideFractionArea(block.fraction);
@@ -840,7 +844,10 @@ MrWide CombineFoldSum(int64_t high, uint64_t low) {
 // セルの成分のうち、物質 after より大きい最小の ID(after = FOLD_NO_SPECIES なら最小。無ければ FOLD_NO_SPECIES)
 uint32_t NextCellSpecies(RxCell cell, uint32_t after) {
     uint32_t next = FOLD_NO_SPECIES;
-    for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+    for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i) {  // 決まった数まで回して成分の数で抜ける(T-1266)
+        if (i >= cell.speciesCount)
+            break;
+
         const uint32_t id = cell.species[i];
         if ((after == FOLD_NO_SPECIES || id > after) && id < next)
             next = id;
@@ -853,7 +860,10 @@ uint32_t NextCellSpecies(RxCell cell, uint32_t after) {
 uint64_t CellSpeciesAmount(RxCell cell, uint32_t id, out bool present) {
     present = false;
     uint64_t amount = 0;
-    for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+    for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i) {  // 決まった数まで回して成分の数で抜ける(T-1266)
+        if (i >= cell.speciesCount)
+            break;
+
         if (cell.species[i] == id) {
             present = true;
             amount = cell.amounts[i];
@@ -867,8 +877,12 @@ uint64_t CellSpeciesAmount(RxCell cell, uint32_t id, out bool present) {
 MrFoldStats CollectFoldCells(uint32_t index, RxCell cell, bool uncovered) {
     const int32_t temperature = uncovered ? RxComputeThermal(MakeTable(), cell).temperature : 0;
     uint64_t total = 0;
-    for (uint32_t i = 0; uncovered && i < cell.speciesCount; ++i)
+    for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i) {  // 決まった数まで回して成分の数で抜ける(T-1266)
+        if (!uncovered || i >= cell.speciesCount)
+            break;
+
         total = total + cell.amounts[i] < total ? FX_U64(0xFFFFFFFFu, 0xFFFFFFFFu) : total + cell.amounts[i];
+    }
 
     const int64_t energy = uncovered ? cell.energy : 0;
     if (index == 0)
@@ -939,21 +953,32 @@ MrFoldStats CollectFoldSpecies(MrFoldStats stats, uint32_t index, RxCell cell, b
     if (index != 0)
         return stats;
 
+    uint32_t presentCells = 0;
+    uint64_t lowAmount = FX_U64(0xFFFFFFFFu, 0xFFFFFFFFu);
+    uint64_t highAmount = 0;
     uint64_t totalLow = 0;
     uint64_t totalHigh = 0;
-    stats.species[position] = id;
-    stats.lowAmount[position] = FX_U64(0xFFFFFFFFu, 0xFFFFFFFFu);
     for (uint32_t wave = 0; wave < gs_foldWaves; ++wave) {
-        stats.present[position] += gs_foldCount[wave];
-        stats.lowAmount[position] = min(stats.lowAmount[position], gs_foldLow[wave]);
-        stats.highAmount[position] = max(stats.highAmount[position], gs_foldHigh[wave]);
+        presentCells += gs_foldCount[wave];
+        lowAmount = min(lowAmount, gs_foldLow[wave]);
+        highAmount = max(highAmount, gs_foldHigh[wave]);
         totalLow += gs_foldSumLow[wave];
         totalHigh += gs_foldSumHigh[wave];
     }
 
+    // 位置 position の欄だけに書く(動的な添字で書かない。T-1266。position の欄は 0 から始まるので、前の形の += と同じ)
     const MrWide sum = CombineFoldSum((int64_t)totalHigh, totalLow);
-    stats.sumLow[position] = sum.hi;
-    stats.sumHigh[position] = sum.top;
+    [unroll] for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES; ++k) {
+        if (k != position)
+            continue;
+
+        stats.species[k] = id;
+        stats.present[k] += presentCells;
+        stats.lowAmount[k] = lowAmount;
+        stats.highAmount[k] = max(stats.highAmount[k], highAmount);
+        stats.sumLow[k] = sum.hi;
+        stats.sumHigh[k] = sum.top;
+    }
 
     return stats;
 }
@@ -996,8 +1021,12 @@ bool FoldsNearly(uint32_t slot, MrBlock block, uint32_t index, MrFoldTolerance t
 
     const MrFoldValue value = MrFoldStatsValue(stats);
     AddLedgerCarrying(block.level - 3, 0, value.energyRemainder << 55u);
-    for (uint32_t i = 0; i < stats.speciesCount; ++i)
+    [unroll] for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i) {  // 決まった数まで回して成分の数で抜ける(T-1266)
+        if (i >= stats.speciesCount)
+            break;
+
         AddLedgerCarrying(block.level - 3, 1 + stats.species[i], value.amountRemainders[i] << 55u);
+    }
 
     g_cells[slot] = value.cell;
 

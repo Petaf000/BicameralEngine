@@ -308,41 +308,99 @@ FX_FN bool MrFractionIsZero(MrFraction fraction) {
     return fraction.energy == 0 && fraction.speciesCount == 0;
 }
 
+// --- 成分の一覧(セル・端数)を読む・書く(T-1266。reaction.hlsli の RX_SPECIES_AT と同じ考え)---
+// GPU のインラインの形(RxCell・MrFraction)は、成分の数までの回し(動的な添字)で配列を読み書きすると 1 スレッドの局所の配列になる
+// (CLAUDE.md §4・T-0397)。GPU は決まった数(RX_MAX_CELL_SPECIES)まで回して成分の数で抜け、欄は決まった数から選ぶ・書く(回しが開いて
+// 1 つの欄に畳まれる)。C++ は成分の数まで・配列をそのまま(上限の無い形 RxWideCell・MrWideFraction も同じ関数)。
+// 使い方: for (uint32_t i = 0; i < MR_LIST_END(list); ++i) { if (i >= list.speciesCount) break; … MR_SPECIES_AT(list, i) … }
+#ifdef __cplusplus
+#define MR_LIST_END(list) (list).speciesCount
+#define MR_SPECIES_AT(list, i) (list).species[i]
+#define MR_AMOUNT_AT(list, i) (list).amounts[i]
+#define MR_SET_ENTRY(list, i, speciesId, amount) \
+    (list).species[i] = speciesId;               \
+    (list).amounts[i] = amount
+#else
+FX_FN uint32_t MrPickU32(uint32_t values[RX_MAX_CELL_SPECIES], uint32_t index) {
+    uint32_t value = 0;
+    FX_UNROLL for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES; ++k) value = k == index ? values[k] : value;
+
+    return value;
+}
+
+FX_FN uint64_t MrPickU64(uint64_t values[RX_MAX_CELL_SPECIES], uint32_t index) {
+    uint64_t value = 0;
+    FX_UNROLL for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES; ++k) value = k == index ? values[k] : value;
+
+    return value;
+}
+
+FX_FN void MrPutEntry(inout uint32_t species[RX_MAX_CELL_SPECIES], inout uint64_t amounts[RX_MAX_CELL_SPECIES],
+                      uint32_t index, uint32_t speciesId, uint64_t amount) {
+    FX_UNROLL for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES; ++k) {
+        species[k] = k == index ? speciesId : species[k];
+        amounts[k] = k == index ? amount : amounts[k];
+    }
+}
+
+#define MR_LIST_END(list) RX_MAX_CELL_SPECIES
+#define MR_SPECIES_AT(list, i) MrPickU32((list).species, i)
+#define MR_AMOUNT_AT(list, i) MrPickU64((list).amounts, i)
+#define MR_SET_ENTRY(list, i, speciesId, amount) MrPutEntry((list).species, (list).amounts, i, speciesId, amount)
+#endif
+
+// 子 2³ の回しの印(T-1266): 今は開かない(空)。開くと(FX_UNROLL)子の並びの局所の配列([64 x i32/i64])は消えるが、
+// ドライバのシェーダーの作成(キャッシュの冷えた時)が 1 本 数秒〜数十秒に延びた(RTX 3070 Ti: multires_step_wait 74.5 s・
+// Work Graph Multires 41 s。開かない形は 1 s 前後)。刻みの費用はどちらも同じ。溢れを使う世界(MR_WIDE_CELLS)は開くと命令が
+// 1.7 倍になるので、どちらにしても開かない。仮(ユーザー未確認。チケット T-1266 の【エンジン】の問い)
+#define MR_CHILDREN_UNROLL
+
 // 端数・セルを読む道具は形(MrFraction・RxCell / C++ の MrWideFraction・RxWideCell)のテンプレート(T-0187)
-template <typename Fraction>
-FX_FN uint64_t MrFractionOf(Fraction fraction, uint32_t speciesId) {
-    for (uint32_t i = 0; i < fraction.speciesCount; ++i) {
-        if (fraction.species[i] == speciesId)
-            return fraction.amounts[i];
+template <typename List>
+FX_FN uint64_t MrListAmountOf(List list, uint32_t speciesId) {
+    uint64_t amount = 0;
+    for (uint32_t i = 0; i < MR_LIST_END(list); ++i) {
+        if (i >= list.speciesCount)
+            break;
+
+        if (MR_SPECIES_AT(list, i) == speciesId) {
+            amount = MR_AMOUNT_AT(list, i);
+            break;
+        }
     }
 
-    return 0;
+    return amount;
+}
+
+template <typename Fraction>
+FX_FN uint64_t MrFractionOf(Fraction fraction, uint32_t speciesId) {
+    return MrListAmountOf(fraction, speciesId);
 }
 
 template <typename Cell>
 FX_FN uint64_t MrAmountOf(Cell cell, uint32_t speciesId) {
-    const uint32_t slot = RxFindSlot(cell, speciesId);
-    if (slot == RX_NO_SLOT)
-        return 0;
+    return MrListAmountOf(cell, speciesId);
+}
 
-    return cell.amounts[slot];
+// 一覧の中で after より大きい最小の物質 ID と next の小さい方
+template <typename List>
+FX_FN uint32_t MrListNextSpecies(List list, uint32_t after, uint32_t next) {
+    for (uint32_t i = 0; i < MR_LIST_END(list); ++i) {
+        if (i >= list.speciesCount)
+            break;
+
+        const uint32_t id = MR_SPECIES_AT(list, i);
+        if (id > after && id < next)
+            next = id;
+    }
+
+    return next;
 }
 
 // セルと端数の一覧で、after より大きい最小の物質 ID(無ければ MR_NO_SPECIES)。どちらの一覧も ID の昇順
 template <typename Cell, typename Fraction>
 FX_FN uint32_t MrNextSpecies(Cell cell, Fraction fraction, uint32_t after) {
-    uint32_t next = MR_NO_SPECIES;
-    for (uint32_t i = 0; i < cell.speciesCount; ++i) {
-        if (cell.species[i] > after && cell.species[i] < next)
-            next = cell.species[i];
-    }
-
-    for (uint32_t i = 0; i < fraction.speciesCount; ++i) {
-        if (fraction.species[i] > after && fraction.species[i] < next)
-            next = fraction.species[i];
-    }
-
-    return next;
+    return MrListNextSpecies(fraction, after, MrListNextSpecies(cell, after, MR_NO_SPECIES));
 }
 
 // --- 192bit の和 -------------------------------------------------------------------------------
@@ -433,8 +491,7 @@ template <typename Coarsened>
 FX_FN Coarsened MrAppendCoarsened(Coarsened result, uint32_t species, MrWideShifted shifted) {
     if (shifted.whole != 0 && RxHasRoomForSpecies(result.cell)) {
         result.cell = RxCellWithRoom(result.cell);
-        result.cell.species[result.cell.speciesCount] = species;
-        result.cell.amounts[result.cell.speciesCount] = shifted.whole;
+        MR_SET_ENTRY(result.cell, result.cell.speciesCount, species, shifted.whole);
         result.cell.speciesCount += 1;
     } else if (shifted.whole != 0) {
         result.overflowCount += 1;
@@ -442,8 +499,7 @@ FX_FN Coarsened MrAppendCoarsened(Coarsened result, uint32_t species, MrWideShif
 
     if (shifted.fraction != 0 && MrFractionHasRoom(result.fraction)) {
         result.fraction = MrFractionWithRoom(result.fraction);
-        result.fraction.species[result.fraction.speciesCount] = species;
-        result.fraction.amounts[result.fraction.speciesCount] = shifted.fraction;
+        MR_SET_ENTRY(result.fraction, result.fraction.speciesCount, species, shifted.fraction);
         result.fraction.speciesCount += 1;
     } else if (shifted.fraction != 0) {
         result.overflowCount += 1;
@@ -464,8 +520,16 @@ FX_FN Coarsened MrRecordLost(Coarsened result, uint32_t species, uint32_t lostBi
     }
 
     result = MrWithLostRoom(result);
+#ifdef __cplusplus
     result.lostSpecies[result.lostSpeciesCount] = species;
     result.lostBits[result.lostSpeciesCount] = lostBits;
+#else
+    // 動的な添字で書かない(T-1266。上の MR_SET_ENTRY と同じ)
+    FX_UNROLL for (uint32_t k = 0; k < MR_MAX_LOST_SPECIES; ++k) {
+        result.lostSpecies[k] = k == result.lostSpeciesCount ? species : result.lostSpecies[k];
+        result.lostBits[k] = k == result.lostSpeciesCount ? lostBits : result.lostBits[k];
+    }
+#endif
     result.lostSpeciesCount += 1;
 
     return result;
@@ -477,8 +541,9 @@ FX_FN Coarsened MrRecordLost(Coarsened result, uint32_t species, uint32_t lostBi
 template <typename Children, typename Coarsened>
 FX_FN Coarsened MrCoarsenCellOf(Children children, Coarsened result) {
     // --- エネルギー(符号つき)---
+    // 子の回しは開く(子の番号を定数にして、子 2³ の並びを動的な添字で読まない。T-1266)
     MrWide energy = MrMakeWide();
-    for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
+    MR_CHILDREN_UNROLL for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
         const int64_t whole = children.cells[j].energy;
         energy = MrWideAdd(energy, (uint64_t)whole, whole < 0, children.fractions[j].energy);
     }
@@ -496,7 +561,7 @@ FX_FN Coarsened MrCoarsenCellOf(Children children, Coarsened result) {
     const uint32_t stepLimit = MrUnionStepLimit(children);
     for (uint32_t step = 0; step < stepLimit; ++step) {
         uint32_t next = MR_NO_SPECIES;
-        for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
+        MR_CHILDREN_UNROLL for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
             const uint32_t candidate = MrNextSpecies(children.cells[j], children.fractions[j], species);
             next = candidate < next ? candidate : next;
         }
@@ -506,7 +571,7 @@ FX_FN Coarsened MrCoarsenCellOf(Children children, Coarsened result) {
 
         species = next;
         MrWide amount = MrMakeWide();
-        for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
+        MR_CHILDREN_UNROLL for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
             amount = MrWideAdd(amount, MrAmountOf(children.cells[j], species), false,
                                MrFractionOf(children.fractions[j], species));
         }
@@ -607,27 +672,31 @@ template <typename Table, typename Cell, typename Family>
 FX_FN Family MrPullBackShadowOf(Table table, Cell parent, Family family) {
     Family result = family;
     result.clamped = 0;
+    // 子の回しは開く(子の番号を定数にして、子 2³ の並びを動的な添字で読み書きしない。T-1266)
     // NOLINTNEXTLINE(modernize-loop-convert) HLSL には範囲 for が無い
-    for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j)
-        result.cells[j] = RxEmptyCellLike(family.cells[j], 0);
+    FX_UNROLL for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) result.cells[j] = RxEmptyCellLike(family.cells[j], 0);
 
     // --- 物質 ---
-    for (uint32_t p = 0; p < parent.speciesCount; ++p) {
-        const uint32_t species = parent.species[p];
-        FX_ASSERT((parent.amounts[p] >> (64 - MR_LEVEL_SHIFT)) == 0);
+    for (uint32_t p = 0; p < MR_LIST_END(parent); ++p) {
+        if (p >= parent.speciesCount)
+            break;
+
+        const uint32_t species = MR_SPECIES_AT(parent, p);
+        const uint64_t parentAmount = MR_AMOUNT_AT(parent, p);
+        FX_ASSERT((parentAmount >> (64 - MR_LEVEL_SHIFT)) == 0);
         MrShares weights;
-        for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j)
+        FX_UNROLL for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j)
             weights.values[j] = MrAmountOf(family.cells[j], species);
 
-        const MrShares shares = MrDistribute(parent.amounts[p] << MR_LEVEL_SHIFT, weights);
-        for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j)
+        const MrShares shares = MrDistribute(parentAmount << MR_LEVEL_SHIFT, weights);
+        FX_UNROLL for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j)
             result.cells[j] = RxAddSpecies(result.cells[j], species, shares.values[j]);
     }
 
     // --- エネルギー: 下限(化学のエネルギーの mJ への切り上げ。いったん子のエネルギーに置く)と、残りの配り方の重み(今の熱)---
     int64_t floorSum = 0;
     MrShares heatWeights;
-    for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
+    FX_UNROLL for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
         result.cells[j].energy = MrCeilMillijoules(RxChemicalEnergy(table, result.cells[j]));
         floorSum += result.cells[j].energy;
 
@@ -644,8 +713,8 @@ FX_FN Family MrPullBackShadowOf(Table table, Cell parent, Family family) {
     }
 
     const MrShares spareShares = MrDistribute((uint64_t)spare, heatWeights);
-    for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j)
-        result.cells[j].energy += (int64_t)spareShares.values[j];
+    FX_UNROLL for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) result.cells[j].energy += (int64_t)
+                                                                                                spareShares.values[j];
 
     return result;
 }
@@ -701,6 +770,22 @@ FX_FN MrLimitTally MrAddLimits(MrLimitTally tally, uint32_t limits) {
     return tally;
 }
 
+// 八分の一 octant の本物の子(無ければ MR_NO_BLOCK)。インラインの GPU は 8 つから選ぶ(見出しの写しの children を動的な添字で
+// 読むと局所の配列になる。T-1266)。溢れを使う世界の GPU(MR_WIDE_CELLS)は選ぶと刻みの段の局所の配列がかえって増えたので
+// (multires_step_wide_wait 101 → 102〜105)、配列をそのまま読む
+#if defined(__cplusplus) || defined(MR_WIDE_CELLS)
+#define MR_CHILD_OF(block, octant) (block).children[octant]
+#else
+FX_FN uint32_t MrChildOf(MrBlock block, uint32_t octant) {
+    uint32_t child = MR_NO_BLOCK;
+    FX_UNROLL for (uint32_t k = 0; k < 8; ++k) child = k == octant ? block.children[k] : child;
+
+    return child;
+}
+
+#define MR_CHILD_OF(block, octant) MrChildOf(block, octant)
+#endif
+
 // このセルを刻むか: 使っているブロックで、本物の子に覆われていない(影のブロックは中間のセルも刻む。世界の写しは刻まない)
 FX_FN bool MrIsSteppedCell(MrBlock block, uint32_t index) {
     if (block.kind == MR_BLOCK_UNUSED || block.kind == MR_BLOCK_MIRROR)
@@ -709,7 +794,7 @@ FX_FN bool MrIsSteppedCell(MrBlock block, uint32_t index) {
     if (block.kind == MR_BLOCK_SHADOW)
         return true;
 
-    return block.children[MrOctantOfCell(index)] == MR_NO_BLOCK;
+    return MR_CHILD_OF(block, MrOctantOfCell(index)) == MR_NO_BLOCK;
 }
 
 // --- 一様なブロック(T-0102)----------------------------------------------------------------------
@@ -725,7 +810,7 @@ FX_FN bool MrIsUniform(MrBlock block) {
 
 // 本物の子に覆われたセルか(覆われたセルは空)
 FX_FN bool MrIsCoveredCell(MrBlock block, uint32_t index) {
-    return block.kind == MR_BLOCK_REAL && block.children[MrOctantOfCell(index)] != MR_NO_BLOCK;
+    return block.kind == MR_BLOCK_REAL && MR_CHILD_OF(block, MrOctantOfCell(index)) != MR_NO_BLOCK;
 }
 
 // 一様なブロックのセル index(覆われていれば空、でなければ値 value)。頁に広げる時もこれで埋める
@@ -906,13 +991,28 @@ FX_FN MrFoldStats MrFoldStatsWithRoom(MrFoldStats stats) {
 }
 
 // 成分の位置(物質 ID の昇順に並べた時に入る位置)。以下の集計の関数は集計の形 Stats(とセルの形 Cell)のテンプレート
+// (成分は ID の昇順なので、位置 = speciesId より小さい成分の数。GPU は決まった数を回して数える。T-1266)
 template <typename Stats>
 FX_FN uint32_t MrFoldSpeciesPosition(Stats stats, uint32_t speciesId) {
     uint32_t position = 0;
+#ifdef __cplusplus
     while (position < stats.speciesCount && stats.species[position] < speciesId)
         position += 1;
+#else
+    FX_UNROLL for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES; ++k)
+        position += k < stats.speciesCount && stats.species[k] < speciesId ? 1u : 0u;
+#endif
 
     return position;
+}
+
+// 位置 position の成分が speciesId か(GPU は決まった数から選ぶ。T-1266)
+template <typename Stats>
+FX_FN bool MrFoldHasSpeciesAt(Stats stats, uint32_t position, uint32_t speciesId) {
+    if (position >= stats.speciesCount)
+        return false;
+
+    return MR_SPECIES_AT(stats, position) == speciesId;
 }
 
 // 成分が無ければ ID の順の位置に空けて差し込む(一杯なら tooManySpecies)
@@ -929,6 +1029,7 @@ FX_FN Stats MrFoldInsertSpecies(Stats stats, uint32_t speciesId) {
 
     stats = MrFoldStatsWithRoom(stats);
 
+#ifdef __cplusplus
     for (uint32_t i = stats.speciesCount; i > position; --i) {
         stats.species[i] = stats.species[i - 1];
         stats.present[i] = stats.present[i - 1];
@@ -944,7 +1045,58 @@ FX_FN Stats MrFoldInsertSpecies(Stats stats, uint32_t speciesId) {
     stats.highAmount[position] = 0;
     stats.sumHigh[position] = 0;
     stats.sumLow[position] = 0;
+#else
+    // 動的な添字で写さない(T-1266): 後ろから決まった数を回し、(position, 成分の数] の欄を 1 つ前から写してから position に置く
+    // (後ろから回すので、写し元の k − 1 はまだ書き換えていない)
+    FX_UNROLL for (uint32_t k = RX_MAX_CELL_SPECIES - 1; k >= 1; --k) {
+        const bool shift = k > position && k <= stats.speciesCount;
+        stats.species[k] = shift ? stats.species[k - 1] : stats.species[k];
+        stats.present[k] = shift ? stats.present[k - 1] : stats.present[k];
+        stats.lowAmount[k] = shift ? stats.lowAmount[k - 1] : stats.lowAmount[k];
+        stats.highAmount[k] = shift ? stats.highAmount[k - 1] : stats.highAmount[k];
+        stats.sumHigh[k] = shift ? stats.sumHigh[k - 1] : stats.sumHigh[k];
+        stats.sumLow[k] = shift ? stats.sumLow[k - 1] : stats.sumLow[k];
+    }
+
+    FX_UNROLL for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES; ++k) {
+        const bool here = k == position;
+        stats.species[k] = here ? speciesId : stats.species[k];
+        stats.present[k] = here ? 0u : stats.present[k];
+        stats.lowAmount[k] = here ? (uint64_t)0 : stats.lowAmount[k];
+        stats.highAmount[k] = here ? (uint64_t)0 : stats.highAmount[k];
+        stats.sumHigh[k] = here ? (uint64_t)0 : stats.sumHigh[k];
+        stats.sumLow[k] = here ? (uint64_t)0 : stats.sumLow[k];
+    }
+#endif
     stats.speciesCount += 1;
+
+    return stats;
+}
+
+// 位置 position の成分に、セル 1 つの量 amount を足す(数・最小・最大・128bit の和)
+template <typename Stats>
+FX_FN Stats MrFoldAddAmountAt(Stats stats, uint32_t position, uint64_t amount) {
+#ifdef __cplusplus
+    const bool first = stats.present[position] == 0;
+    stats.present[position] += 1;
+    stats.lowAmount[position] = first || amount < stats.lowAmount[position] ? amount : stats.lowAmount[position];
+    stats.highAmount[position] = amount > stats.highAmount[position] ? amount : stats.highAmount[position];
+    stats.sumLow[position] += amount;
+    stats.sumHigh[position] += stats.sumLow[position] < amount ? 1u : 0u;
+#else
+    // 動的な添字で読み書きしない(T-1266)。position の欄だけ同じ式で変わる
+    FX_UNROLL for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES; ++k) {
+        if (k != position)
+            continue;
+
+        const bool first = stats.present[k] == 0;
+        stats.present[k] += 1;
+        stats.lowAmount[k] = first || amount < stats.lowAmount[k] ? amount : stats.lowAmount[k];
+        stats.highAmount[k] = amount > stats.highAmount[k] ? amount : stats.highAmount[k];
+        stats.sumLow[k] += amount;
+        stats.sumHigh[k] += stats.sumLow[k] < amount ? 1u : 0u;
+    }
+#endif
 
     return stats;
 }
@@ -958,20 +1110,19 @@ FX_FN Stats MrAddFoldCell(Stats stats, Cell cell, int32_t temperature) {
     stats.energy = MrWideAdd(stats.energy, (uint64_t)cell.energy, cell.energy < 0, 0);
 
     uint64_t total = 0;
-    for (uint32_t i = 0; i < cell.speciesCount; ++i) {
-        const uint64_t amount = cell.amounts[i];
+    for (uint32_t i = 0; i < MR_LIST_END(cell); ++i) {
+        if (i >= cell.speciesCount)
+            break;
+
+        const uint32_t speciesId = MR_SPECIES_AT(cell, i);
+        const uint64_t amount = MR_AMOUNT_AT(cell, i);
         total = total + amount < total ? FX_U64(0xFFFFFFFFu, 0xFFFFFFFFu) : total + amount;
-        stats = MrFoldInsertSpecies(stats, cell.species[i]);
-        const uint32_t position = MrFoldSpeciesPosition(stats, cell.species[i]);
-        if (position >= stats.speciesCount || stats.species[position] != cell.species[i])
+        stats = MrFoldInsertSpecies(stats, speciesId);
+        const uint32_t position = MrFoldSpeciesPosition(stats, speciesId);
+        if (!MrFoldHasSpeciesAt(stats, position, speciesId))
             continue;
 
-        const bool first = stats.present[position] == 0;
-        stats.present[position] += 1;
-        stats.lowAmount[position] = first || amount < stats.lowAmount[position] ? amount : stats.lowAmount[position];
-        stats.highAmount[position] = amount > stats.highAmount[position] ? amount : stats.highAmount[position];
-        stats.sumLow[position] += amount;
-        stats.sumHigh[position] += stats.sumLow[position] < amount ? 1u : 0u;
+        stats = MrFoldAddAmountAt(stats, position, amount);
     }
 
     stats.highTotal = total > stats.highTotal ? total : stats.highTotal;
@@ -992,7 +1143,10 @@ FX_FN bool MrFoldStatsWithin(Stats stats, MrFoldTolerance tolerance) {
                                      ? 0
                                      : stats.highTotal >> tolerance.amountShift;
     bool within = true;
-    for (uint32_t i = 0; i < stats.speciesCount; ++i) {
+    for (uint32_t i = 0; i < MR_LIST_END(stats); ++i) {
+        if (i >= stats.speciesCount)
+            break;
+
         const uint64_t low = stats.present[i] < stats.cellCount ? 0 : stats.lowAmount[i];
         within = within && stats.highAmount[i] - low <= amountLimit;
     }
@@ -1043,7 +1197,10 @@ FX_FN Value MrFoldStatsValueOf(Stats stats, Value value) {
     value.cell = RxEmptyCellLike(value.cell, (int64_t)energy.quotient);
     value.energyRemainder = energy.remainder;
     value = MrFoldValueWithRoom(value, stats.speciesCount);
-    for (uint32_t i = 0; i < stats.speciesCount; ++i) {
+    for (uint32_t i = 0; i < MR_LIST_END(stats); ++i) {
+        if (i >= stats.speciesCount)
+            break;
+
         FxU128 sum = {stats.sumHigh[i], stats.sumLow[i]};
         const FxDivResult amount = FxDivU128By64(sum, cells);
         value.cell = RxAddSpecies(value.cell, stats.species[i], amount.quotient);

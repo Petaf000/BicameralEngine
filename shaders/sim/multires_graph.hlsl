@@ -489,8 +489,7 @@ template <>
 GpuWideCoarsened MrAppendCoarsened<GpuWideCoarsened>(GpuWideCoarsened result, uint32_t species, MrWideShifted shifted) {
     if (shifted.whole != 0) {
         if (result.cellTotal < RX_MAX_CELL_SPECIES) {
-            result.cell.species[result.cellTotal] = species;
-            result.cell.amounts[result.cellTotal] = shifted.whole;
+            MR_SET_ENTRY(result.cell, result.cellTotal, species, shifted.whole);  // 動的な添字で書かない(T-1266)
             result.cell.speciesCount += 1;
         } else if (result.mode == COARSEN_WRITE && result.pageArea != MR_NO_PAGE) {
             WriteTailEntry(result.pageArea, result.pageSide,
@@ -502,8 +501,7 @@ GpuWideCoarsened MrAppendCoarsened<GpuWideCoarsened>(GpuWideCoarsened result, ui
 
     if (shifted.fraction != 0) {
         if (result.fractionTotal < RX_MAX_CELL_SPECIES) {
-            result.fraction.species[result.fractionTotal] = species;
-            result.fraction.amounts[result.fractionTotal] = shifted.fraction;
+            MR_SET_ENTRY(result.fraction, result.fractionTotal, species, shifted.fraction);
             result.fraction.speciesCount += 1;
         } else if (result.mode == COARSEN_WRITE && result.fractionArea != MR_NO_PAGE) {
             WriteTailEntry(result.fractionArea, result.fractionSide,
@@ -823,7 +821,7 @@ void CoarsenRequest(uint32_t request, uint32_t t) {
                                                     uint3(MR_NO_PAGE, 0, 0));
 #else
     MrChildren children;
-    for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
+    [unroll] for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
         const uint32_t index = MrChildCell(t, j);
         children.cells[j] = LoadBlockCell(child, childSlot, index);
         children.fractions[j] = LoadFraction(child.fraction, index);
@@ -841,8 +839,13 @@ void CoarsenRequest(uint32_t request, uint32_t t) {
         AddToLedger(child.level, 0, result.energyLostBits);
 
 #ifndef MR_WIDE_CELLS
-    for (uint32_t k = 0; k < result.lostSpeciesCount; ++k)
+    // 落ちた分の一覧は決まった数まで回して数で抜ける(動的な添字で読まない。T-1266)
+    [unroll] for (uint32_t k = 0; k < MR_MAX_LOST_SPECIES; ++k) {
+        if (k >= result.lostSpeciesCount)
+            break;
+
         AddToLedger(child.level, 1 + result.lostSpecies[k], result.lostBits[k]);
+    }
 #endif
 
     // --- 親の端数: 枠が無ければ取っておいた枠(八分の一の外を 0 で始める)。残りに 0 でない端数があるか。
@@ -1013,14 +1016,14 @@ void PullBackNode(DispatchNodeInputRecord<MrChainRecord> input, uint32_t thread 
 
     MrShadowFamily family;
     family.clamped = 0;
-    for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j)
+    [unroll] for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j)
         family.cells[j] = g_cells[PageCellAddress(shadow.page, MrChildCell(thread, j))];
 
     const MrShadowFamily pulled = MrPullBackShadow(MakeTable(), parent, family);
     if (pulled.clamped != 0)
         InterlockedAdd(g_counters[MR_COUNTER_SHADOW_CLAMPED], pulled.clamped);
 
-    for (uint32_t k = 0; k < MR_CHILDREN_PER_CELL; ++k)
+    [unroll] for (uint32_t k = 0; k < MR_CHILDREN_PER_CELL; ++k)
         g_cells[PageCellAddress(shadow.page, MrChildCell(thread, k))] = pulled.cells[k];
 
     // --- セルの値が変わりうるので、つついた印にして次の刻みに tc を書き直す(CPU の PullBackLevel。ADR-0018 追記 T-0125。
