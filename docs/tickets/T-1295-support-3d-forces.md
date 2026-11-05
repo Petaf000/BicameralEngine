@@ -17,3 +17,10 @@
 - [ ] 2 次元の法則を 3 次元の奥行 1 セルで置き換えるかを決める(置き換えれば 2 次元の試験の全部が 3 次元の道を通る。費用は節 × 6 成分。【エンジン】なら問いに)
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
+- 2026-11-05(wt3・引き継ぎメモ。巡目の締めで止めた。コードは未着手): T-1294(ブランチ t-1294-support-3d-mixed)の上で始める。次の一手:
+  (1) SupportFaceForces3D と FaceForces / FineFaceForces(AddBond で面の最初の項を [セル × 3 + 軸] に控え、6 つの項の力を読む。縁の力は面の中の軸 t の +側で
+  N + ε(n, k, t) × Flow(3 × 曲げの係数, Δφ_k)・角は 2 つの和。奥行 1 セルの x と上の面が 2 次元の FaceForces と同じ〔shearMn[0]・edgeMn[0]〕を support_3d の TestDepthOne で)。
+  (2) CarryFrom / IsFine(2 次元の CarriedValue の 3 次元: 8 つの平均〔回りは ÷ 4〕・粗いセルから剛体の動き u_i + ½ Σ ε(i, j, m) φ_j s_m・φ ÷ 2。conjugateDiscard)。
+  (3) 割れの法則の 3 次元の口・違う大きさの面の切り口の力・【エンジン】2 次元を置き換えるか(おすすめ仮: 置き換えず、世界に入れる前に support_cost で費用を測って決める)。
+  未実行の試験: なし(コードが無い)。float_check の ctest は T-1294 で流していない(source_float_check.py を手で通した)。
+
