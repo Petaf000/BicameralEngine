@@ -22,6 +22,7 @@
 #include "sim/case_b/case_b_flow.h"
 #include "sim/case_b/case_b_gauge.h"
 #include "sim/case_b/case_b_scene.h"
+#include "tree_slope_scene.h"
 
 namespace {
 
@@ -1455,6 +1456,191 @@ namespace {
             (unsigned long long)run.stats.heldGrainFaces, (unsigned long long)run.stats.surfaceLayerGrainFaces);
     }
 
+    // --- 15. 世界の木で細かくした斜面の空気の速さ(T-1257。D-664。全部には入れない): 世界の木の 8 つの根(0.5 m)に 25° の斜面を描き、
+    // 斜面を横切る八分の一を細かくした子(0.25 m)の粒の量を 0.25 m の箱に写して 4 秒流す(世界の木には 2 つ以上のレベルで空気と粒を
+    // 流す段がまだ無い。tests/tree_slope_scene.h)。細かくし方 3 つ(隣のブロックの列を読む T-1189・読まない T-1188・箱の細かさで描いた
+    // 斜面)と参考 2 つ(置かれ方なし = SAME・案 B の絵 → 箱の置かれ方 T-1106)。空気の最大の速さ(0.25・0.5・4 秒)と粒の最大を表に ---
+    namespace tree_slope = bicameral::test::tree_slope;
+
+    // 木の子の粒の量を箱のセルへ(床の石の段はそのまま)。空きに 1 気圧の空気(RefillSlopeNative と同じ入れ方)
+    void RefillSlopeFromTree(Box& box, const std::vector<uint64_t>& grain) {
+        const uint32_t fine = 1u << (uint32_t)box.config.level;
+        const uint32_t sand = MaterialIndex(box, "sand");
+        const uint32_t air = MaterialIndex(box, "air");
+        const uint64_t volume = CellVolumeMm3(box);
+        EXPECT(box.config.sizeX == tree_slope::FINE_WIDTH && box.config.sizeY == tree_slope::FINE_HEIGHT);
+        for (uint32_t x = 0; x < box.config.sizeX; ++x) {
+            for (uint32_t y = fine; y < box.config.sizeY; ++y) {
+                const uint32_t cell = CellIndex(box, x, y, 0);
+                const uint64_t grainVolume = tree_slope::GrainVolumeMm3(grain[(size_t)y * tree_slope::FINE_WIDTH + x],
+                                                                        volume);
+                CellMass(box, cell, sand) = (int64_t)(grainVolume * box.materials[sand].densityKgPerM3 / 1000);
+                CellMass(box, cell, air) = IdealGasMassMg((uint64_t)ATMOSPHERE_PA, volume - grainVolume,
+                                                          box.materials[air].molarMassMgPerMol, 300000);
+                box.energyMillijoules[cell] = ThermalEnergyMillijoules(box, cell, 300000);
+            }
+        }
+    }
+
+    struct SlopeAirRow {
+        std::array<int64_t, 3> air = {};  // 0.25・0.5・4 秒の空気の面の速さの最大(2^-20 m/s)
+        int64_t grain = 0;                // 4 秒の間の粒の面の速さの最大
+        uint64_t hash = 0;                // 刻みごとのハッシュの鎖
+    };
+
+    SlopeAirRow MeasureSlopeAir(const std::function<void(Box&)>& prepare) {
+        SlopeAirRow row;
+        const auto sample = [&](Box& box, uint64_t tick) {
+            const uint64_t perSecond = box.config.ticksPerSecond;
+            const std::array<uint64_t, 3> at = {perSecond / 4, perSecond / 2, perSecond * 4};
+            for (size_t index = 0; index < at.size(); ++index) {
+                if (tick == at[index])
+                    row.air[index] = MaxGasSpeed(box).speed;
+            }
+        };
+        const RunOptions options{.level = 1, .seconds = 4, .prepare = prepare, .afterTick = sample};
+        const Run run = RunR3(MakeSlopeScene(tree_slope::SLOPE_TAN_Q16), options, {"slope"});
+        for (const int64_t speed : run.grainSpeed)
+            row.grain = std::max(row.grain, speed);
+
+        row.hash = run.recording.HashChain();
+
+        return row;
+    }
+
+    // 粒の体積の割合(‰)
+    uint64_t GrainPermille(uint64_t amount) {
+        return tree_slope::GrainVolumeMm3(amount, 1000);
+    }
+
+    // 2 つの細かくし方で子の粒の量が違うセルの数と、割合の差の最大(‰)と場所
+    std::string GrainDifference(const tree_slope::Refined& a, const tree_slope::Refined& b) {
+        uint32_t cells = 0;
+        uint64_t largest = 0;
+        std::string where = "-";
+        for (size_t index = 0; index < a.grain.size(); ++index) {
+            if (a.grain[index] == b.grain[index])
+                continue;
+
+            ++cells;
+            const uint64_t pa = GrainPermille(a.grain[index]);
+            const uint64_t pb = GrainPermille(b.grain[index]);
+            const uint64_t difference = pa > pb ? pa - pb : pb - pa;
+            if (difference < largest)
+                continue;
+
+            largest = difference;
+            where = std::format("({},{}) {}‰/{}‰", index % tree_slope::FINE_WIDTH, index / tree_slope::FINE_WIDTH, pa,
+                                pb);
+        }
+
+        return std::format("{} セル・差の最大 {}‰ {}", cells, largest, where);
+    }
+
+    // 案 B の絵 → 箱(T-1106 の置かれ方)と、木の子を写した箱の砂の質量が違うセルの数と差の最大(詰まり切ったセルの ‰)
+    std::string PictureDifference(const std::vector<uint64_t>& grain) {
+        auto created = BuildScene(MakeSlopeScene(tree_slope::SLOPE_TAN_Q16), 1, MomentumLayout::GrainSeparate);
+        EXPECT(created.has_value());
+        if (!created.has_value())
+            return "-";
+
+        Box fromTree = *created;
+        RefillSlopeFromTree(fromTree, grain);
+        const uint32_t sand = MaterialIndex(*created, "sand");
+        const auto full = (int64_t)(CellVolumeMm3(*created) * 6 / 10 * created->materials[sand].densityKgPerM3 / 1000);
+        uint32_t cells = 0;
+        int64_t largest = 0;
+        std::string where = "-";
+        for (uint32_t cell = 0; cell < CellCount(*created); ++cell) {
+            const int64_t picture = CellMass(*created, cell, sand);
+            const int64_t tree = CellMass(fromTree, cell, sand);
+            if (picture == tree)
+                continue;
+
+            ++cells;
+            const int64_t difference = std::abs(picture - tree) * 1000 / full;
+            if (difference < largest)
+                continue;
+
+            largest = difference;
+            const std::array<uint32_t, 3> at = CellCoordinates(*created, cell);
+            where = std::format("({},{}) 絵 {}‰・木 {}‰", at[0], at[1], picture * 1000 / full, tree * 1000 / full);
+        }
+
+        return std::format("{} セル・差の最大 {}‰ {}", cells, largest, where);
+    }
+
+    void TreeSlope() {
+        const std::optional<bicameral::test::tree_place::Materials> materials = tree_slope::MakeSlopeMaterials();
+        EXPECT(materials.has_value());
+        if (!materials.has_value())
+            return;
+
+        using tree_slope::RefineMode;
+        using tree_slope::RefineOrder;
+        const tree_slope::Refined neighbors = tree_slope::RefineSlope(*materials, RefineMode::Neighbors,
+                                                                      RefineOrder::AtOnce);
+        const tree_slope::Refined neighborsFront = tree_slope::RefineSlope(*materials, RefineMode::Neighbors,
+                                                                           RefineOrder::Front);
+        const tree_slope::Refined isolated = tree_slope::RefineSlope(*materials, RefineMode::Isolated,
+                                                                     RefineOrder::AtOnce);
+        const tree_slope::Refined isolatedFront = tree_slope::RefineSlope(*materials, RefineMode::Isolated,
+                                                                          RefineOrder::Front);
+        const tree_slope::Refined same = tree_slope::RefineSlope(*materials, RefineMode::Same, RefineOrder::AtOnce);
+        for (const tree_slope::Refined* refined : {&neighbors, &neighborsFront, &isolated, &isolatedFront, &same}) {
+            EXPECT(refined->allRefined);
+            EXPECT(refined->conserved);
+        }
+
+        // 2 回の実行で同じ(木の状態の要約)
+        EXPECT(tree_slope::RefineSlope(*materials, RefineMode::Neighbors, RefineOrder::AtOnce).hash == neighbors.hash);
+        EXPECT(tree_slope::RefineSlope(*materials, RefineMode::Neighbors, RefineOrder::Front).hash ==
+               neighborsFront.hash);
+        EXPECT(tree_slope::RefineSlope(*materials, RefineMode::Isolated, RefineOrder::AtOnce).hash == isolated.hash);
+        std::printf("  木で細かくした八分の一 %u(一様でないもの。残りは空気だけの一様な根)\n",
+                    neighbors.refinedOctants);
+        std::printf(
+            "  木で細かくした子の粒(z = 0 の断面):\n    隣を読む ⇔ 読まない: %s\n    隣を読む ⇔ 隣を読む・前線の順: "
+            "%s\n"
+            "    隣を読む ⇔ SAME: %s\n",
+            GrainDifference(neighbors, isolated).c_str(), GrainDifference(neighbors, neighborsFront).c_str(),
+            GrainDifference(neighbors, same).c_str());
+        std::printf(
+            "    案 B の絵 → 箱 ⇔ 隣を読む: %s\n    案 B の絵 → 箱 ⇔ 読まない: %s\n    案 B の絵 → 箱 ⇔ "
+            "隣を読む・前線の順: %s\n",
+            PictureDifference(neighbors.grain).c_str(), PictureDifference(isolated.grain).c_str(),
+            PictureDifference(neighborsFront.grain).c_str());
+
+        struct Case {
+            const char* name;
+            std::function<void(Box&)> prepare;
+        };
+        const auto fromTree = [](const tree_slope::Refined& refined) {
+            return [&refined](Box& box) {
+                RefillSlopeFromTree(box, refined.grain);
+            };
+        };
+        const std::array<Case, 7> cases = {{
+            {"木・隣のブロックの列を読む(T-1189・既定)・一度に", fromTree(neighbors)},
+            {"木・隣を読む・前線の順(1 刻みに根ごと 1 つ)", fromTree(neighborsFront)},
+            {"木・隣を読まない(T-1188)・一度に", fromTree(isolated)},
+            {"木・隣を読まない・前線の順", fromTree(isolatedFront)},
+            {"箱の細かさで描いた斜面(native)", [](Box& box) { RefillSlopeNative(box, tree_slope::SLOPE_TAN_Q16); }},
+            {"(参考)木・置かれ方なし(SAME)", fromTree(same)},
+            {"(参考)案 B の絵 → 箱(T-1106 の既定)", {}},
+        }};
+        std::printf("  | 細かくし方 | 0.25 秒 | 0.5 秒 | 4 秒 | 粒の最大 |\n  |---|---|---|---|---|\n");
+        for (size_t index = 0; index < cases.size(); ++index) {
+            const Case& item = cases[index];
+            const SlopeAirRow row = MeasureSlopeAir(item.prepare);
+            std::printf("  | %s | %lld mm/s | %lld mm/s | %lld mm/s | %lld mm/s |\n", item.name,
+                        (long long)MillimetersPerSecond(row.air[0]), (long long)MillimetersPerSecond(row.air[1]),
+                        (long long)MillimetersPerSecond(row.air[2]), (long long)MillimetersPerSecond(row.grain));
+            if (index == 0)
+                EXPECT(MeasureSlopeAir(item.prepare).hash == row.hash);  // 2 回の実行で同じ(刻みごとのハッシュの鎖)
+        }
+    }
+
     // --- 8. 置き場 ① で同じ場面(④ との比べ)---
     void PlaceOne() {
         const PileResult pile = Pile(0, MomentumLayout::PerPhase);
@@ -1469,6 +1655,7 @@ int main(int argc, char** argv) {
     // 引数で場面を 1 つに絞れる(1 = 砂山と決定性・2 = 掘る・3 = 勢いで走る・4 = 砂時計・5 = 濡れた砂・
     // 6 = 詰めると重い・7 = 穴の口・8 = 置き場 ①・9 = 斜面 25° と 45°)。無ければ全部
     // 10 = 止まる角度と崩れ始める角度(T-0997。全部には入れない。2 つ目の引数 = 差の度)
+    // 15 = 世界の木で細かくした斜面の空気の速さ(T-1257。全部には入れない)
     // 動いている粒の速さのしきい値(T-1004): 場面 1〜9 は 2 つ目の引数・場面 10 は 3 つ目の引数(mm/s。0 = 分けない)
     // 引数の turn(受け止めた縦の運動量を横へ。T-1046)・vacuum(空気を抜く)は数えずに取り除く
     int kept = 1;
@@ -1550,6 +1737,13 @@ int main(int argc, char** argv) {
         // 砂山 1 つ(T-1137。全部には入れない): 2 つ目の引数 = レベル(0 = 0.5 m・1 = 0.25 m・-2 = 2 m)・3 つ目 = 秒(既定 20)
         const int32_t level = argc > 2 ? std::stoi(argv[2]) : 0;
         Pile(level, MomentumLayout::GrainSeparate, argc > 3 ? (uint64_t)std::stoi(argv[3]) : 20);
+        std::printf("case_b r3: %d failure(s)\n", failureCount);
+
+        return failureCount == 0 ? 0 : 1;
+    }
+
+    if (only == 15) {
+        TreeSlope();  // 世界の木で細かくした斜面の空気の速さ(T-1257。全部には入れない)
         std::printf("case_b r3: %d failure(s)\n", failureCount);
 
         return failureCount == 0 ? 0 : 1;

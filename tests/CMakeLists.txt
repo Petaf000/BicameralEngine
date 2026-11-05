@@ -442,6 +442,9 @@ add_executable(case_b_r3_test case_b_r3_test.cpp)
 target_link_libraries(case_b_r3_test PRIVATE bicameral_case_b bicameral_core)
 add_test(NAME case_b_r3 COMMAND case_b_r3_test)
 set_tests_properties(case_b_r3 PROPERTIES TIMEOUT 1800)
+# 世界の木で細かくした斜面の空気の速さ(T-1257。木で細かくした子を案 B の 0.25 m の箱に写して 4 秒流す)
+add_test(NAME case_b_r3_tree_slope COMMAND case_b_r3_test 15)
+set_tests_properties(case_b_r3_tree_slope PROPERTIES TIMEOUT 1800)
 # 引きずりの一般の形の模型(D-487 ④・T-0493): 交差の引きずり(結合の強さ q)と、気体の箱の中の燃える木箱で煙が熱を運ぶ(CPU)
 add_executable(drag_model_test drag_model_test.cpp)
 target_link_libraries(drag_model_test PRIVATE bicameral_gas bicameral_reaction bicameral_core)
@@ -1353,6 +1356,6 @@ foreach(_name IN ITEMS
     gpu_conduct_bench gpu_implicit_box_bench gpu_place_bench blank_world_test gpu_probe_blank_test gpu_probe_gas_test
     gpu_probe_liquid_test world_layout_test play_metric_test
     gpu_play_metric_test gpu_radiation_cost_test environment_package_test multires_graded_test placement_refine_test
-    tree_refine_placement_test gpu_phase_layer_test gpu_tree_refine_placement_test)
+    tree_refine_placement_test gpu_phase_layer_test gpu_tree_refine_placement_test case_b_r3_test)
   target_link_libraries(${_name} PRIVATE bicameral_test_reaction_table)
 endforeach()
