@@ -2,7 +2,11 @@
 // gpu_equilibrium_block_test(成分を持つ節の GPU 版と CPU のビット一致。T-0970・T-1104・T-1279)・support_mixed_test(T-1120)が同じ場面を使う。縦の面・奥行 1 セル(3 次元の support_3d_test へは Extruded。T-0960)。
 #pragma once
 
+#include <algorithm>
+#include <array>
+#include <cmath>
 #include <cstdint>
+#include <vector>
 
 #include "sim/support_law.h"
 #include "sim/support_law_3d.h"
@@ -144,6 +148,147 @@ namespace bicameral::test {
         scene.clamps[0] = sim::Support3Clamp(sim::SUPPORT3_X, -1);
 
         return scene;
+    }
+
+    // --- 3 次元の段の形(T-1293。support_3d_test が連続体と比べ・gpu_equilibrium_block_test が GPU と比べる)。試験の場面なので浮動小数点で形を作る ---
+    using Vec3 = std::array<double, 3>;
+
+    inline double Dot(const Vec3& a, const Vec3& b) {
+        return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+    }
+
+    inline Vec3 CrossD(const Vec3& a, const Vec3& b) {
+        return {a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]};
+    }
+
+    inline Vec3 Unit(Vec3 a) {
+        const double length = std::sqrt(Dot(a, a));
+        return {a[0] / length, a[1] / length, a[2] / length};
+    }
+
+    struct StairScene {
+        sim::SupportScene3D scene;
+        std::vector<std::array<uint32_t, 3>> probe;  // 見るセル(梁の先・アーチの頂)
+    };
+
+    inline sim::SupportScene3D EmptyScene(uint32_t width, uint32_t height, uint32_t depth, uint64_t cellMm) {
+        sim::SupportScene3D scene;
+        scene.width = width;
+        scene.height = height;
+        scene.depth = depth;
+        scene.cellMm = cellMm;
+        scene.stiffnessKpa = test::STONE_KPA;
+        scene.densityKgPerM3 = test::STONE_DENSITY;
+        scene.solid.assign((size_t)width * height * depth, 0);
+        scene.clamps.assign(scene.solid.size(), 0);
+        return scene;
+    }
+
+    // 斜めの片持ち梁(長さ 6 m・断面 1 × 1 m)。根の側の t < 0 の 2 セルの厚さを壁にし、壁に接する梁のセルの面を固定
+    inline StairScene TiltedBeam(Vec3 direction, uint64_t cellMm) {
+        constexpr double LENGTH = 6.0;
+        constexpr double SIDE = 1.0;
+        const double d = (double)cellMm / 1000.0;
+        const Vec3 along = Unit(direction);
+        Vec3 up = {0, 1, 0};
+        if (std::abs(along[1]) > 0.99)
+            up = {1, 0, 0};
+
+        const Vec3 side = Unit(CrossD(along, up));
+        const Vec3 normal = CrossD(side, along);
+        const auto count = [&](double component) {
+            return (uint32_t)std::ceil((LENGTH * std::abs(component) + 2 * SIDE) / d) + 2;
+        };
+        StairScene out{.scene = EmptyScene(count(along[0]), count(along[1]), count(along[2]), cellMm)};
+        sim::SupportScene3D& scene = out.scene;
+        std::vector<uint8_t> wall(scene.solid.size(), 0);
+        const double origin = SIDE + d;
+        const auto at = [&](uint32_t x, uint32_t up, uint32_t z) {
+            return x + (size_t)scene.width * (up + (size_t)scene.height * z);
+        };
+        for (uint32_t z = 0; z < scene.depth; ++z) {
+            for (uint32_t u = 0; u < scene.height; ++u) {
+                for (uint32_t x = 0; x < scene.width; ++x) {
+                    const Vec3 p = {(x + 0.5) * d - origin, (u + 0.5) * d - origin, (z + 0.5) * d - origin};
+                    const double t = Dot(p, along);
+                    const Vec3 q = {p[0] - t * along[0], p[1] - t * along[1], p[2] - t * along[2]};
+                    if (t < -2 * d || t > LENGTH || std::abs(Dot(q, normal)) > SIDE / 2 ||
+                        std::abs(Dot(q, side)) > SIDE / 2)
+                        continue;
+
+                    (t < 0 ? wall : scene.solid)[at(x, u, z)] = 1;
+                    if (t > LENGTH - d)
+                        out.probe.push_back({x, u, z});
+                }
+            }
+        }
+
+        for (uint32_t z = 0; z < scene.depth; ++z) {
+            for (uint32_t u = 0; u < scene.height; ++u) {
+                for (uint32_t x = 0; x < scene.width; ++x) {
+                    if (scene.solid[at(x, u, z)] == 0)
+                        continue;
+
+                    const std::array<int64_t, 3> c = {x, u, z};
+                    const std::array<int64_t, 3> size = {scene.width, scene.height, scene.depth};
+                    for (uint32_t axis = 0; axis < 3; ++axis) {
+                        for (const int32_t s : {-1, 1}) {
+                            std::array<int64_t, 3> o = c;
+                            o[axis] += s;
+                            if (o[axis] < 0 || o[axis] >= size[axis])
+                                continue;
+
+                            if (wall[at((uint32_t)o[0], (uint32_t)o[1], (uint32_t)o[2])] != 0)
+                                scene.clamps[at(x, u, z)] |= sim::Support3Clamp(axis, s);
+                        }
+                    }
+                }
+            }
+        }
+
+        return out;
+    }
+
+    // 回したアーチ(内径 4 m・外径 5 m の半円・幅 1 m。上の軸の回りに angle 度)。下の段を地面に固定
+    inline StairScene RotatedArch(double angleDeg, uint64_t cellMm) {
+        const double d = (double)cellMm / 1000.0;
+        const double angle = angleDeg * 3.14159265358979323846 / 180.0;
+        const Vec3 along = {std::cos(angle), 0, std::sin(angle)};
+        const Vec3 across = {-std::sin(angle), 0, std::cos(angle)};
+        const auto n = (uint32_t)std::ceil(2 * 6.0 / d) + 2;
+        const auto height = (uint32_t)std::ceil(5.0 / d);
+        StairScene out{.scene = EmptyScene(n, height, n, cellMm)};
+        sim::SupportScene3D& scene = out.scene;
+        const double center = n * d / 2;
+        std::vector<std::array<uint32_t, 3>> cells;
+        for (uint32_t z = 0; z < n; ++z) {
+            for (uint32_t u = 0; u < height; ++u) {
+                for (uint32_t x = 0; x < n; ++x) {
+                    const Vec3 p = {(x + 0.5) * d - center, (u + 0.5) * d, (z + 0.5) * d - center};
+                    const double s = Dot(p, along);
+                    const double r2 = s * s + p[1] * p[1];
+                    if (r2 < 16.0 || r2 > 25.0 || std::abs(Dot(p, across)) > 0.5)
+                        continue;
+
+                    const size_t at = x + (size_t)n * (u + (size_t)height * z);
+                    scene.solid[at] = 1;
+                    scene.clamps[at] = u == 0 ? sim::Support3Clamp(sim::SUPPORT3_UP, -1) : 0;
+                    cells.push_back({x, u, z});
+                }
+            }
+        }
+
+        uint32_t top = 0;
+        for (const auto& c : cells)
+            top = std::max(top, c[1]);
+
+        for (const auto& c : cells) {
+            const Vec3 p = {(c[0] + 0.5) * d - center, (c[1] + 0.5) * d, (c[2] + 0.5) * d - center};
+            if (c[1] + 1 >= top && std::abs(Dot(p, along)) <= d)
+                out.probe.push_back(c);
+        }
+
+        return out;
     }
 
     // 場面の [fromX, toX) × [fromUp, toUp) のセルに細かくする印(SupportScene::fine。T-1120・ADR-0470)を付ける
