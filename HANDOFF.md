@@ -1,8 +1,24 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-11-05(本体の作業役 21 回目・この巡目〔claude/46 の再開〕の締め。前は 20 回目・2026-10-30 の巡目の最後の印)
+最終更新: 2026-11-05 午後(本体の作業役 22 回目・この巡目〔claude/47 の再開〕の締め。入れ物の再起動で司令塔が巡目を止めた。前は 21 回目)
 
-## この仕事でしたこと(2026-11-05・本体の作業役・21 回目: この巡目の締め = runner/ready の印のマージ・T-1230 段 2 の記録・土台の形の受け取り)
+## この仕事でしたこと(2026-11-05 午後・本体の作業役・22 回目: この巡目〔claude/47 の再開〕の印 3 本のマージ。入れ物の再起動で司令塔が巡目を止めた)
+- **マージ(--no-ff・入れた順)**: wt2 t-1240-place-layers 90cf008d(f1a4e17a。T-1240 の 7 の 4 後半 = 置かれ方の世界の層・層を使う世界の舞う粒・層を使う世界を layerPages = 0 の GPU に写す時は断る)/
+  wt4 t-1228-skip-grid 8d7483ca(01e261d0。T-1228 段 1 の RadiationGrid = 変わった印のブロックだけ写す。docs/perf.md の末尾が衝突 → 両方残した)/ wt5 t-1257-slope-air 660b5d61(6412677f。T-1257 Done・T-1314 のチケット)。印は runner/ready/done/ へ。
+- **入れていない**: wt6 runner/ready/t-1230-part-faces.txt(司令塔の指示で次のチャットが入れる)。
+- 試験(release・警告 0・RTX): t-1240・t-1228 の後 = CPU dxil_alloca_check・multires_layers・tree_refine_placement・placement_refine・multires・multires_activity・multires_uniform・field_owner・probe_radiation・cascade_light・cascade_tree_grid(11 本)+
+  GPU gpu_tree_refine_placement〔HW・WARP〕・gpu_multires_layers〔HW・WARP〕・gpu_multires・gpu_lab_box(6 本)+ gpu_cascade_light〔HW・WARP〕・gpu_cascade_tree_grid〔HW・WARP〕・gpu_probe_sim・_tables・gpu_probe_rewind・gpu_world_copy・gpu_play_metric・gpu_radiation_cost(10 本。共通の cascade_light.hlsli を分けたので木の世界の光も main で確かめた)/
+  t-1257 の後 = case_b_r3(684 秒)・case_b_r3_tree_slope・tree_refine_placement・placement_refine。全部合格。archmap --check OK(228 個)。
+- **T-1228 段 1 の RadiationGrid**: 全部写す刻みの Grid は 2 側の火 96〜97 → 76〜78 µs(main 89〜109)・変わったブロックだけの刻み 5〜14 µs・全部写す時と刻みごとのハッシュ・飛ばした刻みが一致。段 1 の残りは RcSources の一覧。
+- **T-1257 Done(測り)**: 隣を読む・一度に = 空気 1 mm/s・粒 0(D-664 に合う)/ 隣を読む・前線の順 = 0.69〜0.85 m/s・粒 2.2 m/s で動く / 読まない = 3.5 m/s・粒 6.2 m/s / 箱の細かさ = 1 mm/s。流す段は案 B の箱で代えた(仮)。
+  前線の順で動く原因 = 隣の写し multires_refine_halo.hlsli が子に覆われた隣を MR_HALO_ABSENT と読む → **T-1314**(不具合・wt5 が着手。直し = 覆われたセルは子の平均を読む)。
+- **費用の印(D-468)**: 層のある置かれ方の場面で要求を処理する段が層なしの 4〜9 倍(1.2 → 11 ms・docs/perf.md)→ **T-1305**(wt2 が調べる)。
+- 記録: ROADMAP(T-1240 の 7 の 4 後半 main へ・7 の 5 は設計の詰めだけ・T-1305・T-1228 段 1 の RadiationGrid・T-1257 Done・T-1314)・QUESTIONS **Q186**(溢れを使う世界で粗くする時に層を持つ物質の和集合が 8 種を超えたら・仮 = 断って数える。詳しくは T-1240 のチケットの「7 の 5 の詰め」= wt2 の t-1240-wide-layers にあり、まだ main に無い)・COMMANDER の番号の配り(司令塔の 1 行)。
+- **運転メモ(wt2)**: job.py を device_bash の中で同期で待つと 15 秒前後で切れる → nohup で投げて runner/queue と runner/logs を見る。archmap --check は前景で 20 秒(単独で)。
+  本体: nohup の `sh -c '... ; ...'` で 2 つのジョブを続けて投げると、device_bash が返った後に 2 つ目が投げられないことがある(1 つずつ投げる)。git のジョブは試験の後ろに並ばず、試験の最中にも走った(マージは作業ツリーを書き換えるので、試験の実行ファイルを作り直す build の前なら害はない)。
+- 次の番号は **D-684・ADR-0479・Q187**(本体)。T は T-1273・T-1274(使っていない)。
+
+## 前の仕事でしたこと(2026-11-05・本体の作業役・21 回目: この巡目の締め = runner/ready の印のマージ・T-1230 段 2 の記録・土台の形の受け取り)
 - **マージ(--no-ff・入れた順)**: wt6 t-1230-conduction-face 08dba72f(T-1230 段 2 の 1 回目)/ wt3 t-0960-support-3d d641e8bb(T-0960 の 1 本目・ADR-0514 Proposed)/ wt6 t-1230-implicit-two-node 21487cff(段 2 の ② の形。ADR-0512 の末尾が衝突 → 両方残した)/ wt2 t-1240-coarsen-layers acb3b886(T-1240 の 7 の 3・7 の 4 前半)/ wt5 t-1266-multires-no-local-array a7712232(T-1266 Done。limits.txt が衝突 → t-1266 側の数にしてビルド後の dxil_alloca_check で確かめた)/ wt3 t-1293-support-3d-diagonals 20eb519d(T-1293 Done)。印は runner/ready/done/ へ。
 - **入れていない**: wt4 t-1228-skip-grid(全部写す刻みが 83 → 220〜400 µs に重くなった。wt4 が同じブランチで直して印を書き直す。印 runner/ready/t-1228-skip-grid.txt は残した)。
 - 試験(release・警告 0): 1 本目の後 = phase_layer・_tree・_face・_explicit_lag・field_owner・multires・multires_state・multires_layers・multires_conduction・multires_implicit・_tree・time_step_lab・time_step_tree・dxil_alloca_check(14 本)/ t-0960・2 節の後 = phase_layer 系 5 本(+ _implicit)・field_owner・multires_implicit・_tree・multires_conduction・support_3d・support_law・support_mixed・support_mixed_neighbor_strain・support_fracture_refine・support_cost・dxil_alloca_check(16 本)/ t-1240 の後 = multires・multires_layers・dxil_alloca_check + GPU HW gpu_multires_layers・gpu_phase_layer・gpu_equilibrium_block・WARP gpu_multires_layers_warp・gpu_phase_layer_warp / t-1266・t-1293 の後(main の先頭)= support_law・support_3d・support_mixed・multires_layers・multires_quiet・float_check 5 本・dxil_alloca_check(t-1266 の表で合格)+ GPU HW gpu_multires・gpu_multires_quiet・gpu_multires_near_fold・gpu_lab_box・gpu_tree_refine_placement・gpu_equilibrium_block + WARP gpu_equilibrium_block_test(run・3 次元の場面も CPU とビット一致)。全部合格。archmap --check OK。
