@@ -102,6 +102,9 @@ T-1221 の 1 段目は、層の頁を GPU に置き、刻みの段の後に層�
   合格(release・RTX・main 034d503d の上): gpu_multires_layers〔HW・WARP〕・gpu_multires・gpu_tree_refine_placement・multires_layers・dxil_alloca_check。
   rebase 前に gpu_multires_quiet・gpu_multires_near_fold・gpu_lab_box・gpu_multires_conduction も合格。release 警告 0・archmap --check OK。
 - 2026-11-05 wt2(作業役 5): 7 の 4 後半の試験を流して全部合格(rebase main bdeefa1a)。layerPages = 0 の GPU に層を使う世界を写す時は断る。溢れの変種の畳む段の alloca 7 → 6。層のある置かれ方の要求の処理が 4〜9 倍(未調査)。
+- 2026-11-05 wt2(作業役 6): 層のある置かれ方の費用は T-1305 で直した(置かれ方の物質の口の数え直し。同じ回の層なしの 1.5〜1.7 倍)。
+  7 の 5 の ①(写す像・戻す)を実装(t-1240-wide-layers-2。溢れの成分の層も物質で組に詰める・9 種以上は断る)。GPU の段(②③)はまだなので
+  RecordUpload は溢れを使う世界の層をまだ断る。試験は gpu_multires_layers の像の場面に溢れの世界(頁・一様の枠・9 種以上で断る)。
 
 ## 7 の 3・4 の詰め(2026-11-05 wt2 作業役 4。t-1240-coarsen-layers)
 - **一様の枠の層の置き場 → 枠ごとに決まった場所(仮・ユーザー未確認)【エンジン】**: 置き場の最後に [枠 × 組 8 つ(物質・層の下位・上位)]。
@@ -151,6 +154,21 @@ T-1221 の 1 段目は、層の頁を GPU に置き、刻みの段の後に層�
   ③ 木の溢れの変種(multires_graph_wide・multires_tree_wide_fold_check・wide_expand・wide_resolve)の BoundLayerOf を溢れまで読む形に・粗くするの 8 種の上限。
   ④ 試験: gpu_multires_layers に溢れの世界(層 + 溢れのセル・粗くするで 9 種になって断る場面)〔HW・WARP〕・multires_layers(CPU の往復)。dxil_alloca_check(溢れの変種は 6・graph_wide の数を見る)。
 - 注意: 溢れの量を物質で引く時に 64bit の引き算と比べを並べない(T-1078)。溢れの変種の alloca は覆われたかを 1 回だけ読む形で戻した(上)。
+
+## 引き継ぎメモ(2026-11-05 wt2 作業役 6。t-1240-wide-layers-2・7 の 5 の ① 済み)
+- 済み ①: engine/src/sim/gpu_multires_layers.cpp。溢れを使う世界は LoadWidePageCell / LoadWidePageCellLayers で溢れの成分の層まで物質で組に詰め
+  (0 でない層が 9 種以上のセルは理由を返す)、戻す時は物質で引き直して StoreWidePageCellWithLayers(溢れの層 cellOverflow[頁].layers も先に消す)。
+  一様の枠は LoadWideUniform と結ぶ(組が 9 種以上なら断る)。溢れを使わない世界の書き方・読み方は前と同じ値。
+  GpuMultires::RecordUpload は「溢れを使う世界に層がある」時はまだ断る(②③ が入るまで。像は作れる)。
+- 試験: gpu_multires_layers_test の TestWideImage(表は reaction_limits_table の 17 種・1 セル 12 成分 = インライン 8 + 溢れ 4・層は 4 種で溢れの成分にも)。
+- 次 ②: 層を合わせる段(shaders/sim/multires_layers.hlsl)の MR_WIDE_CELLS の変種(shaders/CMakeLists.txt に 1 行)。MrLayerAfterWrite(cell, species, raw) が
+  インラインに無い物質の量を溢れから引く(multires_wide_access.hlsli のどの関数で頁のセルの溢れを物質で引くかは未確認)。GpuMultires::RecordLayerReconcile が
+  m_wideCells で変種を選ぶ。③: 木の溢れの変種(multires_graph_wide・multires_tree_wide_fold_check・wide_expand・wide_resolve)の BoundLayerOf / WriteBoundLayers も
+  溢れの量で結ぶ・粗くする時に層の物質の和集合が 8 種を超えたら要求を断る(MR_STATUS_NO_SPACE・MrLayerShortageAddress)。
+  ④: RecordUpload の断りを外し、gpu_multires_layers に溢れの世界の毎刻み・粗くするで 9 種になって断る場面〔HW・WARP〕。dxil_alloca_check。
+- このブランチは t-1305-layer-request-cost の上(T-1305 を先に入れる)。
+- **未実行(2026-11-05 入れ物の再起動で止めた)**: この ① のコードは release ビルドも試験もまだ(gpu_multires_layers〔HW・WARP〕の TestWideImage・multires_layers・release 警告 0)。
+  次の一手: rebase main(t-1240-place-layers は main f1a4e17a に入った)→ release ビルド → gpu_multires_layers〔HW・WARP〕→ ② へ。
 
 ## 引き継ぎメモ(2026-11-05 wt2 作業役 5。t-1240-place-layers・7 の 4 済み)
 - rebase main(bdeefa1a)→ release 警告 0。司令塔の一旦の決定で、層を使う世界(EnableCellLayers)を layerPages = 0 の GPU に写す時は RecordUpload が断る(D-428)。

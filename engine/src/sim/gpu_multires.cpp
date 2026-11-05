@@ -1075,6 +1075,12 @@ namespace bicameral::sim {
                 return false;
             }
 
+            // 溢れを使う世界の層: 像は作れる(T-1240 の 7 の 5 の ①)が、GPU の段がまだ溢れの成分の量を読まない(②③)
+            if (nest.wideCells && image->used + image->uniformSlots > 0) {
+                Log(Channel::Gpu, Level::Error, "溢れを使う世界の層はまだ GPU の段が読めない(T-1240 の 7 の 5)");
+                return false;
+            }
+
             m_layerUsed = image->used + image->uniformSlots;  // 一様の枠の層も広げると層の頁になる(T-1240)
             layerWords = std::move(image->words);
         }

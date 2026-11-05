@@ -38,6 +38,7 @@
 #include "gpu/immediate_queue.h"
 #include "gpu_test_options.h"
 #include "multires_test_scene.h"
+#include "reaction_limits_table.h"
 #include "reaction_test_table.h"
 #include "sim/gpu_multires.h"
 #include "sim/gpu_multires_layers.h"
@@ -282,6 +283,82 @@ namespace {
         sim::ApplyGpuLayerImage(uniform, uniformImage->words, LAYER_PAGES);
         if (sim::HashWholeNest(uniform) != uniformBefore || uniform.cells.uniformLayers.Empty())
             return std::unexpected("像: 一様の枠の層を写して戻すと状態の要約が変わる");
+
+        return {};
+    }
+
+    // --- 溢れを使う世界の像(T-1240 の 7 の 5 の ①): 溢れの成分の層も物質で組に詰めて戻す・9 種以上が層を持てば写さない ---
+    constexpr uint32_t WIDE_IMAGE_SPECIES = 12;  // 1 セルの成分(インライン 8 + 溢れ 4)
+
+    // 物質 c01〜c08・q01〜q04 のセル(量はセルと物質で変える)
+    RxWideCell WideImageCell(const sim::BakedReactionTable& table, uint32_t index) {
+        std::vector<sim::SpeciesAmount> amounts;
+        for (uint32_t i = 1; i <= WIDE_IMAGE_SPECIES; ++i) {
+            const std::string name = i <= test::LIMITS_CROWD_SPECIES
+                                         ? test::LimitsCrowdName(i)
+                                         : test::LimitsHeldName(i - test::LIMITS_CROWD_SPECIES);
+            const uint64_t amount = 1000000 + (uint64_t{index} * 37) + (uint64_t{i} * 11);
+            amounts.push_back({.species = table.SpeciesId(name), .amount = amount});
+        }
+
+        return sim::MakeWideReactionCell(table, amounts, test::LIMITS_TEMPERATURE_MILLIKELVIN);
+    }
+
+    // 成分 i の層 = (index + i) % stride == 0 なら 量 ÷ 4 × 3(stride 3: 0 でない層は 4 種まで・溢れの成分にも。stride 1: 12 種)
+    std::vector<uint64_t> WideImageLayers(const RxWideCell& cell, uint32_t index, uint32_t stride) {
+        std::vector<uint64_t> layers(cell.speciesCount, 0);
+        for (uint32_t i = 0; i < cell.speciesCount; ++i)
+            layers[i] = (index + i) % stride == 0 ? cell.amounts[i] / 4 * 3 : 0;
+
+        return layers;
+    }
+
+    // 溢れを使う世界の根。paged なら頁(セルごとに量が違う)、でなければ一様の枠(全部 WideImageCell(0))
+    sim::MultiresNest MakeWideImageRoot(const sim::BakedReactionTable& table, uint32_t stride, bool paged) {
+        sim::MultiresNest nest = sim::MakeMultiresNest(test::MakeMultiresCapacity(table, 16, 0, 16));
+        sim::EnableWideCells(nest);
+        std::vector<RxCell> cells(MR_BLOCK_CELLS, RxMakeEmptyCell(0));
+        if (paged)
+            cells[1] = RxMakeEmptyCell(1);  // 頁を取る
+
+        const uint32_t root = sim::PlaceRootBlock(nest, 0, 0, 0, cells);
+        if (!paged) {
+            const RxWideCell value = WideImageCell(table, 0);
+            sim::StoreWideUniform(nest, root, value);
+            sim::nest_detail::SetUniformLayers(nest, root, value, WideImageLayers(value, 0, stride));
+            return nest;
+        }
+
+        for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+            const RxWideCell cell = WideImageCell(table, index);
+            sim::StoreWideNestCellWithLayers(nest, root, index, cell, WideImageLayers(cell, index, stride));
+        }
+
+        return nest;
+    }
+
+    std::expected<void, std::string> TestWideImage(const sim::BakedReactionTable& table) {
+        for (const bool paged : {true, false}) {
+            const std::string_view name = paged ? "頁" : "一様の枠";
+            sim::MultiresNest nest = MakeWideImageRoot(table, 3, paged);
+            const std::vector<uint64_t> rootLayers = sim::LoadWideNestCellLayers(nest, test::MULTIRES_ROOT_SLOT, 0);
+            if (rootLayers.size() != WIDE_IMAGE_SPECIES ||
+                !std::ranges::any_of(rootLayers.begin() + RX_MAX_CELL_SPECIES, rootLayers.end(),
+                                     [](uint64_t layer) { return layer != 0; }))
+                return std::unexpected(std::format("溢れの像({}): 場面の溢れの成分に層が無い", name));
+
+            const uint64_t before = sim::HashWholeNest(nest);
+            auto image = sim::MakeGpuLayerImage(nest, LAYER_PAGES);
+            if (!image || image->used + image->uniformSlots != 1)
+                return std::unexpected(std::format("溢れの像({}): 層 1 つを写せない", name));
+
+            sim::ApplyGpuLayerImage(nest, image->words, LAYER_PAGES);
+            if (sim::HashWholeNest(nest) != before)
+                return std::unexpected(std::format("溢れの像({}): 写して戻すと状態の要約が変わる", name));
+
+            if (sim::MakeGpuLayerImage(MakeWideImageRoot(table, 1, paged), LAYER_PAGES))
+                return std::unexpected(std::format("溢れの像({}): 9 種以上が層を持つのに写せてしまう", name));
+        }
 
         return {};
     }
@@ -809,6 +886,13 @@ namespace {
                                                const sim::BakedReactionTable& table) {
         if (auto image = TestImage(table); !image)
             return image;
+
+        const auto limits = sim::BakeReactionTable(test::MakeLimitsTestTable());
+        if (!limits)
+            return std::unexpected("溢れの像: 表を作れない");
+
+        if (auto wide = TestWideImage(*limits); !wide)
+            return wide;
 
         for (const StepMode mode : {StepMode::Full, StepMode::Conduction, StepMode::Active}) {
             if (auto run = RunEachTick(device, queue, ring, table, mode, true); !run)
