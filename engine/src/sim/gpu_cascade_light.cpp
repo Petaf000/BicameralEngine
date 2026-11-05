@@ -11,6 +11,7 @@
 #include <cstring>
 #include <span>
 
+#include "core/aliases.h"
 #include "gpu/resources.h"
 
 namespace bicameral::sim {
@@ -193,12 +194,16 @@ namespace bicameral::sim {
     std::expected<GpuCascadeLight, std::string> GpuCascadeLight::CreateStandalone(ID3D12Device5* device,
                                                                                   const CascadeGrid& grid,
                                                                                   const CascadeParams& params,
-                                                                                  const GpuCascadeCapacity& capacity) {
+                                                                                  const GpuCascadeCapacity& capacity,
+                                                                                  bool emitterList) {
+        if (emitterList && rng::any_of(grid.temperatureMk, [](uint32_t temperature) { return temperature != 0; }))
+            return std::unexpected("距離ごとの段: 放つセルの一覧は空から始めるので、初めの温度は 0 でなければならない");
+
         ComPtr<ID3D12RootSignature> root = gpu::CreateRootSignature(device, OWN_ROOT_LAYOUT);
         if (!root)
             return std::unexpected("距離ごとの段のルート署名を作れない");
 
-        auto result = CreateWith(device, root.Get(), grid, params, capacity);
+        auto result = CreateWith(device, root.Get(), grid, params, capacity, {}, emitterList);
         if (!result)
             return result;
 
@@ -224,7 +229,7 @@ namespace bicameral::sim {
 
     std::expected<GpuCascadeLight, std::string> GpuCascadeLight::CreateWith(
         ID3D12Device5* device, ID3D12RootSignature* rootSignature, const CascadeGrid& grid, const CascadeParams& params,
-        const GpuCascadeCapacity& capacity, std::span<const rx::LtSpeciesLight> treeLights) {
+        const GpuCascadeCapacity& capacity, std::span<const rx::LtSpeciesLight> treeLights, bool emitterList) {
         if (auto checked = CheckGpuShape(grid, params, capacity); !checked)
             return std::unexpected(checked.error());
 
@@ -242,7 +247,7 @@ namespace bicameral::sim {
                 return std::unexpected(std::string("距離ごとの段のパイプラインを作れない: ") + name);
         }
 
-        // --- 作業のバッファ: [RcGpuParams][升目の表][光の値][温度][初めの持ち越し] ---
+        // --- 作業のバッファ: [RcGpuParams][升目の表][光の値][温度][木を読む形の物質の光の値][放つセルの一覧][初めの持ち越し] ---
         uint32_t perFace = 0;
         const auto texels = MakeTexelTable(params.baseTexels, perFace);
         if (!texels)
@@ -277,7 +282,13 @@ namespace bicameral::sim {
         // 木を読む形の物質の光の値は温度の後ろ(初めの持ち越しの前なので、作業の中身の写しに入る)
         result.m_treeLightsOffset = static_cast<uint32_t>(AlignUp(gpu.workTemperatures + (cells * 4)));
         const uint64_t treeLightsBytes = treeLights.size_bytes();
-        gpu.workCarry = static_cast<uint32_t>(AlignUp(result.m_treeLightsOffset + treeLightsBytes));
+        // 放つセルの一覧(T-1228 段 1。1 セル 1 bit。初めの持ち越しの前なので RecordUpload で 0 = 空になる)
+        const uint64_t emitBitsOffset = AlignUp(result.m_treeLightsOffset + treeLightsBytes);
+        const uint64_t emitBitsBytes = emitterList
+                                           ? ((cells + rx::RC_EMIT_BITS_PER_WORD - 1) / rx::RC_EMIT_BITS_PER_WORD) * 4
+                                           : 0;
+        gpu.workEmitBits = emitterList ? static_cast<uint32_t>(emitBitsOffset) : 0u;
+        gpu.workCarry = static_cast<uint32_t>(AlignUp(emitBitsOffset + emitBitsBytes));
         result.m_workBytes = gpu.workCarry + (uint64_t{capacity.carry} * 16);
         result.m_stateBytes = LayOutState(gpu, cells, capacity, result.m_readbackBytes);
         if (result.m_stateBytes >= (uint64_t{1} << 32) || result.m_workBytes >= (uint64_t{1} << 32))

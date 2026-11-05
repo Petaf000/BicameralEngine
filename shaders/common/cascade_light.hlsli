@@ -1162,6 +1162,11 @@ struct RcGpuParams {
     uint32_t carryPages;
     uint32_t stateCarryMarks0;
     uint32_t stateCarryMarks1;
+    // --- 放つセルの一覧(T-1228 段 1・ADR-0500 決定 4。仮の世界の参照の温度の形だけ。0 = 一覧を使わず全部のセルを回す)---
+    // 作業のバッファの中の位置。1 セル 1 bit(セル 32 個 = uint32 1 語)で、呼ぶ側の写しの段が「作業の今の中身で放つ」セルに立てる
+    // (RC_GPU_WORK_EMITTERS の数と同じ判定)。RcSources は立っているセルだけ回す。放たないセルの放った・吸ったの欄を 0 に
+    // 戻すのは呼ぶ側の当てる段(読んだ後に。この刻みだけの値)
+    uint32_t workEmitBits;
 };
 
 // 頭の語(uint64 の番号)
@@ -1184,6 +1189,17 @@ FX_CONST uint32_t RC_GPU_HEADER_WORDS = 32;
 // 作業のバッファの頭(RcGpuParams の 256 バイト)の終わりの語(バイトの位置): 呼ぶ側の写しの段が持つ「作業の今の中身で放つセルの数」
 // (写したセルの増減を足す。作った時は 0)。RcPlanTick は 0 でないかだけ読む(T-1229・T-1228。sim/probe_sim の参照の温度の形の段)
 FX_CONST uint32_t RC_GPU_WORK_EMITTERS = 248;
+// 放つセルの一覧(RcGpuParams の workEmitBits)の語の位置とビット
+FX_CONST uint32_t RC_EMIT_BITS_PER_WORD = 32;
+
+FX_FN uint32_t RcEmitBitsWordOffset(uint32_t base, uint32_t cell) {
+    return base + ((cell / RC_EMIT_BITS_PER_WORD) * 4);
+}
+
+FX_FN uint32_t RcEmitBitMask(uint32_t cell) {
+    return 1u << (cell % RC_EMIT_BITS_PER_WORD);
+}
+
 // 仮の世界の自分のルート署名の時だけ u3 へ書く(T-1235・ADR-0495)。書くのは g_external3 に RC_GPU_U3_OUTPUT の印がある起動だけ
 // (木のルート署名の u3 は木の数のバッファなので書かない): RcPlanTick は起動の予告のバッファ(uint64 1 語)へ「流す」の印を、
 // RcClearFaces・RcResetBags は段 1 からの間接の起動の引数の表(段ごとに D3D12_DISPATCH_ARGUMENTS 2 つ = 6 語)へ、

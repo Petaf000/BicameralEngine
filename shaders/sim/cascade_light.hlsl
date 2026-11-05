@@ -354,11 +354,25 @@ void WalkAndPass(RcGpuParams params, RcStepConstants constants, RcLevelRay level
         StoreWord(HeaderOffset(RC_GPU_SKIPPED), LoadWord(HeaderOffset(RC_GPU_SKIPPED)) + 1);
 }
 
+// 放つセルの一覧(作業の workEmitBits。T-1228 段 1)にセルが立っているか。一覧を使わない世界(workEmitBits = 0)はいつも true
+bool ListedEmitter(RcGpuParams params, uint32_t cell) {
+    if (params.workEmitBits == 0u)
+        return true;
+
+    return (g_rcWork.Load(RcEmitBitsWordOffset(params.workEmitBits, cell)) & RcEmitBitMask(cell)) != 0u;
+}
+
 // --- セルごとに 6 面の熱の放つ量(RcFaceEmission。CPU の CollectSources の前半)---
+// 放つセルの一覧がある世界(仮の世界の参照の温度の形。T-1228 段 1)は一覧のセルだけ回す。一覧に無いセルは放つ面の量が 0 で、
+// 放った・吸ったの欄は前の刻みの当てる段が 0 に戻してある(probe_radiation.hlsl の RadiationApply)ので、回しても何も変わらない。
+// 波の 32 セルは一覧の 1 語を共に読むので、放つセルの無い所は語を 1 つ読むだけで抜ける
 [numthreads(RC_GROUP_THREADS, 1, 1)] void RcSources(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const RcGpuParams params = LoadParams();
     const GpuRcGrid grid = GridOf(params);
     for (uint32_t cell = dispatchThreadId.x; cell < params.cellCount; cell += g_external2) {
+        if (!ListedEmitter(params, cell))
+            continue;
+
         const int64_t flat = (int64_t)cell;
         const int64_t x = params.lowX + (flat % params.sizeX);
         const int64_t y = params.lowY + ((flat / params.sizeX) % params.sizeY);

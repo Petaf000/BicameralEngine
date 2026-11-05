@@ -12,7 +12,9 @@
 //                   sim::ProbeRadiationBlockStale。表の差し替えは RefreshTable が全部のブロックに今の刻みの印を付けるので印で拾う)
 //   (距離ごとの段の 1 刻み: shaders/sim/cascade_light.hlsl。sim/gpu_cascade_light の自分のルート署名で。参照の温度の形では側ごとに 1 回)
 //   RadiationApply  セルごとの 正(吸った − 放った)− 負(吸った − 放った)(2^−16 mJ)を最も近い mJ に丸めてエネルギーへ足し、
-//                   変わったセルの熱のキャッシュを作り直し、ブロックを「刻みの直前に変わった」にして起こす刻みを今にする(気体の GasScatter と同じ)
+//                   変わったセルの熱のキャッシュを作り直し、ブロックを「刻みの直前に変わった」にして起こす刻みを今にする(気体の GasScatter と同じ)。
+//                   読んだ放った・吸ったの欄は 0 に戻す(この刻みだけの値。参照の温度の形の RcSources は写しの段が持つ放つセルの一覧の
+//                   セルだけ回すので、一覧に無いセルの欄はここで 0 にする。T-1228 段 1)
 // ハッシュの単位(HashCells の後)では RadiationHash が次の刻みへの持ち越し(セル・面・帯ごとの量)を状態のハッシュへ足す(D-619。側ごとに 1 回。
 // 負の側は面の番号 | 8。CPU の ProbeReference::StateHash と同じ)。
 // 結ぶもの: ProbeSim のルート署名の u15〜u17 を、この段の間だけ借りる(気体の区画の段は済んでいる。段の後で結び直す)。段ごとの中身:
@@ -114,6 +116,21 @@ uint32_t GridCellOf(uint32_t thread, bool copyAll) {
                           corner.z + (local / (PROBE_BLOCK_SIZE * PROBE_BLOCK_SIZE)));
 }
 
+// 放つセルの一覧(作業の workEmitBits。T-1228 段 1)のセルの 1 bit を、放つセルの数の増減(EmitDelta)に合わせて立てる・下ろす。
+// 1 セルを書くのは 1 スレッドだけで、ビットは重ならないので順によらない。一覧はいつも「作業の今の中身で放つ」セル(数と同じ判定)
+void UpdateEmitBit(RWByteAddressBuffer work, uint32_t bitsOffset, uint32_t cell, uint32_t step) {
+    if (bitsOffset == 0u || step == 0u)
+        return;
+
+    const uint32_t at = RcEmitBitsWordOffset(bitsOffset, cell);
+    const uint32_t mask = RcEmitBitMask(cell);
+    uint32_t original;
+    if (step == 1u)
+        work.InterlockedOr(at, mask, original);
+    else
+        work.InterlockedAnd(at, ~mask, original);
+}
+
 bool SameLight(RcCellLight left, RcCellLight right) {
     return left.depthShortQ32 == right.depthShortQ32 && left.depthLongQ32 == right.depthLongQ32 &&
            left.reflectanceShortQ16 == right.reflectanceShortQ16 && left.reflectanceLongQ16 == right.reflectanceLongQ16;
@@ -181,6 +198,8 @@ bool SameLight(RcCellLight left, RcCellLight right) {
             }
             positiveStep = EmitDelta(before.positive, after.positive);
             negativeStep = EmitDelta(before.negative, after.negative);
+            UpdateEmitBit(rcWork, params.workEmitBits, cell, positiveStep);
+            UpdateEmitBit(rcSecond, params.workEmitBits, cell, negativeStep);
         }
     }
 
@@ -197,20 +216,43 @@ bool SameLight(RcCellLight left, RcCellLight right) {
         rcSecond.InterlockedAdd(RC_GPU_WORK_EMITTERS, negativeDelta, original);
 }
 
-// 側 1 つのセルの 吸った(短い帯 + 長い帯)と 放った を 32bit の上下に分けて返す(足し算だけ)
+// 側 1 つのセルの 吸った(短い帯 + 長い帯)と 放った を 32bit の上下に分けて返す(足し算だけ)。
+// written = 4 語のどれかが 0 でない(語の OR で。足した和を 0 と比べない)
 struct RadiationSideSums {
     uint64_t absorbed;
     uint64_t emitted;
+    bool written;
 };
+
+// uint64 の語(下・上の 32bit)
+uint64_t RadiationWordPair(uint32_t low, uint32_t high) {
+    return ((uint64_t)high << 32) | (uint64_t)low;
+}
 
 RadiationSideSums LoadRadiationSide(RWByteAddressBuffer state, RcGpuParams params, uint32_t cell) {
     const uint32_t emittedAt = params.stateEmitted + (cell * 16);
     const uint32_t absorbedAt = params.stateAbsorbed + (cell * 16);
+    const uint4 absorbedWords = state.Load4(absorbedAt);
+    const uint4 emittedWords = state.Load4(emittedAt);
     RadiationSideSums sums;
-    sums.absorbed = state.Load<uint64_t>(absorbedAt) + state.Load<uint64_t>(absorbedAt + 8);
-    sums.emitted = state.Load<uint64_t>(emittedAt) + state.Load<uint64_t>(emittedAt + 8);
+    sums.absorbed = RadiationWordPair(absorbedWords.x, absorbedWords.y) +
+                    RadiationWordPair(absorbedWords.z, absorbedWords.w);
+    sums.emitted = RadiationWordPair(emittedWords.x, emittedWords.y) +
+                   RadiationWordPair(emittedWords.z, emittedWords.w);
+    const uint4 ored = absorbedWords | emittedWords;
+    sums.written = (ored.x | ored.y | ored.z | ored.w) != 0u;
 
     return sums;
+}
+
+// 側 1 つのセルの放った・吸ったの欄を、読んだ後に 0 に戻す(この刻みだけの値。ADR-0500。0 でない時だけ書く)。
+// 次の刻みの RcSources は放つセルの一覧のセルだけ回すので、一覧に無いセルの欄はここで 0 にしておく(T-1228 段 1)
+void ClearRadiationSide(RWByteAddressBuffer state, RcGpuParams params, uint32_t cell, RadiationSideSums sums) {
+    if (!sums.written)
+        return;
+
+    state.Store4(params.stateEmitted + (cell * 16), uint4(0, 0, 0, 0));
+    state.Store4(params.stateAbsorbed + (cell * 16), uint4(0, 0, 0, 0));
 }
 
 // 増える側 − 減る側(mod 2^64)を最も近い mJ に丸める(CPU の RoundToMilliJoules と同じ: 半分は +∞ 側・算術シフト)。
@@ -244,11 +286,13 @@ int64_t RadiationRoundedNet(uint64_t gain, uint64_t loss) {
 
     const RcGpuParams params = LoadRcParams();
     const RadiationSideSums positive = LoadRadiationSide(rcSecond, params, cell);
+    ClearRadiationSide(rcSecond, params, cell, positive);
     uint64_t gain = positive.absorbed;
     uint64_t loss = positive.emitted;
     if (params.referenceWord != 0u) {
         // 負の側は符号が逆(吸った = セルから引く・放った = セルへ足す)
         const RadiationSideSums negative = LoadRadiationSide(rcThird, params, cell);
+        ClearRadiationSide(rcThird, params, cell, negative);
         gain += negative.emitted;
         loss += negative.absorbed;
     }
