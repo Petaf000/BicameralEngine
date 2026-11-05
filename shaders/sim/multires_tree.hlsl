@@ -1051,6 +1051,9 @@ uint32_t FoldLayerFlags(MrBlock block, uint32_t layerPage, uint32_t index) {
     const RxCell cell = g_cells[PageCellAddress(block.page, index)];
     const bool layered = layerPage != MR_LAYER_NO_PAGE;
     const uint32_t base = layered ? MrLayerEntryAddress(LayerPageCount(), LayerCapacity(), layerPage, index, 0) : 0u;
+
+    // 覆われたかは 1 回だけ読む(枠の子の並びを動的な添字で読むので、読む所ごとに局所の配列ができる。溢れの変種で増えた。T-0397)
+    const bool covered = MrIsCoveredCell(block, index);
     uint32_t mine = 0;
     FX_UNROLL
     for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES && layered; ++k) {
@@ -1062,7 +1065,7 @@ uint32_t FoldLayerFlags(MrBlock block, uint32_t layerPage, uint32_t index) {
     }
 
     // 舞う粒(覆われていないセルの粒の物質の 量 > 層)
-    if (LayerGrainFloats() && !MrIsCoveredCell(block, index)) {
+    if (LayerGrainFloats() && !covered) {
         FX_UNROLL
         for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i) {
             if (i < cell.speciesCount && (g_species[cell.species[i]].flags & RX_SPECIES_GRAIN) != 0) {
@@ -1078,7 +1081,7 @@ uint32_t FoldLayerFlags(MrBlock block, uint32_t layerPage, uint32_t index) {
 
     // 値のセルと同じ層か(CPU は覆われていないセルの層の並び〔今のセルの成分の順〕を値のセルの層の並びと比べる)
     const uint32_t valueCell = MrFoldValueCell(block);
-    if (layered && !MrIsCoveredCell(block, index) && valueCell != MR_BLOCK_CELLS) {
+    if (layered && !covered && valueCell != MR_BLOCK_CELLS) {
         const RxCell value = g_cells[PageCellAddress(block.page, valueCell)];
         const uint32_t valueBase = MrLayerEntryAddress(LayerPageCount(), LayerCapacity(), layerPage, valueCell, 0);
         if (cell.speciesCount != value.speciesCount)
