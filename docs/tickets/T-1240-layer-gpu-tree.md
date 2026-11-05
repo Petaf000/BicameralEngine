@@ -1,6 +1,6 @@
 # T-1240 GPU の層: 要求の処理(細かくする・粗くする・畳む・広げる)・一様の枠の層・溢れの成分の層
 
-- Status: Doing(7 の 3・一様の枠の層まで。残りは置かれ方の世界の層〔7 の 4 の残り〕・溢れの世界〔7 の 5〕。T-1221 から分けた)
+- Status: Doing(7 の 4 まで済み。残りは溢れの世界〔7 の 5〕。T-1221 から分けた)
 - 種類: 工学
 - PC: 必須(GPU)
 - 見積もり: チャット 2 回分(要求の処理 / 一様の枠と溢れ)
@@ -14,7 +14,7 @@ T-1221 の 1 段目は、層の頁を GPU に置き、刻みの段の後に層�
 ## 完了条件(チェックできる形で)
 - [x] 頁を配ったら層の頁を空に(今は層を合わせる段が「持ち主が頁を手放した層の頁」を 0 にするだけ。同じ枠に同じ頁が戻ると 0 のまま使う)
 - [x] 層の頁を GPU で取る・返す(層の頁の空きのスタック。今は CPU が写す時に詰めるだけで、GPU は新しく取れない)
-- [ ] (置かれ方の世界だけ残り)細かくする(子は親と同じ層 / 置かれ方で配る時は層を沈む側。T-1176・T-1188 の GPU の配りに乗せる)・粗くする(成分ごとに層の和 ÷ 8)・
+- [x] 細かくする(子は親と同じ層 / 置かれ方で配る時は層を沈む側。T-1176・T-1188 の GPU の配りに乗せる)・粗くする(成分ごとに層の和 ÷ 8)・
       畳む(層まで一様な時だけ)・広げる(一様の枠の層を頁へ写す)。CPU とビット一致
 - [x] 一様の枠の層(MultiresCellStore::uniformLayers)を GPU に置く(T-1238 の形に合わせる)
 - [ ] 溢れを使う世界(wideCells)の溢れの成分の層(MultiresOverflowArea::layers。物質で結ぶ。溢れの段・WideRetry の後にも合わせる)
@@ -101,6 +101,7 @@ T-1221 の 1 段目は、層の頁を GPU に置き、刻みの段の後に層�
   粒の印の世界は RecordUpload が断る。dxil_alloca の表は減った 2 つを下げた。
   合格(release・RTX・main 034d503d の上): gpu_multires_layers〔HW・WARP〕・gpu_multires・gpu_tree_refine_placement・multires_layers・dxil_alloca_check。
   rebase 前に gpu_multires_quiet・gpu_multires_near_fold・gpu_lab_box・gpu_multires_conduction も合格。release 警告 0・archmap --check OK。
+- 2026-11-05 wt2(作業役 5): 7 の 4 後半の試験を流して全部合格(rebase main bdeefa1a)。layerPages = 0 の GPU に層を使う世界を写す時は断る。溢れの変種の畳む段の alloca 7 → 6。層のある置かれ方の要求の処理が 4〜9 倍(未調査)。
 
 ## 7 の 3・4 の詰め(2026-11-05 wt2 作業役 4。t-1240-coarsen-layers)
 - **一様の枠の層の置き場 → 枠ごとに決まった場所(仮・ユーザー未確認)【エンジン】**: 置き場の最後に [枠 × 組 8 つ(物質・層の下位・上位)]。
@@ -132,6 +133,15 @@ T-1221 の 1 段目は、層の頁を GPU に置き、刻みの段の後に層�
 - RecordUpload の 2 つの断り(置かれ方の世界の層・層を使う世界)を外した。
 - 試験: gpu_tree_refine_placement に層の場面(層・1 段・2 段の鎖・舞う粒・層なしで舞う粒・端で隣の層)。gpu_multires_layers に一様な親の影の鎖・
   一様な親へ層の違う一様な子を粗くする(親を頁に広げる)。
+
+## 引き継ぎメモ(2026-11-05 wt2 作業役 5。t-1240-place-layers・7 の 4 済み)
+- rebase main(bdeefa1a)→ release 警告 0。司令塔の一旦の決定で、層を使う世界(EnableCellLayers)を layerPages = 0 の GPU に写す時は RecordUpload が断る(D-428)。
+- dxil_alloca_check: 溢れの変種 multires_tree_wide_fold_check が 6 → 7 に増えていた(FoldLayerFlags が MrIsCoveredCell を 2 か所で読む = 枠の子の並びを動的な添字で 2 回)。1 回だけ読む形にして 6 に戻した。
+  lab_box_patch_boundaries.asm は 10-13 の古い出力(元のシェーダーはもう無い)なので作業ツリーの _to_delete/ へ。
+- 合格(release・RTX 3070 Ti): dxil_alloca_check・multires_layers・tree_refine_placement・placement_refine・multires・multires_activity・multires_uniform・field_owner・
+  gpu_tree_refine_placement〔HW・WARP〕・gpu_multires_layers〔HW・WARP〕・gpu_multires・gpu_lab_box。HW の Work Graph は止まらなかった(層の配りを Compute に出す退く道は要らなかった)。archmap --check OK。
+- **費用(D-468 の印)**: 層のある置かれ方の場面の要求の処理が層なしの 4〜9 倍(1.2 → 11 ms。docs/perf.md)。どの段が重いか(置かれ方の物質の口が成分を毎回数え直す・層の頁の取り方・層を合わせる段)は未確認。別チケットで測るのがおすすめ。
+- 次: 7 の 5(溢れの世界の層)。
 
 ## 引き継ぎメモ(2026-11-05 wt2 作業役 4 の 2 回目。t-1240-place-layers・途中)
 - どこまで: 上の「7 の 4 の後半」のコードと試験の場面を書いた。release ビルドは通った(2026-11-05 の runner ジョブ 220302、警告 0)。
