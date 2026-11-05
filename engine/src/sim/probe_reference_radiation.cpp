@@ -43,6 +43,12 @@ namespace bicameral::sim {
                    light.reflectanceShortQ16 != greyReflectance || light.reflectanceLongQ16 != greyReflectance;
         }
 
+        bool SameLight(const rx::RcCellLight& left, const rx::RcCellLight& right) {
+            return left.depthShortQ32 == right.depthShortQ32 && left.depthLongQ32 == right.depthLongQ32 &&
+                   left.reflectanceShortQ16 == right.reflectanceShortQ16 &&
+                   left.reflectanceLongQ16 == right.reflectanceLongQ16;
+        }
+
         // 2^−16 mJ の正味を最も近い mJ へ(半分は +∞ 側。算術シフト)
         int64_t RoundToMilliJoules(int64_t units) {
             return (units + (int64_t{1} << (rx::RC_ENERGY_SHIFT - 1))) >> rx::RC_ENERGY_SHIFT;
@@ -95,6 +101,8 @@ namespace bicameral::sim {
                                   .reflectanceLongQ16 = longBand.reflectanceQ16};
             grid.temperatureMk[index] = m_caches[currentBase + index].temperature;  // 負は 0(熱のキャッシュの約束)
         }
+
+        CheckMarkedGrid(tick, grid);
 
         // --- 段(1 刻み)。参照の温度の形(T-1164・D-671)は正の側と負の側の 2 つ ---
         CascadeParams params = m_cascade.params;
@@ -154,6 +162,42 @@ namespace bicameral::sim {
         }
 
         m_cascadeOutside += m_cascadeReport.escaped + static_cast<uint64_t>(m_cascadeReport.rounding);
+    }
+
+    // 写しの印の確かめ(T-1228 段 1・ADR-0500 決定 4): GPU の RadiationGrid と同じ約束で、前に写した刻みの後で変わった印のブロックだけを
+    // 写し直した格子が、刻みの初めのセルから作った格子と同じか。前に写した刻みが無い・前の刻みでない時は全部写す(GPU は作った直後・
+    // 保存点へ戻した・写しの早送りの後)。表の差し替えは全部のブロックに今の刻みの印を付けるので、光の値が変わっても印で拾う
+    void ProbeReference::CheckMarkedGrid(uint64_t tick, const CascadeGrid& grid) {
+        if (!m_cascadeMarkCheck)
+            return;
+
+        const bool all = !m_markedGridTick || *m_markedGridTick + 1 != tick ||
+                         m_markedGrid.CellCount() != grid.CellCount();
+        if (m_markedGrid.CellCount() != grid.CellCount())
+            m_markedGrid = grid;
+
+        const uint64_t last = m_markedGridTick.value_or(0);
+        for (uint32_t block = 0; block < PROBE_BLOCK_COUNT; ++block) {
+            if (all || ProbeRadiationBlockStale(m_changedMarks[block], last))
+                ++m_cascadeReport.copiedBlocks;
+        }
+
+        for (uint32_t index = 0; index < PROBE_CELL_COUNT; ++index) {
+            const uint32_t block = ProbeBlockOfCell(
+                index % PROBE_GRID_SIZE, (index / PROBE_GRID_SIZE) % PROBE_GRID_SIZE, index / PROBE_SLICE_CELL_COUNT);
+            if (all || ProbeRadiationBlockStale(m_changedMarks[block], last)) {
+                m_markedGrid.lights[index] = grid.lights[index];
+                m_markedGrid.temperatureMk[index] = grid.temperatureMk[index];
+                continue;
+            }
+
+            const bool same = SameLight(m_markedGrid.lights[index], grid.lights[index]) &&
+                              m_markedGrid.temperatureMk[index] == grid.temperatureMk[index];
+            if (!same)
+                ++m_cascadeReport.staleCells;
+        }
+
+        m_markedGridTick = tick;
     }
 
     uint64_t ProbeReference::CascadeRadiationUnits() const {

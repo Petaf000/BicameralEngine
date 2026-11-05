@@ -90,8 +90,8 @@ namespace bicameral::sim {
                         gpu::StageStamps* stamps = nullptr, uint8_t firstStage = 0);
 
         // 起動の予告(仮の世界用・T-1229): この刻みに流す物が無ければ、RecordTick と呼ぶ側の段を GPU が飛ばす(CPU は読み戻さない)。
-        // RecordPlan は RcPlanTick で「流す」の印を作って予告のバッファへ書く(刻みごとに RecordTick の前に 1 回。放つセルの印は
-        // 呼ぶ側の写しの段が作業の RC_GPU_WORK_EMITTERS へ書く)。BeginSkipIfIdle〜EndSkipIfIdle の間の起動は、印が 0 なら流れない。
+        // RecordPlan は RcPlanTick で「流す」の印を作って予告のバッファへ書く(刻みごとに RecordTick の前に 1 回。放つセルの数は
+        // 呼ぶ側の写しの段が作業の RC_GPU_WORK_EMITTERS に持つ。T-1228)。BeginSkipIfIdle〜EndSkipIfIdle の間の起動は、印が 0 なら流れない。
         // 飛ばすのは「前に流した刻みが何も放たず受けず・入る持ち越しが空・放つセルが無い」時だけなので、結果は流した時と同じ(D-428)
         void RecordPlan(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint64_t tick,
                         gpu::StageStamps* stamps = nullptr, uint8_t firstStage = 0);

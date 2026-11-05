@@ -93,22 +93,39 @@ FX_FN uint64_t RcAbsorptanceQ16(uint64_t depthQ32) {
 // 光線は当たったセルに α (1 − ρ) を吸わせるので、同じ温度の物どうしは差し引き 0。23 §3.3「坂を下る」)。
 // RcCellEmission はそのうち面の向こうに依らない分(セルの温度と自分の光の値だけで決まり、6 面で同じ。T-1161)。
 // 面の量は RcMaskAcross で向こうが通さない帯を 0 にしたもの(= RcFaceEmission。セルごとに 1 回求めて 6 面で使う)
-FX_FN RcBands RcCellEmission(uint32_t temperatureMk, RcCellLight light) {
+// RcCellEmission を温度だけで決まる分(黒体の帯ごとの量)と光の値だけで決まる分(帯ごとの放射率 α (1 − ρ)。Q16)に分けたもの。
+// 同じ温度・同じ光の値を何度も使う呼ぶ側(仮の世界の写しの段が参照の温度と前後の値で比べる。T-1228)が 1 回ずつ求めて使い回す
+FX_FN RcBands RcBlackBands(uint32_t temperatureMk) {
     const uint64_t black = RcFaceBlackEmission(temperatureMk);
-    const uint64_t blackShort = FxShiftRightU128(FxMulU64Full(black, RcShortFractionQ32(temperatureMk)), 32);
-    const uint64_t blackLong = black - blackShort;
-    const uint64_t emissivityShort = (RcAbsorptanceQ16(light.depthShortQ32) *
-                                      ((uint64_t)LT_ONE_Q16 - (uint64_t)light.reflectanceShortQ16)) >>
-                                     16;
-    const uint64_t emissivityLong = (RcAbsorptanceQ16(light.depthLongQ32) *
-                                     ((uint64_t)LT_ONE_Q16 - (uint64_t)light.reflectanceLongQ16)) >>
-                                    16;
-
     RcBands bands;
-    bands.shortBand = FxShiftRightU128(FxMulU64Full(blackShort, emissivityShort), 16);
-    bands.longBand = FxShiftRightU128(FxMulU64Full(blackLong, emissivityLong), 16);
+    bands.shortBand = FxShiftRightU128(FxMulU64Full(black, RcShortFractionQ32(temperatureMk)), 32);
+    bands.longBand = black - bands.shortBand;
 
     return bands;
+}
+
+FX_FN RcBands RcEmissivityQ16(RcCellLight light) {
+    RcBands emissivity;
+    emissivity.shortBand = (RcAbsorptanceQ16(light.depthShortQ32) *
+                            ((uint64_t)LT_ONE_Q16 - (uint64_t)light.reflectanceShortQ16)) >>
+                           16;
+    emissivity.longBand = (RcAbsorptanceQ16(light.depthLongQ32) *
+                           ((uint64_t)LT_ONE_Q16 - (uint64_t)light.reflectanceLongQ16)) >>
+                          16;
+
+    return emissivity;
+}
+
+FX_FN RcBands RcEmissionOf(RcBands black, RcBands emissivityQ16) {
+    RcBands bands;
+    bands.shortBand = FxShiftRightU128(FxMulU64Full(black.shortBand, emissivityQ16.shortBand), 16);
+    bands.longBand = FxShiftRightU128(FxMulU64Full(black.longBand, emissivityQ16.longBand), 16);
+
+    return bands;
+}
+
+FX_FN RcBands RcCellEmission(uint32_t temperatureMk, RcCellLight light) {
+    return RcEmissionOf(RcBlackBands(temperatureMk), RcEmissivityQ16(light));
 }
 
 // 面の向こうのセルがその帯を通さない(τ が飽和)なら、その帯はその面から放たない(触れている物どうしは伝導の仕事。
@@ -1164,8 +1181,8 @@ FX_CONST uint32_t
     RC_GPU_RUN = 30;  // この刻みを流す印(RcPlanTick が書く。起動の予告のバッファにも同じ値。0 = 飛ばす。T-1229・T-1235)
 FX_CONST uint32_t RC_GPU_SKIPPED = 31;  // 飛ばした刻みの数(作ってから。測りの目安)
 FX_CONST uint32_t RC_GPU_HEADER_WORDS = 32;
-// 作業のバッファの頭(RcGpuParams の 256 バイト)の終わりの語(バイトの位置): 呼ぶ側の写しの段が「この刻みに放つセルがある」なら
-// 0 でない値を書き、RcPlanTick が読んで 0 に戻す(T-1229。sim/probe_sim の負の側の段)
+// 作業のバッファの頭(RcGpuParams の 256 バイト)の終わりの語(バイトの位置): 呼ぶ側の写しの段が持つ「作業の今の中身で放つセルの数」
+// (写したセルの増減を足す。作った時は 0)。RcPlanTick は 0 でないかだけ読む(T-1229・T-1228。sim/probe_sim の参照の温度の形の段)
 FX_CONST uint32_t RC_GPU_WORK_EMITTERS = 248;
 // 仮の世界の自分のルート署名の時だけ u3 へ書く(T-1235・ADR-0495)。書くのは g_external3 に RC_GPU_U3_OUTPUT の印がある起動だけ
 // (木のルート署名の u3 は木の数のバッファなので書かない): RcPlanTick は起動の予告のバッファ(uint64 1 語)へ「流す」の印を、
