@@ -110,6 +110,8 @@ namespace bicameral::sim {
         const auto slotCount = static_cast<uint32_t>(nest.blocks.size());
         GpuLayerImage image;
         image.words = EmptyLayerStore(pageCount, capacity, slotCount);
+        if (capacity > 0 && nest.cellLayers.enabled)
+            image.words[MrLayerFlagsAddress(pageCount, capacity)] = MR_LAYER_FLAG_GRAIN;  // 粒の残りは舞う粒(T-1240)
 
         // --- 一様の枠の層(T-1240 の 4 段目。枠ごとに決まった場所)---
         for (uint32_t slot = 0; slot < slotCount && !nest.cells.uniformLayers.Empty(); ++slot) {

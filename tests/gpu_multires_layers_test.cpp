@@ -13,6 +13,8 @@
 //   5 は粗くする刻み(COARSEN_TICK から 1 段ずつ)まで比べる(T-1240 の 3 段目: 子の層の和 ÷ 8・子の層の頁を返す)。
 //   7. 一様の枠の層(T-1240 の 3・4 段目): 層まで同じ静かな頁を畳む(層ごと一様の枠の層へ)→ 一様な根を本物の鎖で細かくする(子は親と同じ
 //      一様の枠の層)→ 粗くして戻す。燃える一様な根(一様の枠の層)を刻むと頁に広げる(一様の枠の層を頁へ)。毎刻み比べる
+//   8. 一様な親の影の鎖(影の頁へ一様の枠の層を今の値と結んで写す)・一様な親へ層の違う一様な子を粗くする(親を頁に広げて
+//      子の層の和 ÷ 8。T-1240 の 4 段目で試していなかった道)
 // 時間(WARP では測らない): 層のある場面の 1 刻み(全部を刻む)を層の頁あり・なしで測り、層を合わせる段の分を見る(docs/perf.md)。
 // 場面は tests/multires_test_scene.h の根と鎖。引数は gpu_test_options.h。
 #include <algorithm>
@@ -504,6 +506,107 @@ namespace {
         return {};
     }
 
+    // --- 8. 一様な親の影の鎖: 燃えない一様な根(一様の枠の層)の影の鎖を作り、毎刻み引き戻して COARSEN_TICK に捨てる ---
+    std::expected<void, std::string> RunUniformShadow(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                      gpu::DebugRing& ring, const sim::BakedReactionTable& table) {
+        sim::MultiresNest cpu = MakeUniformScene(table, InertAir(table), false);
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, GpuOptions(StepMode::Full, CHAIN_LAYER_PAGES));
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        uint32_t mostLayered = 0;
+        for (uint64_t tick = 0; tick < test::MULTIRES_END_TICK; ++tick) {
+            const auto record = [&](ID3D12GraphicsCommandList10* list) {
+                if (tick == 0 && !gpu->RecordUpload(list, cpu))
+                    return false;
+
+                return RecordSceneTick(list, *gpu, ring.GpuAddress(), test::MultiresScenario::Shadow, tick);
+            };
+            auto read = Execute(queue, ring, *gpu, record);
+            if (!read)
+                return std::unexpected(std::format("一様な親の影 刻み {}: {}", tick, read.error()));
+
+            test::StepMultiresScene(cpu, table, test::MultiresScenario::Shadow, tick);
+            if (auto compared = Compare(cpu, *read, std::format("一様な親の影 刻み {}", tick)); !compared)
+                return compared;
+
+            if (gpu->ReadLayerShortage() != 0u)
+                return std::unexpected(std::format("一様な親の影 刻み {}: 足りるはずの層の頁が尽きた", tick));
+
+            mostLayered = std::max(mostLayered, LayeredPages(*read));
+        }
+
+        // 影の鎖の 9 段の頁が層を持った(一様な根から写した。試験が空でない)
+        if (mostLayered != test::MULTIRES_LEVELS)
+            return std::unexpected(
+                std::format("一様な親の影: 層のある頁が {}(期待 {})", mostLayered, test::MULTIRES_LEVELS));
+
+        Log(Channel::Gpu, Level::Info, "一様な親の影の鎖: {} 刻み毎回一致(層のある頁 最大 {})", test::MULTIRES_END_TICK,
+            mostLayered);
+
+        return {};
+    }
+
+    // --- 8. 一様な親へ層の違う一様な子を粗くする: 一様な根の本物の鎖(一様の枠の層を写した)を CPU で作り、一番細かい子の層だけを
+    //     量の 1/4 に書き換えてから写し、COARSEN_TICK からの粗くする刻みを比べる(親は頁に広がる・次の段は頁の子を一様な親へ)---
+    std::expected<void, std::string> RunUniformCoarsenExpand(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                             gpu::DebugRing& ring,
+                                                             const sim::BakedReactionTable& table) {
+        sim::MultiresNest cpu = MakeUniformScene(table, InertAir(table), false);
+        sim::SubmitRequests(cpu, test::MultiresRequestsAt(test::MultiresScenario::Real, test::MULTIRES_REFINE_TICK));
+        sim::ProcessRequests(cpu);
+        uint32_t deepest = MR_NO_BLOCK;
+        for (uint32_t slot = 0; slot < cpu.capacity.worldBlocks; ++slot) {
+            const MrBlock& block = cpu.blocks[slot];
+            if (block.kind == MR_BLOCK_REAL && block.level == (int32_t)test::MULTIRES_LEVELS && MrIsUniform(block))
+                deepest = slot;
+        }
+
+        if (deepest == MR_NO_BLOCK)
+            return std::unexpected("一様な子を粗くする: 一様な鎖を作れない");
+
+        const RxCell value = cpu.cells.uniform[deepest];
+        std::vector<uint64_t> quarter(value.speciesCount, 0);
+        for (uint32_t i = 0; i < value.speciesCount; ++i)
+            quarter[i] = value.amounts[i] / 4;
+
+        sim::nest_detail::SetUniformLayers(cpu, deepest, RxWidenCell(value), quarter);
+
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, GpuOptions(StepMode::Full, LAYER_PAGES));
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        uint32_t mostLayered = 0;
+        for (uint64_t tick = test::MULTIRES_COARSEN_TICK; tick < test::MULTIRES_END_TICK; ++tick) {
+            const auto record = [&](ID3D12GraphicsCommandList10* list) {
+                if (tick == test::MULTIRES_COARSEN_TICK && !gpu->RecordUpload(list, cpu))
+                    return false;
+
+                return RecordSceneTick(list, *gpu, ring.GpuAddress(), test::MultiresScenario::Real, tick);
+            };
+            auto read = Execute(queue, ring, *gpu, record);
+            if (!read)
+                return std::unexpected(std::format("一様な子を粗くする 刻み {}: {}", tick, read.error()));
+
+            test::StepMultiresScene(cpu, table, test::MultiresScenario::Real, tick);
+            if (auto compared = Compare(cpu, *read, std::format("一様な子を粗くする 刻み {}", tick)); !compared)
+                return compared;
+
+            if (gpu->ReadLayerShortage() != 0u)
+                return std::unexpected(std::format("一様な子を粗くする 刻み {}: 足りるはずの層の頁が尽きた", tick));
+
+            mostLayered = std::max(mostLayered, LayeredPages(*read));
+        }
+
+        // 層の違う子を粗くした親は頁に広がって層を持った(試験が空でない)
+        if (mostLayered == 0)
+            return std::unexpected("一様な子を粗くする: 親が頁に広がらない(層のある頁が無い)");
+
+        Log(Channel::Gpu, Level::Info, "一様な親へ層の違う子を粗くする: 毎回一致(層のある頁 最大 {})", mostLayered);
+
+        return {};
+    }
+
     // --- 6. 層の頁が尽きる場面: 細かくする要求を断って数える(仮【エンジン】T-1240)---
     // 比べる相手は細かくしない CPU(断った要求の分だけ「空きが無い」の数える欄が 1 多い)
     std::expected<void, std::string> RunShortage(ID3D12Device5* device, gpu::ImmediateQueue& queue,
@@ -634,6 +737,12 @@ namespace {
 
         if (auto expand = RunUniformExpand(device, queue, ring, table); !expand)
             return expand;
+
+        if (auto shadow = RunUniformShadow(device, queue, ring, table); !shadow)
+            return shadow;
+
+        if (auto coarsen = RunUniformCoarsenExpand(device, queue, ring, table); !coarsen)
+            return coarsen;
 
         return RunBatch(device, queue, ring, table);
     }

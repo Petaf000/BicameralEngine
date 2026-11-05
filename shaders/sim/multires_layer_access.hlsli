@@ -42,6 +42,14 @@ void ClearLayerCell(uint32_t layerPage, uint32_t index) {
         g_layers[base + word] = 0;
 }
 
+// 層を使う世界(粒の残りは舞う粒。CPU の cellLayers.enabled)か。層を持たない GPU(capacity = 0)は知らない(いつも false)
+bool LayerGrainFloats() {
+    if (LayerCapacity() == 0)
+        return false;
+
+    return (g_layers[MrLayerFlagsAddress(LayerPageCount(), LayerCapacity())] & MR_LAYER_FLAG_GRAIN) != 0;
+}
+
 // 層の頁が尽きて断った数を足す(計器。GPU だけ)
 void CountLayerShortage(uint32_t count) {
     InterlockedAdd(g_layers[MrLayerShortageAddress(LayerPageCount(), LayerCapacity())], count);

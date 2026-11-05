@@ -1036,20 +1036,24 @@ bool FoldsNearly(uint32_t slot, MrBlock block, uint32_t index, MrFoldTolerance t
 // --- 層のある頁を畳む(T-1240 の 3 段目。CPU は multires_activity.cpp の FoldLayeredPage・FoldNear)---
 static const uint32_t FOLD_LAYERS_NONZERO = 1;  // 0 でない層がある(平均では畳まない。CPU の PageHasLayers)
 static const uint32_t FOLD_LAYERS_DIFFER = 2;   // 覆われていないセルの層が値のセルの層と違う(層ごとには畳めない)
+static const uint32_t
+    FOLD_LAYERS_FLOATING = 4;  // 層を使う世界で、覆われていないセルに舞う粒(粒の物質の 量 > 層)がある(畳まない)
 
 groupshared uint32_t gs_foldLayerFlags;
 
-// 層の頁 layerPage を持つ頁の層の印(全部のスレッドが呼ぶ。グループで一様な結果)。層は今のセルと結んで読む
+// 層の頁 layerPage(無ければ MR_LAYER_NO_PAGE = 層は全部 0)を持つ頁の層の印(全部のスレッドが呼ぶ。グループで一様な結果)。
+// 層は今のセルと結んで読む。舞う粒は層を使う世界(LayerGrainFloats)だけ見る(CPU の HasFloatingGrain・PageHasFloatingGrain)
 uint32_t FoldLayerFlags(MrBlock block, uint32_t layerPage, uint32_t index) {
     if (index == 0)
         gs_foldLayerFlags = 0;
 
     GroupMemoryBarrierWithGroupSync();
     const RxCell cell = g_cells[PageCellAddress(block.page, index)];
-    const uint32_t base = MrLayerEntryAddress(LayerPageCount(), LayerCapacity(), layerPage, index, 0);
+    const bool layered = layerPage != MR_LAYER_NO_PAGE;
+    const uint32_t base = layered ? MrLayerEntryAddress(LayerPageCount(), LayerCapacity(), layerPage, index, 0) : 0u;
     uint32_t mine = 0;
     FX_UNROLL
-    for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES; ++k) {
+    for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES && layered; ++k) {
         const uint32_t address = base + (k * MR_LAYER_ENTRY_WORDS);
         const uint64_t layer = MrLayerAfterWrite(cell, g_layers[address],
                                                  FX_U64(g_layers[address + 2], g_layers[address + 1]));
@@ -1057,9 +1061,24 @@ uint32_t FoldLayerFlags(MrBlock block, uint32_t layerPage, uint32_t index) {
             mine |= FOLD_LAYERS_NONZERO;
     }
 
+    // 舞う粒(覆われていないセルの粒の物質の 量 > 層)
+    if (LayerGrainFloats() && !MrIsCoveredCell(block, index)) {
+        FX_UNROLL
+        for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i) {
+            if (i < cell.speciesCount && (g_species[cell.species[i]].flags & RX_SPECIES_GRAIN) != 0) {
+                uint64_t layer = 0;
+                if (layered)
+                    layer = BoundLayerOf(base, cell.species[i], cell);
+
+                if (MrLayerLess(layer, cell.amounts[i]))
+                    mine |= FOLD_LAYERS_FLOATING;
+            }
+        }
+    }
+
     // 値のセルと同じ層か(CPU は覆われていないセルの層の並び〔今のセルの成分の順〕を値のセルの層の並びと比べる)
     const uint32_t valueCell = MrFoldValueCell(block);
-    if (!MrIsCoveredCell(block, index) && valueCell != MR_BLOCK_CELLS) {
+    if (layered && !MrIsCoveredCell(block, index) && valueCell != MR_BLOCK_CELLS) {
         const RxCell value = g_cells[PageCellAddress(block.page, valueCell)];
         const uint32_t valueBase = MrLayerEntryAddress(LayerPageCount(), LayerCapacity(), layerPage, valueCell, 0);
         if (cell.speciesCount != value.speciesCount)
@@ -1116,7 +1135,7 @@ uint32_t FoldLayerFlags(MrBlock block, uint32_t layerPage, uint32_t index) {
     if (foldable)
         layerPage = LayerPageOf(block.page);
 
-    if (foldable && layerPage != MR_LAYER_NO_PAGE)
+    if (foldable && (layerPage != MR_LAYER_NO_PAGE || LayerGrainFloats()))
         layerFlags = FoldLayerFlags(block, layerPage, index);
 #ifdef MR_WIDE_CELLS
     if (foldable)
@@ -1124,10 +1143,10 @@ uint32_t FoldLayerFlags(MrBlock block, uint32_t layerPage, uint32_t index) {
 #endif
     if (foldable) {
         const bool exact = FoldsExactly(block, index);
-        if (exact && (layerFlags & FOLD_LAYERS_DIFFER) == 0)
+        if (exact && (layerFlags & (FOLD_LAYERS_DIFFER | FOLD_LAYERS_FLOATING)) == 0)
             flags |= MR_CLAIM_FOLD_COPY;
         else if (!MrIsExactFold(tolerance) && MrFoldValueCell(block) != MR_BLOCK_CELLS &&
-                 (layerFlags & FOLD_LAYERS_NONZERO) == 0)
+                 (layerFlags & (FOLD_LAYERS_NONZERO | FOLD_LAYERS_FLOATING)) == 0)
             flags |= FoldsNearly(slot, block, index, tolerance) ? MR_CLAIM_FOLD_WRITTEN : 0u;
     }
 

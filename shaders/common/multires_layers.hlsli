@@ -6,6 +6,7 @@
 //   [頁の索引: セルの頁ごとの層の頁の番号(無ければ MR_LAYER_NO_PAGE)× pageCount]
 //   [層の頁の持ち主: 層の頁ごとのセルの頁(空いていれば MR_LAYER_NO_PAGE)× capacity]
 //   [層の頁の空きのスタック × capacity][空きの数 1 語][足りなかった数 1 語(層の頁が尽きて断った要求・影の段。計器)]
+//   [世界の印 1 語(MR_LAYER_FLAG_*。写す時に CPU が書く。T-1240 の 4 段目)]
 //   [要求ごとの層の頁の割り当ての始まり × MR_MAX_REQUESTS(1 刻みの中だけ。TreeAllocate が書き、細かくする鎖の段 d は上から d 番目を使う)]
 //   [層の頁 × MR_LAYER_PAGE_WORDS(MR_BLOCK_CELLS × RX_MAX_CELL_SPECIES × 3 語: 物質・層の下位・上位)]
 //   [一様の枠の層 × 枠の数(slotCount = 世界の枠 + 観察の枠)× MR_LAYER_CELL_WORDS(層の頁の 1 セルと同じ組 8 つ。T-1240 の 3・4 段目)]
@@ -57,14 +58,21 @@ FX_FN uint32_t MrLayerShortageAddress(uint32_t pageCount, uint32_t capacity) {
     return pageCount + (2 * capacity) + 1;
 }
 
+// 世界の印の語(MR_LAYER_FLAG_GRAIN = 層を使う世界〔EnableCellLayers〕: 粒の物質の層でない分は舞う粒。CPU の cellLayers.enabled)
+FX_CONST uint32_t MR_LAYER_FLAG_GRAIN = 1;
+
+FX_FN uint32_t MrLayerFlagsAddress(uint32_t pageCount, uint32_t capacity) {
+    return pageCount + (2 * capacity) + 2;
+}
+
 // 要求 request の層の頁の割り当ての始まり(空きのスタックの位置。PoppedPage と同じ数え方)の語
 FX_FN uint32_t MrLayerRequestAddress(uint32_t pageCount, uint32_t capacity, uint32_t request) {
-    return pageCount + (2 * capacity) + 2 + request;
+    return pageCount + (2 * capacity) + 3 + request;
 }
 
 // 層の頁の始まりの語
 FX_FN uint32_t MrLayerPagesBase(uint32_t pageCount, uint32_t capacity) {
-    return pageCount + (2 * capacity) + 2 + MR_MAX_REQUESTS;
+    return pageCount + (2 * capacity) + 3 + MR_MAX_REQUESTS;
 }
 
 // 一様の枠の層の始まりの語

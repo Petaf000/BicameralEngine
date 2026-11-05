@@ -12,6 +12,10 @@
 // 無い所は無いと読む(横 → 傾き 0・下 → 詰まり切る・上 → 空。T-1176 の仮のまま)。
 // 書き換えた構造体の配列を動的な添字で読まない(T-0397): 親のセルの成分は毎回バッファから読み、子のセルはバッファへ直接書く。
 // 64bit の引き算と同じ値どうしの比べを並べない(T-1078・T-1159): 差は 32bit の 2 つに分けて借りを手で回す(PrSubS64)。
+// 成分ごとの層(T-1240 の 4 段目。CPU の MaterialsOf・ChildCells): 層を持つ成分は「層の分 = 沈む側(凝縮相)」と「残り = 物質の置かれ方」の
+// 2 つの物質に分けて配り、子の層 = 子へ配った層の分。層を使う世界(層の置き場の印 MR_LAYER_FLAG_GRAIN)では粒の残りは舞う粒(空きに同じ濃さ)。
+// 層の無いセル(層を使わない世界)は前と同じ 1 つの物質のまま(物質 m = 成分 m)= ビット単位で同じ。層は u4(sim/multires_layer_access.hlsli)から
+// 今のセルと結んで読む(s_placeLayer = セルの層の組の始まり。無ければ MR_LAYER_NO_PAGE)。
 #ifndef BICAMERAL_MULTIRES_REFINE_PLACE_HLSLI
 #define BICAMERAL_MULTIRES_REFINE_PLACE_HLSLI
 
@@ -21,6 +25,9 @@
 static uint32_t s_placeAddress;  // 今のスレッドが読む親のセルの番地(g_cells)
 static uint32_t s_placeHalo;     // 今の段の隣の写しの位置(MR_HALO_NONE なら写しを読まない)
 static uint32_t s_placeOctant;   // 今の段の親の八分の一(写しの面の向き)
+static uint32_t
+    s_placeLayer;          // 今のスレッドが読む親のセルの層の組の始まり(g_layers。無ければ MR_LAYER_NO_PAGE。T-1240)
+static bool s_placeSplit;  // 今のセルの物質を層の分と残りに分けるか(層がある・層を使う世界。偽なら物質 m = 成分 m)
 
 // 隣の写しの番地(u6。並びは common/multires_refine_halo.hlsli)
 uint32_t RefineHaloAddress(uint32_t halo, uint32_t h) {
@@ -43,10 +50,130 @@ uint3 PlaceMaterialOf(uint32_t speciesId) {
     return uint3(kind, 0u, packing);
 }
 
-#define PR_MATERIAL_COUNT g_cells[s_placeAddress].speciesCount
-#define PR_MATERIAL(m) PlaceMaterialOf(g_cells[s_placeAddress].species[m])
-#define PR_MATERIAL_MOLAR_VOLUME(m) g_species[g_cells[s_placeAddress].species[m]].molarVolume
-#define PR_PARENT_MASS(m) ((int64_t)g_cells[s_placeAddress].amounts[m] * 8)
+// --- 層の分と残り(T-1240。CPU の MaterialsOf)---
+static const uint32_t PLACE_PART_WHOLE = 0;    // 前と同じ 1 つの物質
+static const uint32_t PLACE_PART_SETTLED = 1;  // 層の分(沈む側)
+static const uint32_t PLACE_PART_REST = 2;     // 残り(層を使う世界の粒は舞う粒)
+
+// 今のセル(s_placeAddress・s_placeLayer)を読む用意: 層の分けが要るか
+void PlaceUseCell(uint32_t address, uint32_t layerBase) {
+    s_placeAddress = address;
+    s_placeLayer = layerBase;
+    s_placeSplit = layerBase != MR_LAYER_NO_PAGE || LayerGrainFloats();
+}
+
+// 今のセルの成分 i の層(今の量と結ぶ。層が無ければ 0)
+uint64_t PlaceLayerOf(uint32_t i) {
+    if (s_placeLayer == MR_LAYER_NO_PAGE)
+        return 0;
+
+    const uint32_t species = g_cells[s_placeAddress].species[i];
+    const uint64_t amount = g_cells[s_placeAddress].amounts[i];
+    uint64_t raw = 0;
+    FX_UNROLL
+    for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES; ++k) {
+        const uint32_t address = s_placeLayer + (k * MR_LAYER_ENTRY_WORDS);
+        const bool nonzero = (g_layers[address + 1] | g_layers[address + 2]) != 0;
+        if (g_layers[address] == species && nonzero)
+            raw = FX_U64(g_layers[address + 2], g_layers[address + 1]);
+    }
+
+    return MrLayerLess(amount, raw) ? amount : raw;
+}
+
+// 成分 i が層を使う世界の粒か(残りは舞う粒)
+bool PlaceFloats(uint32_t i) {
+    return LayerGrainFloats() && PlaceMaterialOf(g_cells[s_placeAddress].species[i]).x == SF_SETTLE_GRAIN;
+}
+
+// 成分 i の物質の数(層の分・残り。0 の分は物質にしない)
+uint32_t PlacePartCount(uint32_t i) {
+    const uint64_t layer = PlaceLayerOf(i);
+    const bool hasLayer = ((uint32_t)layer | (uint32_t)(layer >> 32)) != 0;
+    if (!hasLayer && !PlaceFloats(i))
+        return 1;
+
+    const bool hasRest = MrLayerLess(layer, g_cells[s_placeAddress].amounts[i]);
+
+    return (hasLayer ? 1u : 0u) + (hasRest ? 1u : 0u);
+}
+
+// 物質 m の成分の位置(x)と分(y = PLACE_PART_*)
+uint2 PlacePartOf(uint32_t m) {
+    if (!s_placeSplit)
+        return uint2(m, PLACE_PART_WHOLE);
+
+    uint32_t first = 0;
+    uint2 found = uint2(0, PLACE_PART_WHOLE);
+    for (uint32_t i = 0; i < g_cells[s_placeAddress].speciesCount; ++i) {
+        const uint32_t count = PlacePartCount(i);
+        if (m >= first && m < first + count) {
+            const uint64_t layer = PlaceLayerOf(i);
+            const bool hasLayer = ((uint32_t)layer | (uint32_t)(layer >> 32)) != 0;
+            uint32_t part = PLACE_PART_REST;
+            if (!hasLayer && !PlaceFloats(i))
+                part = PLACE_PART_WHOLE;
+            else if (hasLayer && m == first)
+                part = PLACE_PART_SETTLED;
+
+            found = uint2(i, part);
+        }
+
+        first += count;
+    }
+
+    return found;
+}
+
+uint32_t PlaceMaterialCount() {
+    if (!s_placeSplit)
+        return g_cells[s_placeAddress].speciesCount;
+
+    uint32_t count = 0;
+    for (uint32_t i = 0; i < g_cells[s_placeAddress].speciesCount; ++i)
+        count += PlacePartCount(i);
+
+    return count;
+}
+
+// 物質 m の置かれ方(層の分は沈む側: 気体なら粒として。層を使う世界の粒の残りは気体 = 舞う粒)
+uint3 PlaceMaterialAt(uint32_t m) {
+    const uint2 part = PlacePartOf(m);
+    uint3 material = PlaceMaterialOf(g_cells[s_placeAddress].species[part.x]);
+    if (part.y == PLACE_PART_SETTLED && material.x == SF_SETTLE_GAS)
+        material.x = SF_SETTLE_GRAIN;
+    else if (part.y == PLACE_PART_REST && PlaceFloats(part.x))
+        material.x = SF_SETTLE_GAS;
+
+    return material;
+}
+
+// a − b(a ≥ b。32bit の 2 つに分けて借りを手で回す。T-1078)
+uint64_t PlaceSubU64(uint64_t a, uint64_t b) {
+    const uint32_t low = (uint32_t)a - (uint32_t)b;
+    const uint32_t borrow = (uint32_t)a < (uint32_t)b ? 1u : 0u;
+    const uint32_t high = (uint32_t)(a >> 32) - (uint32_t)(b >> 32) - borrow;
+
+    return FX_U64(high, low);
+}
+
+// 物質 m の親の量(子のレベルの単位 = 親の数 × 8)
+int64_t PlaceParentMassAt(uint32_t m) {
+    const uint2 part = PlacePartOf(m);
+    const uint64_t amount = g_cells[s_placeAddress].amounts[part.x];
+    uint64_t mass = amount;
+    if (part.y == PLACE_PART_SETTLED)
+        mass = PlaceLayerOf(part.x);
+    else if (part.y == PLACE_PART_REST)
+        mass = PlaceSubU64(amount, PlaceLayerOf(part.x));
+
+    return (int64_t)mass * 8;
+}
+
+#define PR_MATERIAL_COUNT PlaceMaterialCount()
+#define PR_MATERIAL(m) PlaceMaterialAt(m)
+#define PR_MATERIAL_MOLAR_VOLUME(m) g_species[g_cells[s_placeAddress].species[PlacePartOf(m).x]].molarVolume
+#define PR_PARENT_MASS(m) PlaceParentMassAt(m)
 #include "sim/placement_refine.hlsli"
 
 // グループ共有 6 KiB(HW の Work Graph の再帰のノードの 1 グループの重さを小さく保つ。12 KiB の 4 つの欄では RTX の
@@ -59,9 +186,9 @@ groupshared uint64_t gs_placeWide[MR_BLOCK_CELLS];
 
 // --- 隣の読み方(CPU の Present・FullnessAt・SurfaceAt・SlopeAt)---
 
-// 親のセルの詰まり(器 = 子 8 つ。CPU の FullnessAt)
-int64_t PlaceFullnessAt(uint32_t address) {
-    s_placeAddress = address;
+// 親のセルの詰まり(器 = 子 8 つ。CPU の FullnessAt。層の分は沈む側。layerBase = セルの層の組の始まり)
+int64_t PlaceFullnessAt(uint32_t address, uint32_t layerBase) {
+    PlaceUseCell(address, layerBase);
     SfSettleSum sum = SfMakeSettleSum();
     for (uint32_t m = 0; m < PR_MATERIAL_COUNT; ++m)
         sum = PrAddMaterial(sum, m, PR_PARENT_MASS(m));
@@ -133,14 +260,22 @@ uint2 PlaceChildIndex(uint32_t t) {
     return uint2((x & 1u) | ((y & 1u) << 1) | ((z & 1u) << 2), (x >> 1) | ((y >> 1) << 2) | ((z >> 1) << 4));
 }
 
-// 親のセルの配り方(隣の列の傾きから。s_placeAddress を親のセルにする)
-PrCell PlaceCellOf(MrBlock parent, uint32_t parentCell) {
+// セルの層の組の始まり(層の頁 layerPage のセル index。層の頁が無ければ MR_LAYER_NO_PAGE)
+uint32_t PlaceLayerBase(uint32_t layerPage, uint32_t index) {
+    if (layerPage == MR_LAYER_NO_PAGE)
+        return MR_LAYER_NO_PAGE;
+
+    return MrLayerEntryAddress(LayerPageCount(), LayerCapacity(), layerPage, index, 0);
+}
+
+// 親のセルの配り方(隣の列の傾きから。今のセルを親のセルにする)
+PrCell PlaceCellOf(MrBlock parent, uint32_t parentCell, uint32_t parentLayerPage) {
     const int32_t px = (int32_t)MrCellX(parentCell);
     const int32_t py = (int32_t)MrCellY(parentCell);
     const int32_t pz = (int32_t)MrCellZ(parentCell);
     const int64_t slopeX = PlaceSlopeAt(px, py, pz, 1, 0);
     const int64_t slopeZ = PlaceSlopeAt(px, py, pz, 0, 1);
-    s_placeAddress = PageCellAddress(parent.page, parentCell);
+    PlaceUseCell(PageCellAddress(parent.page, parentCell), PlaceLayerBase(parentLayerPage, parentCell));
 
     return PrMakeCell(false, slopeX, slopeZ, MR_CELL_VOLUME_MM3);
 }
@@ -188,16 +323,17 @@ int64_t PlaceChildEnergy(uint32_t parentAddress, uint32_t j, uint32_t local, uin
 }
 
 // 細かくする段の置かれ方(グループの全部のスレッドが呼ぶ。1 スレッド = 子のセル t。子の頁のセル t は親と同じ数で写してある)。
-// halo = この段の隣の写しの位置(T-1189。MR_HALO_NONE なら外は無い)
+// halo = この段の隣の写しの位置(T-1189。MR_HALO_NONE なら外は無い)。parentLayerPage・childLayerPage = 親・子の頁の層の頁
+// (無ければ MR_LAYER_NO_PAGE。子の層の頁のセル t は親のセルの層を写してある。寄せたセルは配った層の分で書き直す。T-1240)
 void PlaceRefineChildren(MrBlock parent, uint32_t parentSlot, uint32_t octant, uint32_t childPage, uint32_t halo,
-                         uint32_t t) {
+                         uint32_t parentLayerPage, uint32_t childLayerPage, uint32_t t) {
     s_placeHalo = halo;
     s_placeOctant = octant;
 
     // --- 1. 親のブロックのセル t の詰まり(子に覆われたセルは無い)。覆いは索引の見出しから(親を覆うのはこの段の後)---
     int32_t fullness = -1;
     if (g_blocks[parentSlot].children[MrOctantOfCell(t)] == MR_NO_BLOCK)
-        fullness = (int32_t)PlaceFullnessAt(PageCellAddress(parent.page, t));
+        fullness = (int32_t)PlaceFullnessAt(PageCellAddress(parent.page, t), PlaceLayerBase(parentLayerPage, t));
 
     gs_placeNarrow[t] = (uint32_t)fullness;
     GroupMemoryBarrierWithGroupSync();
@@ -207,7 +343,7 @@ void PlaceRefineChildren(MrBlock parent, uint32_t parentSlot, uint32_t octant, u
     const uint32_t j = index.x;
     const uint32_t local = index.y;
     const uint32_t parentAddress = PageCellAddress(parent.page, MrOctantCell(octant, local));
-    const PrCell cell = PlaceCellOf(parent, MrOctantCell(octant, local));
+    const PrCell cell = PlaceCellOf(parent, MrOctantCell(octant, local), parentLayerPage);
     const PrColumn column = PrMakeColumn(cell, j & 1u, j >> 2);
     const uint64_t ownOpen = PrChildWeightsOf(cell, column, j).openMm3;
 
@@ -221,26 +357,49 @@ void PlaceRefineChildren(MrBlock parent, uint32_t parentSlot, uint32_t octant, u
     for (uint32_t k = 0; k < 8; ++k)
         openSum += gs_placeNarrow[MrChildCell(local, k)];
 
-    // --- 3. 子のセルの成分を書き(親の並びのまま、量 0 の成分を消して詰める = 同じ中身なら同じ並び)、熱容量と化学のエネルギーを数える ---
+    // --- 3. 子のセルの成分を書き(親の並びのまま、量 0 の成分を消して詰める = 同じ中身なら同じ並び)、熱容量と化学のエネルギーを数える。
+    //     物質(層の分と残り)は成分へ足し戻し、層の分の和が子の層(CPU の ChildCells。T-1240)---
     const uint32_t address = PageCellAddress(childPage, t);
+    const uint32_t childLayer = PlaceLayerBase(childLayerPage, t);
     if (cell.settled)
         g_cells[address] = RxMakeEmptyCell(0);
 
-    s_placeAddress = parentAddress;
+    if (cell.settled && childLayer != MR_LAYER_NO_PAGE)
+        ClearLayerWords(childLayer);
+
+    PlaceUseCell(parentAddress, PlaceLayerBase(parentLayerPage, MrOctantCell(octant, local)));
     uint64_t capacity = 0;
     int64_t chemical = 0;
     uint32_t written = 0;
-    for (uint32_t m = 0; m < PR_MATERIAL_COUNT; ++m) {
-        const int64_t mass = PlaceChildMass(cell, column, m, j, local, ownOpen, openSum);
+    uint32_t m = 0;
+    for (uint32_t i = 0; i < g_cells[s_placeAddress].speciesCount; ++i) {
+        const uint32_t parts = s_placeSplit ? PlacePartCount(i) : 1u;
+        int64_t mass = 0;
+        int64_t layerMass = 0;
+        for (uint32_t k = 0; k < parts; ++k) {
+            const int64_t share = PlaceChildMass(cell, column, m + k, j, local, ownOpen, openSum);
+            mass += share;
+            if (s_placeSplit && PlacePartOf(m + k).y == PLACE_PART_SETTLED)
+                layerMass += share;
+        }
+
+        m += parts;
         if (mass <= 0)
             continue;
 
-        const uint32_t speciesId = g_cells[s_placeAddress].species[m];
+        const uint32_t speciesId = g_cells[s_placeAddress].species[i];
         capacity += (uint64_t)mass * (uint64_t)g_species[speciesId].heatCapacity;
         chemical += mass * g_species[speciesId].h0;
         if (cell.settled) {
             g_cells[address].species[written] = speciesId;
             g_cells[address].amounts[written] = (uint64_t)mass;
+        }
+
+        if (cell.settled && childLayer != MR_LAYER_NO_PAGE && layerMass > 0) {
+            const uint32_t entry = childLayer + (written * MR_LAYER_ENTRY_WORDS);
+            g_layers[entry] = speciesId;
+            g_layers[entry + 1] = (uint32_t)(uint64_t)layerMass;
+            g_layers[entry + 2] = (uint32_t)((uint64_t)layerMass >> 32);
         }
 
         written += 1;

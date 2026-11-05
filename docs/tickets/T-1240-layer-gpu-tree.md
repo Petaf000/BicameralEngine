@@ -120,6 +120,31 @@ T-1221 の 1 段目は、層の頁を GPU に置き、刻みの段の後に層�
 - 層の置き場の並びは common/multires_layers.hlsli(MrLayerUniformBase・MrLayerUniformAddress・MrLayerStoreWords(頁, 層の頁, 枠))。
   読む口は sim/multires_layer_access.hlsli(BoundLayerOf・WriteBoundLayers・UniformHasLayers。層はいつも今のセルと結んで読む)。
 
+## 7 の 4 の後半(2026-11-05 wt2 作業役 4 の 2 回目。t-1240-place-layers)
+- 置かれ方の段(sim/multires_refine_place.hlsli): 物質の口(PR_MATERIAL_COUNT・PR_MATERIAL・PR_PARENT_MASS・モル体積)を「成分 → 層の分・残り」に
+  (CPU の MaterialsOf と同じ順: 成分ごとに [層の分(沈む側。気体なら粒)][残り(層を使う世界の粒は気体 = 舞う粒)]。0 の分は物質にしない)。
+  層も舞う粒も無いセルは物質 m = 成分 m の道(前とビット単位で同じ)。物質 m の成分は毎回成分を前から数えて引く(局所の配列を持たない。T-0397)。
+  子のセルは物質を成分へ足し戻し(CPU の ChildCells)、層の分の和を子の層の頁へ書く(寄せないセルは写した層のまま)。
+- 詰まり(親のブロックの中・隣の写し multires_refine_halo.hlsl)も層の分を沈む側として数える(CPU の CellFullness。一様な隣は一様の枠の層)。
+- 層を使う世界(EnableCellLayers): 層の置き場に世界の印の語(MR_LAYER_FLAG_GRAIN。写す時に CPU が書く)。畳む段は覆われていないセルに舞う粒
+  (粒の物質の 量 > 層)があれば畳まない(CPU の HasFloatingGrain・PageHasFloatingGrain)。層の頁を持たない GPU(layerPages = 0)は印を知らない
+  (前と同じ。層を使う世界を layerPages = 0 で写すと CPU とずれる。断るかは司令塔へ: 今 GPU の試験・エンジンで層を使う世界を写す所は無い)。
+- RecordUpload の 2 つの断り(置かれ方の世界の層・層を使う世界)を外した。
+- 試験: gpu_tree_refine_placement に層の場面(層・1 段・2 段の鎖・舞う粒・層なしで舞う粒・端で隣の層)。gpu_multires_layers に一様な親の影の鎖・
+  一様な親へ層の違う一様な子を粗くする(親を頁に広げる)。
+
+## 引き継ぎメモ(2026-11-05 wt2 作業役 4 の 2 回目。t-1240-place-layers・途中)
+- どこまで: 上の「7 の 4 の後半」のコードと試験の場面を書いた。release ビルドは通った(2026-11-05 の runner ジョブ 220302、警告 0)。
+  コミットは「途中」(入れ物の再起動で止まった)。**試験はまだ 1 本も流していない**。
+- 未確認: dxil_alloca_check(置かれ方の変種 multires_graph_place・multires_tree_fold_check・halo の alloca の数が変わったかもしれない)・
+  tree_refine_placement(CPU。場面の関数に既定の引数を足しただけ)・gpu_tree_refine_placement〔HW・WARP〕の層の場面・
+  gpu_multires_layers〔HW・WARP〕の一様な親の影の鎖・層の違う一様な子を粗くする場面。HW の Work Graph が重くなって止まらないか
+  (置かれ方の段の物質の口が成分を毎回数え直す)。archmap --check。
+- 次の一手: ① dxil_alloca_check・multires_layers・tree_refine_placement(CPU)② gpu_tree_refine_placement・gpu_multires_layers〔HW・WARP〕・
+  gpu_multires・gpu_lab_box をまとめて 1 回 ③ 食い違ったら、置かれ方の物質の並び(CPU の MaterialsOf の順)と子の層の書き方
+  (成分の位置 written に書く)を突き合わせる。HW で止まったら層の配りを Compute の段に出す(上の 3 の退く道)。
+  ④ 層を使う世界を layerPages = 0 の GPU に写す時に断るかは司令塔へ。⑤ rebase main・ready の印。
+
 ## 引き継ぎメモ(2026-11-05 wt2 作業役 4)
 - 済み(t-1240-coarsen-layers): 7 の 3(粗くする・畳む・広げる)と一様の枠の層(7 の 4 の前半)。試験 gpu_multires_layers に
   粗くする刻み(本物の鎖を END_TICK まで・影の鎖を捨てる刻み)・畳む → 一様な鎖 → 粗くする(燃えない空気の根)・広げる(燃える一様な根)。
