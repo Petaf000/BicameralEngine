@@ -93,22 +93,39 @@ FX_FN uint64_t RcAbsorptanceQ16(uint64_t depthQ32) {
 // 光線は当たったセルに α (1 − ρ) を吸わせるので、同じ温度の物どうしは差し引き 0。23 §3.3「坂を下る」)。
 // RcCellEmission はそのうち面の向こうに依らない分(セルの温度と自分の光の値だけで決まり、6 面で同じ。T-1161)。
 // 面の量は RcMaskAcross で向こうが通さない帯を 0 にしたもの(= RcFaceEmission。セルごとに 1 回求めて 6 面で使う)
-FX_FN RcBands RcCellEmission(uint32_t temperatureMk, RcCellLight light) {
+// RcCellEmission を温度だけで決まる分(黒体の帯ごとの量)と光の値だけで決まる分(帯ごとの放射率 α (1 − ρ)。Q16)に分けたもの。
+// 同じ温度・同じ光の値を何度も使う呼ぶ側(仮の世界の写しの段が参照の温度と前後の値で比べる。T-1228)が 1 回ずつ求めて使い回す
+FX_FN RcBands RcBlackBands(uint32_t temperatureMk) {
     const uint64_t black = RcFaceBlackEmission(temperatureMk);
-    const uint64_t blackShort = FxShiftRightU128(FxMulU64Full(black, RcShortFractionQ32(temperatureMk)), 32);
-    const uint64_t blackLong = black - blackShort;
-    const uint64_t emissivityShort = (RcAbsorptanceQ16(light.depthShortQ32) *
-                                      ((uint64_t)LT_ONE_Q16 - (uint64_t)light.reflectanceShortQ16)) >>
-                                     16;
-    const uint64_t emissivityLong = (RcAbsorptanceQ16(light.depthLongQ32) *
-                                     ((uint64_t)LT_ONE_Q16 - (uint64_t)light.reflectanceLongQ16)) >>
-                                    16;
-
     RcBands bands;
-    bands.shortBand = FxShiftRightU128(FxMulU64Full(blackShort, emissivityShort), 16);
-    bands.longBand = FxShiftRightU128(FxMulU64Full(blackLong, emissivityLong), 16);
+    bands.shortBand = FxShiftRightU128(FxMulU64Full(black, RcShortFractionQ32(temperatureMk)), 32);
+    bands.longBand = black - bands.shortBand;
 
     return bands;
+}
+
+FX_FN RcBands RcEmissivityQ16(RcCellLight light) {
+    RcBands emissivity;
+    emissivity.shortBand = (RcAbsorptanceQ16(light.depthShortQ32) *
+                            ((uint64_t)LT_ONE_Q16 - (uint64_t)light.reflectanceShortQ16)) >>
+                           16;
+    emissivity.longBand = (RcAbsorptanceQ16(light.depthLongQ32) *
+                           ((uint64_t)LT_ONE_Q16 - (uint64_t)light.reflectanceLongQ16)) >>
+                          16;
+
+    return emissivity;
+}
+
+FX_FN RcBands RcEmissionOf(RcBands black, RcBands emissivityQ16) {
+    RcBands bands;
+    bands.shortBand = FxShiftRightU128(FxMulU64Full(black.shortBand, emissivityQ16.shortBand), 16);
+    bands.longBand = FxShiftRightU128(FxMulU64Full(black.longBand, emissivityQ16.longBand), 16);
+
+    return bands;
+}
+
+FX_FN RcBands RcCellEmission(uint32_t temperatureMk, RcCellLight light) {
+    return RcEmissionOf(RcBlackBands(temperatureMk), RcEmissivityQ16(light));
 }
 
 // 面の向こうのセルがその帯を通さない(τ が飽和)なら、その帯はその面から放たない(触れている物どうしは伝導の仕事。

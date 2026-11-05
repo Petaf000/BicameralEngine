@@ -47,27 +47,31 @@ RcGpuParams LoadRcParams() {
 }
 
 // 参照の温度の形でセルが側ごとに放つか(T-1229・T-1235): 各側の RcSources と同じ値(RcCellEmissionRelative。温度 0 のセルは
-// 放たない)が 0 でないか。正の側 = 自分の黒体 > 参照の黒体、負の側 = 参照 > 自分(帯ごと)。黒体の量は両側で 1 回ずつ求め、
-// 64bit は引かずに比べるだけ(T-1078)。面の向こうの飽和は見ない(多めに流すだけで、結果は変わらない)
+// 放たない)が 0 でないか。正の側 = 自分の黒体 > 参照の黒体、負の側 = 参照 > 自分(帯ごと)。64bit は引かずに比べるだけ(T-1078)。
+// 面の向こうの飽和は見ない(多めに流すだけで、結果は変わらない)。参照の量(reference = 参照の黒体 × このセルの放射率)と放射率は
+// 呼ぶ側が 1 回ずつ求めて前後の値で使い回す(T-1228。RcCellEmission と同じ式を分けたもの)
 struct RadiationEmitSides {
     bool positive;
     bool negative;
 };
 
-RadiationEmitSides EmitSidesOf(uint32_t temperatureMk, uint32_t referenceWord, RcCellLight light) {
-    const uint32_t referenceMk = referenceWord & ~RC_REFERENCE_NEGATIVE;
+RadiationEmitSides EmitSidesOf(uint32_t temperatureMk, uint32_t referenceMk, RcBands emissivityQ16, RcBands reference) {
     RadiationEmitSides sides;
     sides.positive = false;
     sides.negative = false;
     if (temperatureMk == 0 || temperatureMk == referenceMk)
         return sides;
 
-    const RcBands own = RcCellEmission(temperatureMk, light);
-    const RcBands reference = RcCellEmission(referenceMk, light);
+    const RcBands own = RcEmissionOf(RcBlackBands(temperatureMk), emissivityQ16);
     sides.positive = own.shortBand > reference.shortBand || own.longBand > reference.longBand;
     sides.negative = reference.shortBand > own.shortBand || reference.longBand > own.longBand;
 
     return sides;
+}
+
+// 温度が参照でも 0 でもない(放つかを求める要がある)
+bool NeedsEmitSides(uint32_t temperatureMk, uint32_t referenceMk) {
+    return temperatureMk != 0 && temperatureMk != referenceMk;
 }
 
 // ブロックが前の刻み(tick − 1)の写しの後で変わったか(sim::ProbeRadiationBlockStale と同じ: 印 ≥ tick − 1)。
@@ -149,7 +153,8 @@ bool SameLight(RcCellLight left, RcCellLight right) {
     // 増減 0 なので、放つかを求めず、書きもしない(作業の中身はもうその値)
     const RcCellLight previousLight = rcWork.Load<RcCellLight>(lightAt);
     const uint32_t previousMk = rcWork.Load(temperatureAt);
-    const bool same = previousMk == temperatureMk && SameLight(previousLight, light);
+    const bool sameLight = SameLight(previousLight, light);
+    const bool same = previousMk == temperatureMk && sameLight;
     uint32_t positiveStep = 0;
     uint32_t negativeStep = 0;
     if (!same) {
@@ -159,10 +164,24 @@ bool SameLight(RcCellLight left, RcCellLight right) {
         rcSecond.Store<RcCellLight>(lightAt, light);
         rcSecond.Store(temperatureAt, temperatureMk);
 
-        const RadiationEmitSides before = EmitSidesOf(previousMk, params.referenceWord, previousLight);
-        const RadiationEmitSides after = EmitSidesOf(temperatureMk, params.referenceWord, light);
-        positiveStep = EmitDelta(before.positive, after.positive);
-        negativeStep = EmitDelta(before.negative, after.negative);
+        // 放つかは前後の値の分だけ求める(参照の黒体は 1 回・光の値が同じなら放射率と参照の量も 1 回。温度だけ変わるセルがほとんど)
+        const uint32_t referenceMk = params.referenceWord & ~RC_REFERENCE_NEGATIVE;
+        if (NeedsEmitSides(temperatureMk, referenceMk) || NeedsEmitSides(previousMk, referenceMk)) {
+            const RcBands referenceBlack = RcBlackBands(referenceMk);
+            const RcBands emissivity = RcEmissivityQ16(light);
+            const RcBands reference = RcEmissionOf(referenceBlack, emissivity);
+            const RadiationEmitSides after = EmitSidesOf(temperatureMk, referenceMk, emissivity, reference);
+            RadiationEmitSides before;
+            if (sameLight) {
+                before = EmitSidesOf(previousMk, referenceMk, emissivity, reference);
+            } else {
+                const RcBands previousEmissivity = RcEmissivityQ16(previousLight);
+                before = EmitSidesOf(previousMk, referenceMk, previousEmissivity,
+                                     RcEmissionOf(referenceBlack, previousEmissivity));
+            }
+            positiveStep = EmitDelta(before.positive, after.positive);
+            negativeStep = EmitDelta(before.negative, after.negative);
+        }
     }
 
     // 側ごとの放つセルの数(作業の RC_GPU_WORK_EMITTERS。T-1229・T-1235・T-1228)。数はいつも「作業の今の中身で放つセルの数」で、
