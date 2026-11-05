@@ -121,10 +121,26 @@ namespace bicameral::test {
                 extruded.clamps.push_back(clamps3);
                 if (!scene.loadMn.empty())
                     extruded.loadMn.push_back(scene.loadMn[at]);
+                if (!scene.fine.empty())
+                    extruded.fine.push_back(scene.fine[at]);  // 2 × 2 の細かいセル(奥行は 1 セル)→ 2 × 2 × 2(T-1294)
             }
         }
 
         return extruded;
+    }
+
+    // 0.5 m の格子の矩形 [fromX, toX) × [fromUp, toUp) を分ける印(T-1120 の場面を 3 次元へも。T-1294)
+    inline sim::SupportScene MarkedFine(sim::SupportScene scene, uint32_t fromX, uint32_t toX, uint32_t fromUp,
+                                        uint32_t toUp) {
+        if (scene.fine.empty())
+            scene.fine.assign(scene.solid.size(), 0);
+
+        for (uint32_t up = fromUp; up < toUp; ++up) {
+            for (uint32_t x = fromX; x < toX; ++x)
+                scene.fine[x + (size_t)scene.width * up] = 1;
+        }
+
+        return scene;
     }
 
     // ねじれ(T-0960): x の向きの棒(length セル・断面 1 セル・根を壁に固定)の先に奥行の向きの腕(2 セル)・腕の先に荷(重さ 0)

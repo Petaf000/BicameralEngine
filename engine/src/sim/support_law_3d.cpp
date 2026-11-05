@@ -13,6 +13,7 @@
 //     ねじれと曲げだけで運ぶと、段の面の外へ曲がる斜めの梁が柔らかすぎた〔(1,0,1) の梁 +11 %・(1,1,1) +21 %〕)
 //   角の斜めの棒(T-1293。c → c + (s_x, 1, s_z) が、間の 6 セルのうち 2 つだけを通る 3 歩の階段でつながる所): ½ q_c (s · Δu)²
 //     (q_c = (b_x + b_上 + b_奥行) × 2 × 分子 ÷ (3 × 分母)。軸の硬さ 3 q_c は辺の斜めの棒 2 q と同じ ka/12)
+// 違う大きさのセル(T-1294)の面と段の棒の式は support_law_3d_mixed.cpp の冒頭。
 // 剛体の動き(並進 3・回り 3)では全部の項が 0(回り ω' = 角 × dx/2 で u = ω' × p・φ = ω'。p = 中心のセルの半分の単位の座標)。
 // 一様な歪み(対称 6 つ)では面ごとの力が同じ(つぎはぎの検査。support_3d_test)。延ばし方は 3 次元の剛体の動き(Rigid3DProlongation)。
 #include "sim/support_law_3d.h"
@@ -35,6 +36,7 @@ namespace bicameral::sim {
         constexpr uint32_t BLOCK_SHIFT = 32;        // 右辺の単位 2^-16 mN(係数 2^-32 × 変位 2^-16 ÷ 2^32)
         constexpr uint32_t BLOCK_FORCE_SHIFT = 16;  // mN → 2^-16 mN
         constexpr uint32_t NO_CELL = UINT32_MAX;
+        constexpr uint32_t SPLIT_CELL = UINT32_MAX - 1;  // m_index: 2 × 2 × 2 の細かいセルに分けたセル(T-1294)
 
         // Levi-Civita の ε(i, j, k)(0〜2 の添字。巡回 +1・逆 −1・同じ添字 0)
         constexpr int64_t Epsilon(uint32_t i, uint32_t j, uint32_t k) {
@@ -48,9 +50,10 @@ namespace bicameral::sim {
             return FxDivU128By64(product, PER_MILLION).quotient;
         }
 
-        // セル 1 つの重さ ρ g dx³(10^-12 mN → mN)
-        int64_t CellWeight(const SupportScene3D& scene) {
-            const uint64_t volume = scene.cellMm * scene.cellMm * scene.cellMm;
+        // セル 1 つの重さ ρ g dx³(10^-12 mN → mN。細かいセルは (dx/2)³)
+        int64_t CellWeight(const SupportScene3D& scene, bool fine) {
+            const uint64_t side = fine ? scene.cellMm / 2 : scene.cellMm;
+            const uint64_t volume = side * side * side;
             const FxU128 product = FxMulU64Full(scene.densityKgPerM3 * scene.gravityUmPerS2, volume);
 
             return (int64_t)FxDivU128By64(product, PER_TRILLION).quotient;
@@ -126,7 +129,15 @@ namespace bicameral::sim {
         m_bondSide = BondUnit(m_scene.stiffnessKpa, m_scene.cellMm) / 6;
         const uint64_t upKpa = m_scene.stiffnessUpKpa != 0 ? m_scene.stiffnessUpKpa : m_scene.stiffnessKpa;
         m_bondUp = BondUnit(upKpa, m_scene.cellMm) / 6;
-        m_weight = CellWeight(m_scene);
+        m_weight = CellWeight(m_scene, false);
+        m_mixed = rng::any_of(m_scene.fine, [](uint8_t fine) { return fine != 0; });
+        if (m_mixed) {
+            FX_ASSERT(m_scene.cellMm % 2 == 0);
+            m_fineBondSide = BondUnit(m_scene.stiffnessKpa, m_scene.cellMm / 2) / 6;
+            m_fineBondUp = BondUnit(upKpa, m_scene.cellMm / 2) / 6;
+            m_fineWeight = CellWeight(m_scene, true);
+        }
+
         BuildCells();
         BuildTerms();
         BuildBlocks();
@@ -134,6 +145,11 @@ namespace bicameral::sim {
 
     // --- セル(1 つの大きさ)と重さ + 荷 ---
     void SupportLaw3D::BuildCells() {
+        if (m_mixed) {
+            BuildMixedCells();
+            return;
+        }
+
         const size_t count = (size_t)m_scene.width * m_scene.height * m_scene.depth;
         m_index.assign(count, NO_CELL);
         for (uint32_t z = 0; z < m_scene.depth; ++z) {
@@ -175,35 +191,38 @@ namespace bicameral::sim {
     // --- 項: 面・固定した面・段の斜めの棒 ---
     void SupportLaw3D::BuildTerms() {
         for (uint32_t cell = 0; cell < m_cells.size(); ++cell) {
+            if (m_mixed && m_cellFine[cell] != 0)
+                continue;  // 細かいセルは BuildMixedTerms
+
             const auto [x, up, z] = m_cells[cell];
             const std::array<int64_t, SUPPORT3_AXES> at = {x, up, z};
             for (uint32_t axis = 0; axis < SUPPORT3_AXES; ++axis) {
                 std::array<int64_t, SUPPORT3_AXES> next = at;
                 ++next[axis];
                 const uint32_t neighbor = Index(next[0], next[1], next[2]);
-                if (neighbor != NO_CELL)
-                    AddBond(cell, neighbor, axis, Intact(cell, axis));
+                const uint32_t intact = Intact(cell, axis);
+                if (neighbor < SPLIT_CELL && intact != 0)
+                    AddBond(cell, neighbor, axis, Scaled(AxisUnit(axis), intact));
             }
 
             const uint8_t clamps = m_scene.clamps[x + (size_t)m_scene.width * (up + (size_t)m_scene.height * z)];
             for (uint32_t axis = 0; axis < SUPPORT3_AXES; ++axis) {
                 for (const int32_t side : {-1, 1}) {
                     if ((clamps & Support3Clamp(axis, side)) != 0)
-                        AddClamp(cell, axis, side);
+                        AddClamp(cell, axis, side, AxisUnit(axis));
                 }
             }
 
             if (m_options.stairBraces)
                 AddBraces(cell, x, up, z);
         }
+
+        if (m_mixed)
+            BuildMixedTerms();
     }
 
-    // 面の 6 つの項(伸び・ずれ 2・曲げ 2・ねじれ)
-    void SupportLaw3D::AddBond(uint32_t low, uint32_t high, uint32_t axis, uint32_t intact) {
-        if (intact == 0)
-            return;
-
-        const uint64_t b = Scaled(AxisUnit(axis), intact);
+    // 面の 6 つの項(伸び・ずれ 2・曲げ 2・ねじれ)。b は残りの硬さを掛けた後(細かいセルどうしは細かいセルの b)
+    void SupportLaw3D::AddBond(uint32_t low, uint32_t high, uint32_t axis, uint64_t b) {
         Term axial{.low = low, .high = high, .coefficient = 6 * b};
         axial.gradientLow[axis] = -1;
         axial.gradientHigh[axis] = 1;
@@ -234,8 +253,7 @@ namespace bicameral::sim {
     }
 
     // 固定した面の 6 つの項(面の点の形。硬さは面の 2 倍 = 中心から壁まで dx/2)
-    void SupportLaw3D::AddClamp(uint32_t cell, uint32_t axis, int32_t side) {
-        const uint64_t b = AxisUnit(axis);
+    void SupportLaw3D::AddClamp(uint32_t cell, uint32_t axis, int32_t side, uint64_t b) {
         FixedTerm axial{.cell = cell, .coefficient = 12 * b};
         axial.gradient[axis] = 1;
         m_fixedTerms.push_back(axial);
@@ -277,8 +295,13 @@ namespace bicameral::sim {
                     std::array<int64_t, SUPPORT3_AXES> diagonalPosition = sidePosition;
                     ++diagonalPosition[b];
                     const uint32_t diagonal = find(diagonalPosition);
-                    const bool side = find(sidePosition) != NO_CELL;
-                    const bool above = find(abovePosition) != NO_CELL;
+                    const uint32_t sideCell = find(sidePosition);
+                    const uint32_t aboveCell = find(abovePosition);
+                    if (diagonal == SPLIT_CELL || sideCell == SPLIT_CELL || aboveCell == SPLIT_CELL)
+                        continue;  // 分けたセルが絡む段は細かい格子で(AddFineBraces)
+
+                    const bool side = sideCell != NO_CELL;
+                    const bool above = aboveCell != NO_CELL;
                     if (diagonal == NO_CELL || side == above)
                         continue;
 
@@ -316,30 +339,38 @@ namespace bicameral::sim {
             }
         }
 
-        AddCornerBraces(cell, at);
+        AddCornerBraces(cell, at, false);
     }
 
-    // 角の斜めの棒: c → c + (s_x, 1, s_z) が、間の 6 セルのうち 2 つだけを通る 3 歩の階段(軸の順 o0 → o1 → o2)でつながる所
-    void SupportLaw3D::AddCornerBraces(uint32_t cell, const std::array<int64_t, SUPPORT3_AXES>& at) {
+    // 角の斜めの棒: c → c + (s_x, 1, s_z) が、間の 6 セルのうち 2 つだけを通る 3 歩の階段(軸の順 o0 → o1 → o2)でつながる所。
+    // 粗い格子は分けたセルが絡む所を飛ばし、細かい格子は細かいセルどうしだけ(分けていないセルは場所を埋める。違う大きさのセルの
+    // 角の棒は置かない = T-1294 の残り)
+    void SupportLaw3D::AddCornerBraces(uint32_t cell, const std::array<int64_t, SUPPORT3_AXES>& at, bool fineGrid) {
         constexpr std::array<std::array<uint32_t, 3>, 6> ORDERS = {
             {{0, 1, 2}, {0, 2, 1}, {1, 0, 2}, {1, 2, 0}, {2, 0, 1}, {2, 1, 0}}};
         for (const int32_t acrossX : {-1, 1}) {
             for (const int32_t acrossZ : {-1, 1}) {
                 const std::array<int64_t, SUPPORT3_AXES> step = {acrossX, 1, acrossZ};
-                const uint32_t diagonal = Index(at[0] + step[0], at[1] + step[1], at[2] + step[2]);
-                if (diagonal == NO_CELL)
+                const uint32_t diagonal = Occupant({at[0] + step[0], at[1] + step[1], at[2] + step[2]}, fineGrid);
+                if (diagonal == NO_CELL || diagonal == SPLIT_CELL)
+                    continue;
+
+                if (fineGrid && m_cellFine[diagonal] == 0)
                     continue;
 
                 // 間の 6 セルのうちあるものの数(2 つだけ)
                 uint32_t present = 0;
+                bool split = false;
                 for (uint32_t mask = 1; mask < 7; ++mask) {
-                    present += Index(at[0] + ((mask & 1) != 0 ? step[0] : 0), at[1] + ((mask & 2) != 0 ? step[1] : 0),
-                                     at[2] + ((mask & 4) != 0 ? step[2] : 0)) != NO_CELL
-                                   ? 1
-                                   : 0;
+                    const uint32_t between = Occupant(
+                        {at[0] + ((mask & 1) != 0 ? step[0] : 0), at[1] + ((mask & 2) != 0 ? step[1] : 0),
+                         at[2] + ((mask & 4) != 0 ? step[2] : 0)},
+                        fineGrid);
+                    split = split || between == SPLIT_CELL;
+                    present += between != NO_CELL ? 1 : 0;
                 }
 
-                if (present != 2)
+                if (present != 2 || split)
                     continue;
 
                 for (const std::array<uint32_t, 3>& order : ORDERS) {
@@ -347,8 +378,7 @@ namespace bicameral::sim {
                     first[order[0]] += step[order[0]];
                     std::array<int64_t, SUPPORT3_AXES> second = first;
                     second[order[1]] += step[order[1]];
-                    if (Index(first[0], first[1], first[2]) == NO_CELL ||
-                        Index(second[0], second[1], second[2]) == NO_CELL)
+                    if (Occupant(first, fineGrid) == NO_CELL || Occupant(second, fineGrid) == NO_CELL)
                         continue;
 
                     // 道の 3 つの面の残りの硬さの小さい方
@@ -356,15 +386,16 @@ namespace bicameral::sim {
                         if (step[axis] < 0)
                             from[axis] -= 1;
 
-                        return IntactAt(from, axis);
+                        return FaceIntactAt(from, axis, fineGrid);
                     };
                     const uint32_t intact = std::min(
                         {faceIntact(at, order[0]), faceIntact(first, order[1]), faceIntact(second, order[2])});
                     if (intact == 0)
                         break;
 
-                    const uint64_t unit = (AxisUnit(0) + AxisUnit(1) + AxisUnit(2)) * 2 * m_options.braceNumerator /
-                                          (3 * m_options.braceDenominator);
+                    const uint64_t sides = fineGrid ? 2 * m_fineBondSide + m_fineBondUp
+                                                    : AxisUnit(0) + AxisUnit(1) + AxisUnit(2);
+                    const uint64_t unit = sides * 2 * m_options.braceNumerator / (3 * m_options.braceDenominator);
                     Term brace{.low = cell, .high = diagonal, .coefficient = Scaled(unit, intact)};
                     for (uint32_t axis = 0; axis < SUPPORT3_AXES; ++axis) {
                         brace.gradientLow[axis] = -step[axis];
@@ -388,14 +419,48 @@ namespace bicameral::sim {
         return intact[(size_t)p[0] + (size_t)m_scene.width * ((size_t)p[1] + (size_t)m_scene.height * (size_t)p[2])];
     }
 
+    uint32_t SupportLaw3D::Occupant(const std::array<int64_t, SUPPORT3_AXES>& p, bool fineGrid) const {
+        if (!fineGrid)
+            return Index(p[0], p[1], p[2]);
+
+        const int64_t width = 2 * (int64_t)m_scene.width;
+        const int64_t height = 2 * (int64_t)m_scene.height;
+        if (p[0] < 0 || p[1] < 0 || p[2] < 0 || p[0] >= width || p[1] >= height || p[2] >= 2 * (int64_t)m_scene.depth)
+            return NO_CELL;
+
+        const uint32_t fine = m_fineIndex[(size_t)(p[0] + width * (p[1] + height * p[2]))];
+        if (fine != NO_CELL)
+            return fine;
+
+        const uint32_t coarse = Index(p[0] / 2, p[1] / 2, p[2] / 2);
+
+        return coarse < SPLIT_CELL ? coarse : NO_CELL;
+    }
+
+    // 細かい格子: 同じ元のセルの中の面は割れていない・違う元のセルの間は元のセルの面の値
+    uint32_t SupportLaw3D::FaceIntactAt(const std::array<int64_t, SUPPORT3_AXES>& p, uint32_t axis,
+                                        bool fineGrid) const {
+        if (!fineGrid)
+            return IntactAt(p, axis);
+
+        if ((p[axis] & 1) == 0)
+            return SUPPORT_INTACT_FULL;
+
+        return IntactAt({p[0] / 2, p[1] / 2, p[2] / 2}, axis);
+    }
+
     // --- 成分を持つ節の系(k = 6): 同じ 2 節の続いた項は 1 つの面へ ---
     void SupportLaw3D::BuildBlocks() {
         EquilibriumBlockSystem& system = m_blockSystem;
         system.components = SUPPORT3_COMPONENTS;
         system.coefficientShift = BLOCK_SHIFT;
         system.prolongation = Rigid3DProlongation();
-        for (const auto& [x, up, z] : m_cells)
-            system.nodes.push_back({.level = 0, .x = x, .y = up, .z = z});
+        // 混ざる場面は細かいセルがレベル 1(細かいほど大きい。座標は細かいセルの単位。2 次元の T-1104 と同じ約束)
+        for (uint32_t cell = 0; cell < m_cells.size(); ++cell) {
+            const auto [x, up, z] = m_cells[cell];
+            const int32_t level = m_mixed && m_cellFine[cell] != 0 ? 1 : 0;
+            system.nodes.push_back({.level = level, .x = x, .y = up, .z = z});
+        }
 
         for (const Term& term : m_terms) {
             const bool same = !system.faces.empty() && system.faces.back().low == term.low &&
@@ -405,6 +470,8 @@ namespace bicameral::sim {
 
             AddFaceTerm(system.faces.back(), term.coefficient, term.gradientLow, term.gradientHigh);
         }
+
+        BuildMultiBlocks();
 
         for (const FixedTerm& term : m_fixedTerms) {
             const bool same = !system.fixedFaces.empty() && system.fixedFaces.back().node == term.cell;
@@ -443,11 +510,23 @@ namespace bicameral::sim {
     int64_t SupportLaw3D::Value(uint32_t x, uint32_t up, uint32_t z, uint32_t component) const {
         const uint32_t cell = Index(x, up, z);
 
+        return cell >= SPLIT_CELL || component >= SUPPORT3_COMPONENTS ? 0 : CellValue(cell, component);
+    }
+
+    int64_t SupportLaw3D::FineValue(uint32_t fx, uint32_t fup, uint32_t fz, uint32_t component) const {
+        if (!m_mixed)
+            return Value(fx / 2, fup / 2, fz / 2, component);
+
+        const uint32_t cell = Occupant({fx, fup, fz}, true);
+
         return cell == NO_CELL || component >= SUPPORT3_COMPONENTS ? 0 : CellValue(cell, component);
     }
 
+    // 中心(セルの半分の単位。混ざる場面は細かいセルの半分の単位)
     std::array<int64_t, SUPPORT3_AXES> SupportLaw3D::Position(uint32_t cell) const {
         const auto [x, up, z] = m_cells[cell];
+        if (m_mixed && m_cellFine[cell] == 0)
+            return {4 * (int64_t)x + 2, 4 * (int64_t)up + 2, 4 * (int64_t)z + 2};
 
         return {2 * (int64_t)x + 1, 2 * (int64_t)up + 1, 2 * (int64_t)z + 1};
     }
@@ -460,8 +539,9 @@ namespace bicameral::sim {
         const auto turnOf = [&](uint32_t cell, const std::array<int64_t, SUPPORT3_COMPONENTS>& part) {
             const std::array<int64_t, 3> force = {part[0], part[1], part[2]};
             std::array<int64_t, 3> turn = Cross(Position(cell), force);
+            const int64_t arm = m_mixed && m_cellFine[cell] == 0 ? 2 : 1;  // 回りの成分の腕(位置の単位で)
             for (uint32_t axis = 0; axis < SUPPORT3_AXES; ++axis)
-                turn[axis] += part[SUPPORT3_TURN + axis];
+                turn[axis] += arm * part[SUPPORT3_TURN + axis];
 
             return turn;
         };
@@ -486,6 +566,25 @@ namespace bicameral::sim {
             for (uint32_t c = 0; c < SUPPORT3_COMPONENTS; ++c) {
                 net[term.low][c] -= force * term.gradientLow[c];
                 net[term.high][c] -= force * term.gradientHigh[c];
+            }
+        }
+
+        // 違う大きさの面の項(T-1294): 形 A の固定した面の側の項は和が 0 でない分を壁が支える(固定した面の力に数える。
+        // ほかの項の和は 0 なので足しても変わらない。2 次元の Ledger と同じ)
+        for (const MultiTerm& term : m_multiTerms) {
+            const int64_t force = Flow(term.coefficient, MultiProjection(term));
+            for (uint32_t i = 0; i < term.count; ++i) {
+                std::array<int64_t, SUPPORT3_COMPONENTS> part{};
+                for (uint32_t c = 0; c < SUPPORT3_COMPONENTS; ++c) {
+                    part[c] = -force * term.gradients[i][c];
+                    net[term.nodes[i]][c] += part[c];
+                }
+
+                const std::array<int64_t, 3> turn = turnOf(term.nodes[i], part);
+                for (uint32_t axis = 0; axis < SUPPORT3_AXES; ++axis) {
+                    ledger.reactionMn[axis] += part[axis];
+                    ledger.reactionTurn[axis] += turn[axis];
+                }
             }
         }
 
