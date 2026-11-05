@@ -72,7 +72,7 @@ tools/dxil_alloca/limits.txt を下げる。結果はビット単位で同じ・
   - おすすめ: 開かない(E10)。局所の配列がどれだけ残ると HW の Work Graph が止まるかの境は未確認なので、11 で止まりが出たら開く方へ戻す(1 行で戻せる)。
 
 ## 引き継ぎメモ(2026-11-05 wt5)
-- ブランチ t-1266-multires-no-local-array(main 244f7dd2 の上)。E10(子 2³ の回しを開かない・仮)で release ビルド警告 0・表 847・CPU 3 本(multires・multires_quiet・dxil_alloca_check)・
+- ブランチ t-1266-multires-no-local-array(main 09d7b1de へ rebase 済み。rebase 後の release ビルド警告 0・dxil_alloca_check(表 847 のまま)・float_check 5 本・multires_quiet 合格 = 20261104-221855-test。main で増えたのは phase_layer.hlsli・support_law_3d で多重解像度のシェーダーに触れないので GPU の組は 244f7dd2 の上の結果のまま)。以下の試験は 244f7dd2 の上で流した。E10(子 2³ の回しを開かない・仮)で release ビルド警告 0・表 847・CPU 3 本(multires・multires_quiet・dxil_alloca_check)・
   GPU の HW 20 本・WARP 8 本 合格(e9 で落ちた gpu_multires_quiet も 15.9 s で合格)。E10 の初回(この実行ファイルで冷えていた)の試験の時間: gpu_multires_uniform 17.7 s(e9 373 s)・
   gpu_multires_implicit_build 26 s(e9 325 s)・gpu_lab_box 19 s(e9 420 s)。
 - 残りの候補(このチケットの続き。急がない): multires_graph / graph_place の 11(子の並び [64 x i32/i64] 2 つずつ・[8 x i64] 5)・multires_graph_wide 51・multires_step_wide_*(速い形 32 種。動的な添字のまま = ADR-0052 追記 14)・
