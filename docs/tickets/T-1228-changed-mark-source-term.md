@@ -1,6 +1,6 @@
 # T-1228 変わったブロックの印を費用の読み手へ・吸った分を当てる段の源の項に(ADR-0469 の 4-4・4-1。ADR-0500 改訂)
 
-- Status: Doing(段 1 の RadiationGrid は 2026-11-05 wt4 で済み・RcSources の一覧が残り。2026-10-27 wt6 が T-1161 から分けた・2026-10-29 本体 16 回目〔設計〕が ADR-0500 で形を決めた)
+- Status: Doing(段 1 の RadiationGrid は 2026-11-05 wt4 で済み〔main 01e261d0〕・RcSources の一覧は t-1228-rc-sources で試験の途中。2026-10-27 wt6 が T-1161 から分けた・2026-10-29 本体 16 回目〔設計〕が ADR-0500 で形を決めた)
 - 種類: 工学
 - PC: 必須(GPU)
 - 見積もり: チャット 2 回分(段 1 / 段 2)
@@ -80,6 +80,19 @@
   放つかは EmitSidesOf(写しの段の今の判定。RcCellEmissionRelative が 0 でないのと同じ。面の向こうは見ない = 多めに拾うだけ)。
 - 確かめ: gpu_radiation_cost の `radiationCopyAll` と同じく「一覧を使わない」の印で全部の場面のハッシュと飛ばした刻みが一致。費用は perf.md(Sources 81 µs/側)。
 
+## 段 1 の RcSources の一覧の作り(2026-11-05 wt4 7 本目・ブランチ t-1228-rc-sources。上の (a)・(b) の案のまま)
+- (a) 当てる段(RadiationApply)が両側の放った・吸ったの欄を読んだ後、4 語のどれかが 0 でなければ 0 に戻す(ClearRadiationSide。0 かは語の OR で見る。
+  足した和を 0 と比べない)。欄を読むのは当てる段だけ(仮の世界は段の読み戻し〔GpuCascadeLight::Read〕を使わない・RcPlanTick は頭の帳簿・
+  RadiationHash は持ち越しの表だけ)。保存点は欄も写すが、刻みの境ではいつも 0。1 側の形でも 0 に戻す(全部のセルを回す今の RcSources でも同じ結果)。
+- (b) 一覧 = 作業の workEmitBits(RcGpuParams の新しい欄。1 セル 1 bit・32 セル = 1 語。0 = 一覧を使わない)。写しの段が放つセルの数と同じ増減
+  (EmitDelta)で立てる(InterlockedOr)/ 下ろす(InterlockedAnd)。1 セルは 1 スレッドだけが書く・ビットは重ならない = 順によらない。
+  RcSources は一覧に立っていないセルを飛ばす(ListedEmitter。波の 32 セルが 1 語を共に読む)。一覧は放つセルの数と同じく「作業の今の中身で放つ」セル
+  (EmitSidesOf = RcCellEmissionRelative が 0 でない。値は 2^63 未満なので符号付きの差と符号なしの比べは同じ)。
+- 使うのは参照の温度の形の仮の世界だけ(probe_sim_radiation の emitterList。1 側の形・木の世界・gpu_cascade_light の試験は workEmitBits = 0 で今のまま)。
+  一覧は作業の初めの持ち越しの前に置くので RecordUpload で空になる(作る時の温度は 0 でなければ断る)。作業は保存点で戻さないので、一覧と作業はいつも合う。
+- 比べる印 `ProbeSimOptions::radiationSourcesAll`(一覧を置かない = 全部のセルを回す)。gpu_radiation_cost: 火の場面で一覧の有無のハッシュが全部同じ・
+  飛ばす段の場面は印も一覧も使わない時とハッシュ・飛ばした刻みの数が同じ。
+
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-10-29(本体 16 回目・設計): チケットのファイルを作った(前は T-1161 の「分けたもの」の行だけ)。形は ADR-0500。
 - 2026-10-29(wt4): 段 1 のうち「受けのあった葉」だけ(CascadeTouchedSlots。T-1227 のブランチ t-1227-rc-carry-leaf)。RadiationGrid・RcSources を
@@ -102,3 +115,8 @@
   判定のビットで持ち、光の値は比べない)、(b) 全部写す刻みでは数を作り直す(数を 0 にする小さな起動を前に置き、増減ではなく新しい値だけ足す = 前の値を読まない)。
   どちらも結果は変わらない(gpu_radiation_cost の全部写す時との比べ・飛ばした刻みの数で確かめる)。RcSources の一覧(段 1 の残り)は未着手。
 - 2026-11-05(wt4 6 本目): 全部写す刻みの残り(2 側の火 96〜97 µs)を削った(上の「直し 2」)。2 側の火の全部写す刻み 76〜78 µs・変わったブロックだけ 13 µs。rebase main(bdeefa1a)・release 警告 0・probe_radiation・gpu_probe_sim・gpu_radiation_cost・gpu_probe_sim_tables・gpu_probe_rewind・gpu_world_copy・gpu_play_metric・archmap --check。印 runner/ready/t-1228-skip-grid.txt を「入れてよい」に書き直した。RcSources の一覧(段 1 の残り)は未着手。
+- 2026-11-05(wt4 7 本目・入れ物の再起動で区切り): ブランチ t-1228-rc-sources(t-1228-skip-grid 8d7483ca の上・先頭 119af69a + この記録)で RcSources の一覧を入れた(上の
+  「RcSources の一覧の作り」)。release 警告 0・probe_radiation・gpu_probe_sim・gpu_probe_rewind・gpu_radiation_cost(一覧の有無でハッシュ一致・飛ばした刻みも同じ)合格。
+  **未実行**: gpu_probe_sim_tables・gpu_world_copy・gpu_play_metric・gpu_cascade_light・gpu_cascade_tree_grid・archmap --check・費用の測り(未測定)。
+  **次の一手**: rebase main(t-1228-skip-grid は main 01e261d0 に入った)→ release → 上の残りの試験 → `run -Preset release -Exe gpu_radiation_cost_test -- --measure --ticks 240`
+  (同じ回の「RcSources は全部のセル」と比べる。Sources 72〜81 µs/側・Apply の 0 戻しの増え・全部写す刻みの Grid が 76〜78 から重くならないか)を main と交互に → perf.md → 印 runner/ready/。
