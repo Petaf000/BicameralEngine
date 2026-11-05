@@ -218,4 +218,21 @@ namespace bicameral::test::tree_place {
         return world;
     }
 
+    // --- 前線の順(T-1314): 隣を先の刻みに細かくしてから、次の刻みに A の八分の一 1 を細かくする ---
+    // R0 = A の八分の一 0(A の八分の一 1 のブロックの中の隣。x = 0〜3)
+    inline MrRequest EdgeRequestInside() {
+        return MrMakeRequest(MR_REQUEST_REFINE, 1, 1, 1, 1);
+    }
+
+    // first を 1 刻みで処理した端の世界に、次の刻みで second を処理する(先に細かくした隣は子に覆われている)
+    inline World MakeEdgeFrontWorld(const Materials& materials, std::span<const MrRequest> first,
+                                    std::span<const MrRequest> second, LayerMode mode = LayerMode::None) {
+        World world = MakeEdgeWorld(materials, true, first, mode);
+        sim::SubmitRequests(world.nest, second);
+        sim::ProcessRequests(world.nest);
+        world.child = sim::LookupBlock(world.nest, 1, 8, 0, 0);
+
+        return world;
+    }
+
 }  // namespace bicameral::test::tree_place

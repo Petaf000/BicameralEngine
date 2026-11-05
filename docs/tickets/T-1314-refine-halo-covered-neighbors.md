@@ -1,6 +1,6 @@
 # T-1314 木を細かくする段の隣の写し: 子に覆われた隣のセルを読む(T-1257 の不具合候補)
 
-- Status: Todo(2026-11-05 wt5 が T-1257 から分けた。直しはまだ入れていない)
+- Status: Doing(2026-11-05 wt5・t-1314-halo-covered: 直しのコードは入れた・**未ビルド・未試験**。下の「引き継ぎ」)
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1 回分
@@ -29,3 +29,31 @@
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-11-05(wt5・T-1257 の作業役): T-1257 の測りから分けた。
+
+## 作り(2026-11-05 wt5・司令塔の一旦の決定 = 覆われたセルは子の値から読む。案 (a))
+- **覆われたセルの詰まり = 覆う子のブロックの子のセル 2³ の量を成分ごとに足し(層の分も成分ごと)、子 8 つの器(8 × V0)で読む**
+  (CPU `CoveredFullness`・`CoveredSettleSum`〔engine/src/sim/multires_refine_cells.cpp〕/ GPU 同名〔shaders/sim/multires_refine_halo.hlsl〕)。
+  分け方は MaterialsOf と同じ(層の分は沈む側・層を使う世界の粒の残りは舞う粒)。体積は成分ごとの和から求める(子ごとの体積を足すと切り捨てがずれる)ので、
+  細かくしたばかりの子(和 = 親 × 8 ちょうど)なら細かくする前の親を読んだのとビット単位で同じ = 前線の順 ⇔ 一度にが同じになるはず。
+  和か平均か: 量は和(保存の形)・詰まりは子 8 つの器で割る = 子の平均。粗くする規則の和 ÷ 8 の切り捨ては通らない。
+- 子のセル 2³ は子のブロックの同じ八分の一にあるので、孫に覆われていれば全部 → 無い(孫までは降りない。2:1 の木では接する所に来ない。仮)。
+- **ブロックの中の覆われたセルも同じ**(前の作業ログの「中は読む」は誤り: Present は中の覆われたセルも無いと読んでいた)。写しを 3 面 → 6 面
+  (MR_HALO_CELLS 108 → 216。面 3〜5 = P の中を向く面〔ビット 0 → 4・1 → 3〕。common/multires_refine_halo.hlsli の MrHaloIndexOf・MrHaloInWindow)。
+  CPU の Present / FullnessAt は覆われたセルを写しから、GPU は PlaceRefineChildren の 1 段目で覆われたセルを PlaceCoveredFullness(写しの中の面)から。
+  写しの段は 256 スレッド。置き場は世界の枠 × 216 語(枠 1 万で 8.6 MB。前は 4.3 MB)。写しが無い(MR_HALO_NONE)所は前と同じ。
+- 試験の器: tests/tree_refine_placement_scene.h に EdgeRequestInside・MakeEdgeFrontWorld を足した(試験本体はまだ)。
+- 作り手から見た違いは無い(D-664 の約束を守る直し)。【エンジン】の問いは無し。
+
+## wt2 との重なり(2026-11-05 読んで確かめた)
+- wt2(T-1305)は multires_refine_place.hlsli の 54〜145 行(物質の並びを PlaceUseCell で 1 回作る)と PlaceChildEnergy を書き換え中。
+  この枝の変更は同じファイルの PlacePresent の前(PlaceCoveredFullness)と PlaceRefineChildren の 1 段目・頭の注釈 → 行は重ならないが同じファイル。
+  multires_refine_halo.hlsl・.hlsli・multires_refine_cells.cpp は wt2 は触っていない。写しの段は PlaceUseCell → PlaceLayerOf(n) の口だけ使う(wt2 の形でも同じ口)。
+  gpu_tree_refine_placement_test.cpp は wt2 も触る(場面を足す時に衝突しやすい)。
+
+## 引き継ぎ(2026-11-05 wt5。巡目の止めで中断)
+- 次の一手: ① release のビルド(未実行)② tree_refine_placement_test に TestFront(B → A と A0 → A1 の A の子 = A だけの子 BlockCellsHash(…,1,8)・保存・2 回で同じ)
+  ③ case_b_r3_test の TreeSlope に EXPECT(neighbors.grain == neighborsFront.grain)(読まない・前線の順も一度にと同じになるはず)・表を測り直して T-1257 の形で
+  ④ gpu_tree_refine_placement に前線の順の場面(初め = MakeEdgeWorld(first)・要求 = second・期待 = MakeEdgeFrontWorld。層・舞う粒も)
+  ⑤ CPU 先: case_b_r3_tree_slope・tree_refine_placement・placement_refine・multires・multires_layers・dxil_alloca_check → GPU 最後に 1 回(HW・WARP)・archmap --check
+  ⑥ 変わる試験を数える(覆われた隣のある場面だけ変わるはず)・設計 20 §10.5 の「子に覆われたセルは無いと読む」を直す・rebase main → 印。
+- 気になる所: GPU の CoveredSpeciesSeen / CoveredSpeciesSum は成分ごとに子 8 つを読み直す(最悪 8 × 8 × 8 × 8 読み。写しの段だけ・細かくする出来事の時だけ)。費用は測っていない。
