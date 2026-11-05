@@ -1,8 +1,22 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-10-30(本体の作業役 20 回目・この巡目の最後の印。前は 19 回目・gpu_object_shell_flow の確かめ・T-1272・wt2 T-1240 7 の 1・wt3 T-1278・wt6 T-1287 を main へ・Q182)
+最終更新: 2026-11-05(本体の作業役 21 回目・この巡目〔claude/46 の再開〕の締め。前は 20 回目・2026-10-30 の巡目の最後の印)
 
-## この仕事でしたこと(2026-10-30・本体の作業役・20 回目: この巡目の最後の印のマージ。司令塔のチャットはこの巡目で止めた)
+## この仕事でしたこと(2026-11-05・本体の作業役・21 回目: この巡目の締め = runner/ready の印のマージ・T-1230 段 2 の記録・土台の形の受け取り)
+- **マージ(--no-ff・入れた順)**: wt6 t-1230-conduction-face 08dba72f(T-1230 段 2 の 1 回目)/ wt3 t-0960-support-3d d641e8bb(T-0960 の 1 本目・ADR-0514 Proposed)/ wt6 t-1230-implicit-two-node 21487cff(段 2 の ② の形。ADR-0512 の末尾が衝突 → 両方残した)/ wt2 t-1240-coarsen-layers acb3b886(T-1240 の 7 の 3・7 の 4 前半)/ wt5 t-1266-multires-no-local-array a7712232(T-1266 Done。limits.txt が衝突 → t-1266 側の数にしてビルド後の dxil_alloca_check で確かめた)/ wt3 t-1293-support-3d-diagonals 20eb519d(T-1293 Done)。印は runner/ready/done/ へ。
+- **入れていない**: wt4 t-1228-skip-grid(全部写す刻みが 83 → 220〜400 µs に重くなった。wt4 が同じブランチで直して印を書き直す。印 runner/ready/t-1228-skip-grid.txt は残した)。
+- 試験(release・警告 0): 1 本目の後 = phase_layer・_tree・_face・_explicit_lag・field_owner・multires・multires_state・multires_layers・multires_conduction・multires_implicit・_tree・time_step_lab・time_step_tree・dxil_alloca_check(14 本)/ t-0960・2 節の後 = phase_layer 系 5 本(+ _implicit)・field_owner・multires_implicit・_tree・multires_conduction・support_3d・support_law・support_mixed・support_mixed_neighbor_strain・support_fracture_refine・support_cost・dxil_alloca_check(16 本)/ t-1240 の後 = multires・multires_layers・dxil_alloca_check + GPU HW gpu_multires_layers・gpu_phase_layer・gpu_equilibrium_block・WARP gpu_multires_layers_warp・gpu_phase_layer_warp / t-1266・t-1293 の後(main の先頭)= support_law・support_3d・support_mixed・multires_layers・multires_quiet・float_check 5 本・dxil_alloca_check(t-1266 の表で合格)+ GPU HW gpu_multires・gpu_multires_quiet・gpu_multires_near_fold・gpu_lab_box・gpu_tree_refine_placement・gpu_equilibrium_block + WARP gpu_equilibrium_block_test(run・3 次元の場面も CPU とビット一致)。全部合格。archmap --check OK。
+- **T-1230 段 2 の結論**: 陰の領域で混ざったセルを陽で流すと 0.1 K に収まらない(陽 1〜31 K・小刻み 64 回でも 0.10〜9.9 K・セルの中の 2 つだけ陰でも 0.07〜0.36 K)→ **ADR-0512 の判断待ち 2 は (b) 2 未知数の系 = 司令塔の一旦の決定(ユーザー未確認・作り手から見た違いは無い)**。(c) へ退く時だけ【エンジン】の問いを出す。
+  ② の形: 陰の系に 2 節が系の作りを変えずに入る・節 +12.5 %・面 +5〜17 %・V サイクル ×0.69〜1.76(8³・水面 64 セル・60 刻み・安全網 0 回。違うレベルの面を含む木と広い水面は未測)。
+- **土台の形の受け取り(司令塔の一旦の決定)**: 「混ざったセルは陰の伝導の系で 2 節」を受け取った(ADR-0512 の「土台の形の受け取り」)。docs/design/21 §3 と照らし: 伝導・相変化・層は 2 節が要る / 共有の圧力(§2.3)と支えは 1 節のまま。
+  条件 = 多重格子の段の重み(BuildImplicitGrid)と implicit_conduction.hlsli は gas_projection・equilibrium と共通なので、2 節は伝導の系の節の並べ方として持ち共通の段は変えない(圧力・支えはビット一致)。2 回目の土台の印 2 つ(multires_implicit_conduction.cpp で 2 節・ImBlockCellBound が混ざったセルを 2 つと数える)も同じ照らしで受け取った。食い違いなし。物の箱の陰の系が 2 節を要るかは未確認。
+- 段 2 の残り: ① 陽の世界の当てる段へつなぐ(世界に新しい口 AddCondensed・見立て CV_VIEW_PHASE_LAYER。司令塔の一旦の決定で wt6 が作る)→ ② を木の陰の系へ → ③ GPU。未確認: 世界の既定の表での陰の領域の細かさ・木と広い水面での費用。
+- 記録: ROADMAP(T-1230・T-0960 の 1 本目・T-1293 Done・T-1294・T-1295・T-1240 の 7 の 3/7 の 4 前半・T-1266 Done)・ADR-0512(Status の追記・土台の形の受け取り)・QUESTIONS **Q184**(GPU の層の置き場が尽きる時の振る舞い・一様の枠の層 96 B)・**Q185**(子 2³ の回しを開かない形)・COMMANDER の番号の配り(司令塔の次は T-1305・ADR-0518)。
+- **各 wt の続きは claude/47 の引き継ぎを見よ。**
+- **運転メモ**: device_bash から作業ツリーに `clang-format -i` を打つと止まる(消せないフォルダで一時ファイルを消せない)→ scratch で整形して cp → mv(wt6)。archmap --check は main で 27 秒(ほかのコマンドと 1 回にまとめると device_bash の切れに当たる。単独で)。ビルドが vcpkg の configure をやり直すと 20 分ほどかかった(2026-11-04 21:56〜)。
+- 次の番号は **D-684・ADR-0479・Q186**(本体)。T は T-1273・T-1274(使っていない)。
+
+## 前の仕事でしたこと(2026-10-30・本体の作業役・20 回目: この巡目の最後の印のマージ。司令塔のチャットはこの巡目で止めた)
 - **マージ(--no-ff)**: wt5 t-1286-test-copy-size 3c1b1e69(T-1286 Done・試験だけ)/ wt2 t-1240-refine-layers b78e9c89(T-1240 の 7 の 2)/ wt3 t-1279-neighbor-strain-3d 4dc94c70(T-1279 Done・既定 None のまま・ADR-0509 追記 Proposed) / wt6 t-1230-ec-field 6900af0d(T-1230 段 1 + T-1231 の CPU の配り・ADR-0512 Proposed = 司令塔の一旦の決定)。印は runner/ready/done/ へ。
 - 試験(release・警告 0): t-1286 の後 = object_heat・object_heat_nest・object_shell + GPU HW gpu_object_heat・_nest・gpu_object_shell_flow / t-1240 の後 = multires・multires_state・field_owner・multires_layers・dxil_alloca_check + GPU gpu_multires・_quiet・_layers・_layers_warp・gpu_tree_refine_placement / t-1279 の後 = warm_start_save・support_law・support_mixed・support_mixed_neighbor_strain・support_fracture_refine・support_cost・float_check 5 本・dxil_alloca_check + gpu_equilibrium_block(HW) / t-1230 の前(本体で --no-commit のまま・混ざらないセルの今の世界のビット一致)= field_owner・phase_layer・phase_layer_tree・multires 系・support 系・time_step 系 + GPU gpu_multires・_quiet・gpu_phase_layer・gpu_time_step_choose・_span。wt6 の側の残り 14 本(time_step_*・multires_conduction・multires_implicit*・multires_wide・multires_quiet)も wt6 のランナーで合格(1 回目は上限 2 時間に当たり 14 本目で切れていた)。
 - QUESTIONS の Q182 に T-1279 の作り手から見た違いを追記(GPU の解き +14 %・値が変わる場面・答えが「既定」なら変える所)。新しい問いは無い。
