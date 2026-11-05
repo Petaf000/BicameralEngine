@@ -142,3 +142,12 @@
 - **まだ(この順)**: ② 木の陰の系(multires_implicit_conduction.cpp)で混ざったセルを 2 節に(phase_layer_implicit の Build と同じ形・安全網で陽に戻す時は TxPartFaceFlow・流れの当て先は AddCondensed・ImBlockCellBound は 2 と数える)。
   今は陰のブロックの混ざったセルは丸ごと 1 節のまま(陰の領域の混ざったセルの部分は動かない = 未対応)。/ 溢れを使う世界(wideCells)は部分の道を通らない(未対応)/ ③ GPU(式は同じ hlsli・世界の口 2 つを GPU の伝導の世界にも)。
 - 問い: 無し(写しの式・口の形は作り手から見た違いが無い)。
+
+## 状態(2026-11-05 wt6 3 回目の締め。会話の入れ物の再起動で止まった。ブランチ t-1230-part-faces・46470b53)
+- コードと文書(ADR-0512 の「段 2 ① 世界の当てる段の口」= 口 2 つと 21 §3 の照らし)はコミット済み。release ビルドは警告 0 で通った(最後の直しの後も)。
+- 試験: 直しの前の回で phase_layer・phase_layer_tree・phase_layer_face・phase_layer_explicit_lag・phase_layer_implicit・field_owner・tree_refine_placement・multires_activity・multires_conduction・multires_implicit_tree が合格。
+  phase_layer_world は 1(欄の有無でビット一致)・2(手計算とビット一致・平ら/段違い)・3(根だけの保存・部分の熱)が合格し、4(細かくした木)の温度の見る所だけ落ちた
+  (覆われた根のセルを読んでいた = 試験の誤り。保存量と部分の熱は合格)。覆われていないセルを選ぶ直しを入れ、ビルドは通ったが**試験はまだ流していない**。
+- multires_implicit_tree が 158 秒(前の回 21 秒)。ほかの作業ツリーのビルドとの重なりの見込みだが**未確認**(欄の無い世界の道は今と同じ。次の回で単独で測る)。
+- **ready の印は書いていない**(phase_layer_world の直しの確かめ・rebase main・multires_implicit_tree の時間の確かめが先)。
+- 次の一手: `job.py test -Filter '^(phase_layer_world|multires_implicit_tree)$'` → 合格なら rebase main・archmap --check → runner/ready に印。その後 ②(木の陰の系で 2 節)→ ③ GPU。
