@@ -167,3 +167,10 @@
   直すなら ImplicitEdge の explicitFlow と同じ形を ImplicitFace に(呼ぶ側が面ごとに渡す)= 共通の系の構造体(gas_projection・equilibrium・case_b も使う)と GPU の ImGpuFace の変更。
 - **③ GPU(次)**: ① の陽の部分の道も GPU はまだ(GpuConductionWorld に Parts・AddCondensed の 2 つの口・見立ての部分の写し)。陰は implicit_build.hlsl の番号の付け方を節の数の接頭和に(未知数・境のセル)・面の候補を「u × 6 + 面」から「u × 6 × 4 + 組」と層の上の面へ(CPU の面の順と同じに揃える: 面の順は安全網の足し算で効く)・
   ScanBlocks の予算の和も混ざったセルを 2 と数える・Apply が層の節の分を Ec の変化の列へ。量はチャット 2〜3 回の見込み(未確認)。
+
+## 引き継ぎメモ(2026-11-05 wt6 4 回目の締め。会話の入れ物の再起動で止めた。ブランチ t-1230-implicit-parts)
+- **どこまで**: ① は rebase main(bdeefa1a)して ready の印(runner/ready/t-1230-part-faces.txt・先頭 e1e5e92c。34 本合格)。② CPU は 97aee7b9 で入った(上の節)。release 警告 0・archmap --check OK。
+- **通した試験(② の後・release)**: phase_layer 系・field_owner・multires 系(implicit・implicit_tree・conduction・subcycle ほか)・gas_projection・gas_projection_plates・equilibrium・equilibrium_block・time_step_lab の 29 本合格(2527 秒)。
+- **未実行**: time_step_tree(25 分前後)・time_step_choose_dump 系(② は欄の無い世界の道を変えていないので同じはずだが未確認)。② の ready の印は書いていない(rebase main と上の 2 つの後)。
+- **multires_implicit_tree の 158 秒の結論**: ほかのジョブとの重なり。単独で 21.4 秒(① の後)・20.6 秒(② の後)。main でも 20.6 / 232.6 秒の回がある(11/04)。不具合ではない。
+- **次の一手**: t-1230-implicit-parts を rebase(① がマージされた main へ)→ time_step_tree → ready の印 → ③ GPU(上の節の「③ GPU(次)」。① の陽の部分の道の GPU も未)。安全網の面ごとの陽の流れの口は司令塔の判断待ち(上の「土台に足りないもの」)。
