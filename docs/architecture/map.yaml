@@ -338,6 +338,9 @@ views:
       - { id: transportapply, group: simlib, label: "TxFlowCell<br/>面の帳簿と当てる段(土台の段 1 ④。T-0714)<br/>流す → 上限 → 当てる → 欄 → 帳簿 → 起こす",
           code: "shaders/common/transport_apply.hlsli::TxFlowCell", ticket: T-0714, doc: docs/decisions/ADR-0334-transport-apply.md,
           note: "種類は坂・面の式・安定の条件の 3 つだけを渡す(最初の種類は陽の伝導 TxConduction。transport_conduction.hlsli)。世界は面の隣・見立て・端数の置き場・変化の表を渡す。MR の CPU の伝導と GPU の伝導の段(T-0766)がこれを呼び、今の MR の試験とビット一致。上限は出る側・入る側の倍率(Q32。Jacobi)。自分の側の坂・係数はセルごとに 1 回(TxMakeSelfSide。T-0768)。流れを面の並びで解く種類(陰の伝導)は同じ当てる段の面 1 つの形 TxApplyFaceFlow で両側へ(T-0715)。ADR-0334" }
+      - { id: transportconductionparts, group: simlib, label: "TxFlowConductionCell<br/>伝導だけの当てる段(相の層の欄がある世界。T-1230)<br/>混ざったセルの面を部分ごとに",
+          code: "shaders/common/transport_conduction_parts.hlsli::TxFlowConductionCell", ticket: T-1230, doc: docs/decisions/ADR-0512-phase-energy-owner-and-part-faces.md,
+          note: "相の層の欄がある世界だけ ComputeConduction が呼ぶ(無い世界は TxFlowCell のまま)。混ざらない面は TxSideFaceFlow そのもの(ビット一致)。混ざったセルの面は部分つきの片側の組を重なりで(TxPartFaceFlow・phase_layer.hlsli の式)・層の上の面は TxPartInnerFlow。見立ての部分 CV_VIEW_PHASE_LAYER を読み、層の変化は世界の口 AddCondensed で Ec の欄へ。違うレベルの面の層の高さは clamp(h × 2^d − j, 0, 1)(TxPartSideOnRow)。phase_layer_world_test" }
       - { id: worldedges, group: simlib, label: "MakeMultiresWorldEdges<br/>世界の端を環境から作る(T-0772)<br/>world_edges + 基準の大気 + 世界の箱 → 外の柱",
           code: "engine/src/sim/multires_world_edges.cpp::MakeMultiresWorldEdges", ticket: T-0772, doc: docs/decisions/ADR-0338-world-edges-environment.md,
           note: "上の軸は world_edge.hlsli の WE_UP_AXIS の 1 か所(y。D-518)。外の柱は箱の中の層ごとの基準の大気(GasAtmosphereLayers。仮の世界の気体の区画の層の基準とビット一致)。MR の気体も端の種類を nest.edges.world から読む。SetWorldEdges が替えて、開いた端に接するブロックを種にする。大気の無い open は真空(ベイクの注意)。当てる段の World::Neighbor・Outside が読む(world_edge.hlsli。ADR-0337)。multires_edge_test" }
@@ -784,6 +787,8 @@ views:
       - [multiresquiet, multirestree, "要求の一覧の後ろに足す"]
       - [quiettest, multiresquiet]
       - [multiresconduction, multiresconductionhlsl]
+      - [multiresconduction, transportconductionparts, "相の層の欄がある世界"]
+      - [transportconductionparts, transportapply, "混ざらない面は TxSideFaceFlow"]
       - [multiresconductionhlsl, multiresactivityhlsl, "MrFindContaining で粗い側を引く"]
       - [multiresconductionhlsl, multireshlsl, "端数(ADR-0015)で粗い側が受ける"]
       - [multiresactivity, multiresconduction, "options.conduction"]
