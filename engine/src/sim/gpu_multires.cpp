@@ -1004,6 +1004,14 @@ namespace bicameral::sim {
             return false;
         }
 
+        // 層を使う世界(EnableCellLayers。粒の残りは舞う粒)は、層の頁を持たない GPU に写さない。GPU が粒の印を知らないまま
+        // 畳む・置かれ方で配ると結果が CPU と変わる(D-428。T-1240 の司令塔の一旦の決定)
+        if (m_layerCapacity == 0 && nest.cellLayers.enabled) {
+            Log(Channel::Gpu, Level::Error,
+                "層を使う世界は層の頁を持たない GPU に写せない(GpuMultiresOptions::layerPages。T-1240)");
+            return false;
+        }
+
         // --- 層の置き場の像(層の頁を持つ世界だけ。写せなければ何も写さない。T-1221)---
         std::vector<uint32_t> layerWords;
         if (m_layerCapacity > 0) {

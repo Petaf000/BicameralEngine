@@ -75,7 +75,8 @@ namespace bicameral::sim {
         // 粗くする(子の層の和 ÷ 8)・畳む(層まで一様な時だけ。一様の枠の層へ)・広げる(一様の枠の層を頁へ)も CPU と同じに配る(T-1240 の 3 段目)。
         // 一様の枠の層は枠ごとに決まった場所(枠 1 つ 96 B。layerPages > 0 の世界だけ。尽きない)。粗くする親に層の頁が要る時に尽きたら
         // 粗くする要求も断る。影の鎖・広げる時は断れないので、尽きたら数えて層なし(layerPages を影の鎖・広げる分まで持つ約束)。
-        // まだの所: 溢れを使う世界の層は写さない(RecordUpload が false。T-1240 の 5)。粒の印(EnableCellLayers)は GPU が知らない
+        // まだの所: 溢れを使う世界の層は写さない(RecordUpload が false。T-1240 の 5)。層を使う世界(EnableCellLayers)は
+        // layerPages = 0 の GPU には写さない(RecordUpload が false。粒の印を知らないと結果が変わる。D-428)
         uint32_t layerPages = 0;
 
         // 作ったルート署名・パイプライン・Work Graph のプログラムを使い回す置き場(T-0427。無ければ毎回作る)。同じデバイスで
