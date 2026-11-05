@@ -41,3 +41,6 @@ T-1240 の 7 の 4 後半で、層のある置かれ方の世界の要求の処�
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-11-05 wt2(作業役 6): 作った。段ごとの時間を出して、Work Graph の細かくする段(置かれ方)が全部と特定。物質の並びを 1 回だけ作る形に直して
   層のある場面が 9.9〜12.4 → 1.7〜3.5 ms(同じ回の層なしの 1.5〜1.7 倍)。ブランチ t-1305-layer-request-cost(t-1240-wide-layers の上)。
+- 2026-11-05 wt2(作業役 6 の締め): 合格(release・RTX 3070 Ti・t-1240-wide-layers の上): gpu_tree_refine_placement〔HW・WARP〕・gpu_multires_layers〔HW・WARP〕・
+  gpu_multires・gpu_lab_box・dxil_alloca_check・tree_refine_placement・placement_refine・multires_layers・multires。release 警告 0・archmap --check OK。
+  残り: rebase main(f1a4e17a = t-1240-place-layers 入り)→ ビルド・上の試験をもう 1 回 → ready の印(まだ書いていない)。
