@@ -192,8 +192,11 @@ namespace bicameral::sim {
         [[nodiscard]] std::vector<uint64_t> ReadTimestamps(uint32_t count) const;
 
         // --- 段ごとの時間(T-0273。試験の計測だけ): 有効なら RecordStep が初めに 0 番、段(Dispatch とバリア)の後ごとに 1, 2, … 番の
-        //     タイムスタンプを打つ(MAX_TIMESTAMPS まで。打った数は StageTimestampCount)---
+        //     タイムスタンプを打つ(MAX_TIMESTAMPS まで。打った数は StageTimestampCount)。RecordProcessRequests は 0 番を打たず、
+        //     段の後ごとに打つ(解決・確定・割り当て・隣の写し・溢れの塊・Work Graph の細かくする / 粗くする・解放・索引 × 2。T-1305)---
         void SetStageTimestamps(bool enabled) { m_stageTimestamps = enabled; }
+        // RecordProcessRequests だけを測る時に、次の段の番号を 0 に戻す(RecordStep は自分で戻す。T-1305)
+        void ResetStageTimestamps() { m_stageStamp = 0; }
         [[nodiscard]] uint32_t StageTimestampCount() const { return m_stageStamp; }
 
         [[nodiscard]] uint64_t GraphBackingMemoryBytes() const {

@@ -9,7 +9,8 @@
 //   - 層の場面(T-1240 の 4 段目): 層のある根(層の分は沈む側)・層を使う世界(粒の残りは舞う粒)・層の無い層を使う世界を、
 //     1 段・2 段の鎖・端(隣のブロックの層も写しの詰まりに入る)で。GPU は層の頁を持つ(layerPages)
 // 場面ごとに、要求を処理する段(RecordProcessRequests。置かれ方の世界は別の Work Graph のプログラム。ADR-0499)の GPU の時間を
-// 同じ処理 8 回の最小で出す(docs/perf.md)。
+// 同じ処理 8 回の最小で出す(docs/perf.md)。段ごとの時間(SetStageTimestamps。T-1305)も段ごとの 8 回の最小で出す: 並びは
+// 解決・確定・割り当て・(置かれ方の世界だけ隣の写し)・Work Graph の細かくする・粗くする・解放・索引を消す・索引を作る。
 // 引数は gpu_test_options.h。
 #include <algorithm>
 #include <array>
@@ -17,6 +18,7 @@
 #include <format>
 #include <string>
 #include <string_view>
+#include <vector>
 
 #include "core/log.h"
 #include "core/singleton.h"
@@ -65,6 +67,20 @@ namespace {
     constexpr uint32_t TIMING_RUNS = 8;   // 時間は同じ処理のこの回数の最小
     constexpr uint32_t LAYER_PAGES = 16;  // 層の場面の GPU の層の頁(根 4 つ + 鎖 2 段で足りる)
 
+    // 段の終わりのタイムスタンプ(stamps。最初の段は start から)から段ごとの時間を出し、best に段ごとの最小を残す(T-1305)
+    void KeepStageMinimum(const std::vector<uint64_t>& stamps, uint64_t start, uint64_t frequency,
+                          std::vector<double>& best) {
+        if (best.size() < stamps.size())
+            best.resize(stamps.size(), 1.0e9);
+
+        uint64_t previous = start;
+        for (size_t i = 0; i < stamps.size(); ++i) {
+            const double stageMs = static_cast<double>(stamps[i] - previous) * 1000.0 / static_cast<double>(frequency);
+            best[i] = std::min(best[i], stageMs);
+            previous = stamps[i];
+        }
+    }
+
     // 時間を測るタイムスタンプ(要求を処理する段の前と後)
     struct Timestamps {
         ComPtr<ID3D12QueryHeap> heap;
@@ -98,7 +114,9 @@ namespace {
         if (FAILED(queue.Native()->GetTimestampFrequency(&frequency)) || frequency == 0)
             return std::unexpected("タイムスタンプの周波数を読めない");
 
+        gpu->SetStageTimestamps(true);
         double bestMs = 1.0e9;
+        std::vector<double> bestStageMs;
         for (uint32_t run = 0; run < TIMING_RUNS; ++run) {
             ID3D12GraphicsCommandList10* list = queue.Begin();
             if (list == nullptr)
@@ -109,6 +127,7 @@ namespace {
                 return std::unexpected("写せない");
 
             list->EndQuery(timestamps.heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
+            gpu->ResetStageTimestamps();
             gpu->RecordProcessRequests(list, ring.GpuAddress());
             list->EndQuery(timestamps.heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
             list->ResolveQueryData(timestamps.heap.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2, timestamps.readback.Get(),
@@ -124,6 +143,7 @@ namespace {
 
             bestMs = std::min(bestMs,
                               static_cast<double>(times[1] - times[0]) * 1000.0 / static_cast<double>(frequency));
+            KeepStageMinimum(gpu->ReadTimestamps(gpu->StageTimestampCount()), times[0], frequency, bestStageMs);
         }
 
         const gpu::DebugRingContents debugOutput = ring.Drain();
@@ -139,8 +159,12 @@ namespace {
             return std::unexpected(std::format("{} で CPU と GPU が食い違う", name));
         }
 
-        Log(Channel::Gpu, Level::Info, "{}: 一致(要約 {:016x})・要求を処理する段 {:.4f} ms({} 回の最小)", name,
-            sim::HashWholeNest(read), bestMs, TIMING_RUNS);
+        std::string stages;
+        for (const double stageMs : bestStageMs)
+            stages += std::format("{}{:.3f}", stages.empty() ? "" : "/", stageMs);
+
+        Log(Channel::Gpu, Level::Info, "{}: 一致(要約 {:016x})・要求を処理する段 {:.4f} ms({} 回の最小)・段ごと {} ms",
+            name, sim::HashWholeNest(read), bestMs, TIMING_RUNS, stages);
 
         return bestMs;
     }
