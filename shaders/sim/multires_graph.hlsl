@@ -249,7 +249,8 @@ void RefineLevel(MrRefineRecord record, uint32_t t) {
     //     グループで同じ条件なので、中のバリアは全部のスレッドが通る)---
     if (fromRequest && real && !uniformChild)
         PlaceRefineChildren(parent, record.parentSlot, octant, childPage,
-                            g_states[record.request].blockBase - 1 - record.depth, t);  // 隣の写しの位置(T-1189)
+                            g_states[record.request].blockBase - 1 - record.depth,  // 隣の写しの位置(T-1189)
+                            parentLayerPage, childLayerPage, t);                    // 層の分を沈む側へ(T-1240)
 #endif
 
 #ifdef MR_WIDE_CELLS

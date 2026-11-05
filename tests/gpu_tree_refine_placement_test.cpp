@@ -6,6 +6,8 @@
 //   - 置かれ方を使わない世界(SAME)も今まで通り一致
 //   - 端の場面(T-1189): 親のブロックの端の列が隣のブロック(索引で同じレベル)の列を読む。隣の写し(sim/multires_refine_halo.hlsl)を通る。
 //     隣の無い世界・隣を同じ刻みに細かくする 2 つの要求(どちらの順でも)も
+//   - 層の場面(T-1240 の 4 段目): 層のある根(層の分は沈む側)・層を使う世界(粒の残りは舞う粒)・層の無い層を使う世界を、
+//     1 段・2 段の鎖・端(隣のブロックの層も写しの詰まりに入る)で。GPU は層の頁を持つ(layerPages)
 // 場面ごとに、要求を処理する段(RecordProcessRequests。置かれ方の世界は別の Work Graph のプログラム。ADR-0499)の GPU の時間を
 // 同じ処理 8 回の最小で出す(docs/perf.md)。
 // 引数は gpu_test_options.h。
@@ -60,7 +62,8 @@ namespace {
             Log(Channel::Sim, Level::Error, "{}: 端数の枠が違う", where);
     }
 
-    constexpr uint32_t TIMING_RUNS = 8;  // 時間は同じ処理のこの回数の最小
+    constexpr uint32_t TIMING_RUNS = 8;   // 時間は同じ処理のこの回数の最小
+    constexpr uint32_t LAYER_PAGES = 16;  // 層の場面の GPU の層の頁(根 4 つ + 鎖 2 段で足りる)
 
     // 時間を測るタイムスタンプ(要求を処理する段の前と後)
     struct Timestamps {
@@ -84,8 +87,10 @@ namespace {
                                                  gpu::DebugRing& ring, const Timestamps& timestamps,
                                                  const Materials& materials, const World& initial,
                                                  const World& expected, std::span<const MrRequest> requests,
-                                                 std::string_view name) {
-        auto gpu = sim::GpuMultires::Create(device, materials.table, initial.nest.capacity);
+                                                 std::string_view name, LayerMode mode = LayerMode::None) {
+        sim::GpuMultiresOptions options;
+        options.layerPages = mode == LayerMode::None ? 0u : LAYER_PAGES;
+        auto gpu = sim::GpuMultires::Create(device, materials.table, initial.nest.capacity, options);
         if (!gpu)
             return std::unexpected(gpu.error());
 
@@ -142,20 +147,22 @@ namespace {
 
     std::expected<double, std::string> RunScene(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring,
                                                 const Timestamps& timestamps, const Materials& materials, bool placed,
-                                                int32_t level, std::string_view name) {
+                                                int32_t level, std::string_view name,
+                                                LayerMode mode = LayerMode::None) {
         const MrRequest refine = MrMakeRequest(MR_REQUEST_REFINE, level, 1, 1, 1);
 
-        return RunWorlds(device, queue, ring, timestamps, materials, MakeWorld(materials, placed, false),
-                         MakeWorld(materials, placed, true, level), std::span(&refine, 1), name);
+        return RunWorlds(device, queue, ring, timestamps, materials, MakeWorld(materials, placed, false, 1, mode),
+                         MakeWorld(materials, placed, true, level, mode), std::span(&refine, 1), name, mode);
     }
 
     // 端の場面(T-1189): neighbors = 隣のブロックを置くか
     std::expected<double, std::string> RunEdgeScene(ID3D12Device5* device, gpu::ImmediateQueue& queue,
                                                     gpu::DebugRing& ring, const Timestamps& timestamps,
                                                     const Materials& materials, bool neighbors,
-                                                    std::span<const MrRequest> requests, std::string_view name) {
-        return RunWorlds(device, queue, ring, timestamps, materials, MakeEdgeWorld(materials, neighbors, {}),
-                         MakeEdgeWorld(materials, neighbors, requests), requests, name);
+                                                    std::span<const MrRequest> requests, std::string_view name,
+                                                    LayerMode mode = LayerMode::None) {
+        return RunWorlds(device, queue, ring, timestamps, materials, MakeEdgeWorld(materials, neighbors, {}, mode),
+                         MakeEdgeWorld(materials, neighbors, requests, mode), requests, name, mode);
     }
 
     std::expected<void, std::string> RunScenes(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring,
@@ -209,6 +216,40 @@ namespace {
             if (!ran)
                 return std::unexpected(ran.error());
         }
+
+        // --- 層の場面(T-1240 の 4 段目)---
+        struct LayerScene {
+            const Materials* materials;
+            int32_t level;
+            LayerMode mode;
+            std::string_view name;
+        };
+        const LayerScene layerScenes[] = {
+            {&packed, 1, LayerMode::Layers, "層・1 段・詰まり 60 %"},
+            {&full, 2, LayerMode::Layers, "層・2 段の鎖・詰まり 100 %"},
+            {&packed, 2, LayerMode::Floating, "層・舞う粒・2 段の鎖・詰まり 60 %"},
+            {&packed, 1, LayerMode::FloatingOnly, "層なし・舞う粒・1 段・詰まり 60 %"},
+        };
+        for (const LayerScene& scene : layerScenes) {
+            const auto ran = RunScene(device, queue, ring, *timestamps, *scene.materials, true, scene.level, scene.name,
+                                      scene.mode);
+            if (!ran)
+                return std::unexpected(ran.error());
+        }
+
+        for (const LayerMode mode : {LayerMode::Layers, LayerMode::Floating}) {
+            const auto ran = RunEdgeScene(
+                device, queue, ring, *timestamps, packed, true, abOrder,
+                mode == LayerMode::Layers ? "層・端・隣を同じ刻みに(A, B)" : "層・舞う粒・端・隣を同じ刻みに(A, B)",
+                mode);
+            if (!ran)
+                return std::unexpected(ran.error());
+        }
+
+        // 層の場面の確かめ: 層の無い世界で粒を舞わせると置かれ方が変わる(舞う粒の配りが本当に動いている)
+        const uint64_t floating = sim::HashWholeNest(MakeWorld(packed, true, true, 1, LayerMode::FloatingOnly).nest);
+        if (floating == sim::HashWholeNest(MakeWorld(packed, true).nest))
+            return std::unexpected("場面の確かめ: 舞う粒で置かれ方が変わらない");
 
         // 場面の確かめ: 置かれ方の世界は SAME の世界と違い、詰まり 60 % は 100 % と違う(配る所が本当に動いている)
         const uint64_t same = sim::HashWholeNest(MakeWorld(full, false).nest);

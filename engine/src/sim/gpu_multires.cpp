@@ -1004,16 +1004,17 @@ namespace bicameral::sim {
             return false;
         }
 
+        // 層を使う世界(EnableCellLayers。粒の残りは舞う粒)は、層の頁を持たない GPU に写さない。GPU が粒の印を知らないまま
+        // 畳む・置かれ方で配ると結果が CPU と変わる(D-428。T-1240 の司令塔の一旦の決定)
+        if (m_layerCapacity == 0 && nest.cellLayers.enabled) {
+            Log(Channel::Gpu, Level::Error,
+                "層を使う世界は層の頁を持たない GPU に写せない(GpuMultiresOptions::layerPages。T-1240)");
+            return false;
+        }
+
         // --- 層の置き場の像(層の頁を持つ世界だけ。写せなければ何も写さない。T-1221)---
         std::vector<uint32_t> layerWords;
         if (m_layerCapacity > 0) {
-            // 粒の印(EnableCellLayers)は GPU が知らない(畳む段が舞う粒を見ない。写すと CPU とずれるので断る。T-1240)
-            if (nest.cellLayers.enabled) {
-                Log(Channel::Gpu, Level::Error,
-                    "層を GPU に写せない: 粒の印を持つ世界(EnableCellLayers)はまだ(T-1240)");
-                return false;
-            }
-
             auto image = MakeGpuLayerImage(nest, m_layerCapacity);
             if (!image) {
                 Log(Channel::Gpu, Level::Error, "層を GPU に写せない: {}", image.error());
@@ -1029,12 +1030,6 @@ namespace bicameral::sim {
         //     GPU の入力の見出しの入口の番号も、使うプログラムの番号(g_graphEntries)
         const bool place = !nest.refineCells.species.empty() && !nest.wideCells && m_graphs[GraphPlace].graph;
         m_activeGraph = place ? GraphPlace : GraphPlain;
-        if (place && m_layerUsed > 0) {
-            // 置かれ方の段はまだ層を配らない(子の層を層の分で配るのは T-1240 の 4 段目。写すと CPU とずれるので断る)
-            Log(Channel::Gpu, Level::Error, "層を GPU に写せない: 置かれ方で細かくする世界の層はまだ(T-1240)");
-            return false;
-        }
-
         const auto& entries = m_graphs[m_activeGraph].entries;
         m_constants.graphEntries = entries[EntryRefine] | (entries[EntryCoarsenRequest] << 16);
 

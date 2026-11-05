@@ -6,6 +6,7 @@
 // engine/src/sim/multires_refine_cells.cpp の SnapshotRefineHalos(同じ式。tests/gpu_tree_refine_placement_test.cpp でビット一致)。
 // 読むのは刻みの前の木(適用の前)なので、同じ刻みの別の要求が隣を覆っても・粗くしても答えは変わらない(順番に依存しない)。
 #include "sim/multires_bindings.hlsli"
+#include "sim/multires_layer_access.hlsli"  // 層の置き場(u4。層の分は沈む側として詰まりに数える。T-1240)
 #include "sim/multires_refine_place.hlsli"
 
 static const uint32_t HALO_THREADS = 128;
@@ -28,9 +29,17 @@ int32_t HaloFullness(int32_t level, int64_t originX, int64_t originY, int64_t or
         return MR_HALO_ABSENT;
 
     const MrBlock block = g_blocks[slot];
-    const uint32_t address = MrIsUniform(block) ? slot : PageCellAddress(block.page, index);
+    const bool uniformBlock = MrIsUniform(block);
+    const uint32_t address = uniformBlock ? slot : PageCellAddress(block.page, index);
 
-    return (int32_t)PlaceFullnessAt(address);
+    // 層(CPU の CellFullness は LoadNestCellLayers: 一様な枠は一様の枠の層・頁は頁の層。T-1240)
+    uint32_t layerBase = MR_LAYER_NO_PAGE;
+    if (uniformBlock && UniformHasLayers(slot))
+        layerBase = UniformLayerBase(slot);
+    else if (!uniformBlock)
+        layerBase = PlaceLayerBase(LayerPageOf(block.page), index);
+
+    return (int32_t)PlaceFullnessAt(address, layerBase);
 }
 
 [numthreads(HALO_THREADS, 1, 1)] void TreeRefineHalo(uint32_t h : SV_GroupIndex, uint3 group : SV_GroupID) {

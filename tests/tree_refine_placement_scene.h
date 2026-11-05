@@ -3,6 +3,8 @@
 // 根 1 つ(空気の世界)に、粒の層(下は詰まり切る・途中は半分・上は空気だけ)と、x に沿って高さの変わる粒の斜面と、液体の溜まりを置き、
 // 八分の一を細かくする。物質の表は試験の表(MakeSpeciesChangedTestTable)の 2 つの物質を粒(ばらける固体)と液体に書き換えて使う
 // (相の印・粒の詰まり・モル体積だけを読む)。
+// 層の場面(T-1240 の 4 段目): 根のセルの酸素と粒の量の半分に層を書く(層の分は沈む側に配る)。層を使う世界(EnableCellLayers)では
+// 粒の残りは舞う粒(空きに同じ濃さ)。層の無い世界で粒を舞わせる場面も。
 #pragma once
 
 #include <algorithm>
@@ -83,6 +85,41 @@ namespace bicameral::test::tree_place {
         return sim::MakeReactionCell(materials.table, amounts, ROOM_MILLIKELVIN);
     }
 
+    enum class LayerMode : uint8_t {
+        None,          // 層なし(前と同じ)
+        Layers,        // 酸素と粒の量の半分が層
+        Floating,      // 層あり・層を使う世界(粒の残りは舞う粒)
+        FloatingOnly,  // 層なし・層を使う世界
+    };
+
+    // セルの酸素と粒の量の半分の層(LayerMode::Layers・Floating)
+    inline std::vector<sim::MrCellLayers> SceneLayers(const Materials& materials, std::span<const RxCell> cells) {
+        const uint32_t oxygen = materials.table.SpeciesId("oxygen");
+        std::vector<sim::MrCellLayers> layers(cells.size());
+        for (size_t c = 0; c < cells.size(); ++c) {
+            for (uint32_t i = 0; i < cells[c].speciesCount; ++i) {
+                if (cells[c].species[i] == oxygen || cells[c].species[i] == materials.grain)
+                    layers[c].amounts[i] = cells[c].amounts[i] / 2;
+            }
+        }
+
+        return layers;
+    }
+
+    // 根を置く(層の場面なら層つき)
+    inline uint32_t PlaceSceneRoot(sim::MultiresNest& nest, const Materials& materials, int64_t x, int64_t y,
+                                   std::span<const RxCell> cells, LayerMode mode) {
+        if (mode == LayerMode::Layers || mode == LayerMode::Floating)
+            return sim::PlaceRootBlock(nest, x, y, 0, cells, SceneLayers(materials, cells));
+
+        return sim::PlaceRootBlock(nest, x, y, 0, cells);
+    }
+
+    inline void ApplyLayerMode(sim::MultiresNest& nest, const Materials& materials, LayerMode mode) {
+        if (mode == LayerMode::Floating || mode == LayerMode::FloatingOnly)
+            sim::EnableCellLayers(nest, materials.table);
+    }
+
     struct World {
         sim::MultiresNest nest;
         uint32_t root = MR_NO_BLOCK;
@@ -90,13 +127,15 @@ namespace bicameral::test::tree_place {
     };
 
     // level = 細かくする要求のレベル(1 = 根の八分の一 0 を 1 段・2 = その子の八分の一 0 までの 2 段の鎖)
-    inline World MakeWorld(const Materials& materials, bool placed, bool refined = true, int32_t level = 1) {
+    inline World MakeWorld(const Materials& materials, bool placed, bool refined = true, int32_t level = 1,
+                           LayerMode mode = LayerMode::None) {
         World world{.nest = sim::MakeMultiresNest(MakeMultiresCapacity(materials.table, 16, 0, 16))};
         std::vector<RxCell> cells;
         for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
             cells.push_back(SceneCell(materials, index));
 
-        world.root = sim::PlaceRootBlock(world.nest, 0, 0, 0, cells);
+        world.root = PlaceSceneRoot(world.nest, materials, 0, 0, cells, mode);
+        ApplyLayerMode(world.nest, materials, mode);
         if (placed)
             sim::EnableRefineCellPlacement(world.nest, materials.table);
 
@@ -156,14 +195,17 @@ namespace bicameral::test::tree_place {
     }
 
     // neighbors = B・C・D を置くか。requests = 処理する要求(空なら細かくしない)。child = R1 の子(レベル 1・原点 x = 8)
-    inline World MakeEdgeWorld(const Materials& materials, bool neighbors, std::span<const MrRequest> requests) {
+    inline World MakeEdgeWorld(const Materials& materials, bool neighbors, std::span<const MrRequest> requests,
+                               LayerMode mode = LayerMode::None) {
         World world{.nest = sim::MakeMultiresNest(MakeMultiresCapacity(materials.table, 16, 0, 16))};
-        world.root = sim::PlaceRootBlock(world.nest, 0, 0, 0, EdgeRootCells(materials, 0, false));
+        world.root = PlaceSceneRoot(world.nest, materials, 0, 0, EdgeRootCells(materials, 0, false), mode);
         if (neighbors) {
-            sim::PlaceRootBlock(world.nest, 8, 0, 0, EdgeRootCells(materials, 8, false));
-            sim::PlaceRootBlock(world.nest, 0, -8, 0, EdgeRootCells(materials, 0, true));
-            sim::PlaceRootBlock(world.nest, 8, -8, 0, EdgeRootCells(materials, 8, true));
+            PlaceSceneRoot(world.nest, materials, 8, 0, EdgeRootCells(materials, 8, false), mode);
+            PlaceSceneRoot(world.nest, materials, 0, -8, EdgeRootCells(materials, 0, true), mode);
+            PlaceSceneRoot(world.nest, materials, 8, -8, EdgeRootCells(materials, 8, true), mode);
         }
+
+        ApplyLayerMode(world.nest, materials, mode);
 
         sim::EnableRefineCellPlacement(world.nest, materials.table);
         if (requests.empty())
