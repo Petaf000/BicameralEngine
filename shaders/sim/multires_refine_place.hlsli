@@ -51,32 +51,35 @@ uint3 PlaceMaterialOf(uint32_t speciesId) {
 }
 
 // --- 層の分と残り(T-1240。CPU の MaterialsOf)---
+// 物質の並びはセルを読む用意(PlaceUseCell)の時に 1 回だけ作り、32bit の語に詰めて持つ(T-1305: 前は物質を読むたびに成分と層の組を
+// 前から数え直し、層のある置かれ方の要求の処理が層なしの 4〜9 倍だった)。局所の配列は持たない(T-0397)。
 static const uint32_t PLACE_PART_WHOLE = 0;    // 前と同じ 1 つの物質
 static const uint32_t PLACE_PART_SETTLED = 1;  // 層の分(沈む側)
 static const uint32_t PLACE_PART_REST = 2;     // 残り(層を使う世界の粒は舞う粒)
 
-// 今のセル(s_placeAddress・s_placeLayer)を読む用意: 層の分けが要るか
-void PlaceUseCell(uint32_t address, uint32_t layerBase) {
-    s_placeAddress = address;
-    s_placeLayer = layerBase;
-    s_placeSplit = layerBase != MR_LAYER_NO_PAGE || LayerGrainFloats();
-}
+static const uint32_t PLACE_ENTRY_PART_SHIFT = 3;  // 物質の印の語: 成分の位置 3 bit・分 2 bit・舞う粒 1 bit
+static const uint32_t PLACE_ENTRY_FLOATS = 1u << 5;
+static const uint32_t PLACE_ENTRY_BITS = 8;  // 物質 1 つの印の幅(語 1 つに 4 つ。物質は成分 8 × 2 = 16 まで)
+
+static uint32_t s_placeLayerSlots;  // 成分 i の層の組の番号 + 1(4 bit ずつ。0 = 層の組が無い)
+static uint32_t s_placeMaterials;   // 今のセルの物質の数
+static uint32_t s_placeMap0;        // 物質 0〜3 の印
+static uint32_t s_placeMap1;        // 物質 4〜7 の印
+static uint32_t s_placeMap2;        // 物質 8〜11 の印
+static uint32_t s_placeMap3;        // 物質 12〜15 の印
 
 // 今のセルの成分 i の層(今の量と結ぶ。層が無ければ 0)
 uint64_t PlaceLayerOf(uint32_t i) {
     if (s_placeLayer == MR_LAYER_NO_PAGE)
         return 0;
 
-    const uint32_t species = g_cells[s_placeAddress].species[i];
+    const uint32_t slot = (s_placeLayerSlots >> (i * 4u)) & 0xFu;
+    if (slot == 0)
+        return 0;
+
+    const uint32_t address = s_placeLayer + ((slot - 1u) * MR_LAYER_ENTRY_WORDS);
+    const uint64_t raw = FX_U64(g_layers[address + 2], g_layers[address + 1]);
     const uint64_t amount = g_cells[s_placeAddress].amounts[i];
-    uint64_t raw = 0;
-    FX_UNROLL
-    for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES; ++k) {
-        const uint32_t address = s_placeLayer + (k * MR_LAYER_ENTRY_WORDS);
-        const bool nonzero = (g_layers[address + 1] | g_layers[address + 2]) != 0;
-        if (g_layers[address] == species && nonzero)
-            raw = FX_U64(g_layers[address + 2], g_layers[address + 1]);
-    }
 
     return MrLayerLess(amount, raw) ? amount : raw;
 }
@@ -98,51 +101,116 @@ uint32_t PlacePartCount(uint32_t i) {
     return (hasLayer ? 1u : 0u) + (hasRest ? 1u : 0u);
 }
 
+// 成分ごとの層の組の番号を探す(層の組を 1 回だけ読む。0 でない組のうち、同じ物質の最後の組 = 前の PlaceLayerOf と同じ)
+void PlaceFindLayerSlots(uint32_t speciesCount) {
+    FX_UNROLL
+    for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES; ++k) {
+        const uint32_t address = s_placeLayer + (k * MR_LAYER_ENTRY_WORDS);
+        const bool nonzero = (g_layers[address + 1] | g_layers[address + 2]) != 0;
+        const uint32_t species = g_layers[address];
+        for (uint32_t i = 0; i < speciesCount; ++i) {
+            if (!nonzero || g_cells[s_placeAddress].species[i] != species)
+                continue;
+
+            const uint32_t shift = i * 4u;
+            s_placeLayerSlots = (s_placeLayerSlots & ~(0xFu << shift)) | ((k + 1u) << shift);
+        }
+    }
+}
+
+// 物質 m の印を書く(語は 0 から足すだけ)
+void PlaceSetMaterial(uint32_t m, uint32_t entry) {
+    const uint32_t bits = entry << ((m & 3u) * PLACE_ENTRY_BITS);
+    if (m < 4)
+        s_placeMap0 |= bits;
+    else if (m < 8)
+        s_placeMap1 |= bits;
+    else if (m < 12)
+        s_placeMap2 |= bits;
+    else
+        s_placeMap3 |= bits;
+}
+
+// 物質 m の印(物質の数の外は成分 0 の 1 つの物質 = 前の PlacePartOf の既定)
+uint32_t PlaceMaterialEntry(uint32_t m) {
+    if (m >= s_placeMaterials)
+        return 0;
+
+    uint32_t word = s_placeMap3;
+    if (m < 4)
+        word = s_placeMap0;
+    else if (m < 8)
+        word = s_placeMap1;
+    else if (m < 12)
+        word = s_placeMap2;
+
+    return (word >> ((m & 3u) * PLACE_ENTRY_BITS)) & 0xFFu;
+}
+
+// 今のセル(s_placeAddress・s_placeLayer)を読む用意: 層の分けが要るか・物質の並び
+void PlaceUseCell(uint32_t address, uint32_t layerBase) {
+    s_placeAddress = address;
+    s_placeLayer = layerBase;
+    s_placeSplit = layerBase != MR_LAYER_NO_PAGE || LayerGrainFloats();
+    s_placeLayerSlots = 0;
+    s_placeMap0 = 0;
+    s_placeMap1 = 0;
+    s_placeMap2 = 0;
+    s_placeMap3 = 0;
+
+    const uint32_t speciesCount = g_cells[address].speciesCount;
+    s_placeMaterials = speciesCount;
+    if (!s_placeSplit)
+        return;
+
+    if (layerBase != MR_LAYER_NO_PAGE)
+        PlaceFindLayerSlots(speciesCount);
+
+    // --- 成分ごとに [層の分][残り](0 の分は物質にしない。CPU の MaterialsOf と同じ順)---
+    uint32_t m = 0;
+    for (uint32_t i = 0; i < speciesCount; ++i) {
+        const uint64_t layer = PlaceLayerOf(i);
+        const bool hasLayer = ((uint32_t)layer | (uint32_t)(layer >> 32)) != 0;
+        const bool floats = PlaceFloats(i);
+        const uint32_t count = PlacePartCount(i);
+        for (uint32_t k = 0; k < count; ++k) {
+            uint32_t part = PLACE_PART_REST;
+            if (!hasLayer && !floats)
+                part = PLACE_PART_WHOLE;
+            else if (hasLayer && k == 0)
+                part = PLACE_PART_SETTLED;
+
+            PlaceSetMaterial(m + k, i | (part << PLACE_ENTRY_PART_SHIFT) | (floats ? PLACE_ENTRY_FLOATS : 0u));
+        }
+
+        m += count;
+    }
+
+    s_placeMaterials = m;
+}
+
 // 物質 m の成分の位置(x)と分(y = PLACE_PART_*)
 uint2 PlacePartOf(uint32_t m) {
     if (!s_placeSplit)
         return uint2(m, PLACE_PART_WHOLE);
 
-    uint32_t first = 0;
-    uint2 found = uint2(0, PLACE_PART_WHOLE);
-    for (uint32_t i = 0; i < g_cells[s_placeAddress].speciesCount; ++i) {
-        const uint32_t count = PlacePartCount(i);
-        if (m >= first && m < first + count) {
-            const uint64_t layer = PlaceLayerOf(i);
-            const bool hasLayer = ((uint32_t)layer | (uint32_t)(layer >> 32)) != 0;
-            uint32_t part = PLACE_PART_REST;
-            if (!hasLayer && !PlaceFloats(i))
-                part = PLACE_PART_WHOLE;
-            else if (hasLayer && m == first)
-                part = PLACE_PART_SETTLED;
+    const uint32_t entry = PlaceMaterialEntry(m);
 
-            found = uint2(i, part);
-        }
-
-        first += count;
-    }
-
-    return found;
+    return uint2(entry & 7u, (entry >> PLACE_ENTRY_PART_SHIFT) & 3u);
 }
 
 uint32_t PlaceMaterialCount() {
-    if (!s_placeSplit)
-        return g_cells[s_placeAddress].speciesCount;
-
-    uint32_t count = 0;
-    for (uint32_t i = 0; i < g_cells[s_placeAddress].speciesCount; ++i)
-        count += PlacePartCount(i);
-
-    return count;
+    return s_placeMaterials;
 }
 
 // 物質 m の置かれ方(層の分は沈む側: 気体なら粒として。層を使う世界の粒の残りは気体 = 舞う粒)
 uint3 PlaceMaterialAt(uint32_t m) {
     const uint2 part = PlacePartOf(m);
     uint3 material = PlaceMaterialOf(g_cells[s_placeAddress].species[part.x]);
+    const bool floats = s_placeSplit && (PlaceMaterialEntry(m) & PLACE_ENTRY_FLOATS) != 0;
     if (part.y == PLACE_PART_SETTLED && material.x == SF_SETTLE_GAS)
         material.x = SF_SETTLE_GRAIN;
-    else if (part.y == PLACE_PART_REST && PlaceFloats(part.x))
+    else if (part.y == PLACE_PART_REST && floats)
         material.x = SF_SETTLE_GAS;
 
     return material;
@@ -285,7 +353,8 @@ int64_t PlaceChildEnergy(uint32_t parentAddress, uint32_t j, uint32_t local, uin
     s_placeAddress = parentAddress;
     const int64_t parentEnergy = g_cells[s_placeAddress].energy;
     int64_t parentChemical = 0;
-    for (uint32_t i = 0; i < PR_MATERIAL_COUNT; ++i) {
+    // 成分ごと(物質ではない。CPU の ChildEnergies。T-1305 の前は物質の数まで回し、層のあるセルで成分の並びの外を読んでいた)
+    for (uint32_t i = 0; i < g_cells[s_placeAddress].speciesCount; ++i) {
         const uint32_t speciesId = g_cells[s_placeAddress].species[i];
         parentChemical += (int64_t)g_cells[s_placeAddress].amounts[i] * g_species[speciesId].h0;
     }
