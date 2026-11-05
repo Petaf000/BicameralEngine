@@ -29,6 +29,12 @@
 //     陽の端 T-0721 と同じ CellViews::Outside)を温度を固定した境として系に入れる(段 0 の対角と右辺に入る。implicit_conduction.hlsli の
 //     ImEdgeRhs)。流れ g_端 (T* − T_外) は当てる段 TxApplyEdgeFlow で自分から引き、帳簿の「世界の端」へ。安全網で戻す時は陽の端と同じ流れ。
 //     陽解法は陰解法のブロックの面を流さないので、前はここを誰も流さず端が wall と同じだった
+//   - 混ざったセル(層 + 気体。相の層の欄がある世界だけ。T-1230 段 2 ②・ADR-0512 の 2)は系の節 2 つ(層・気体。同じ座標)。熱容量は見立ての部分
+//     (CV_VIEW_PHASE_LAYER の部分つきの片側)の熱容量の上限 × 8・温度は部分の温度。面は部分つきの片側の組ごとに 1 本(重なり PlPairOverlapsOf・
+//     係数 = min(PlSlotConductance) × HC_LIMIT_PER_CONDUCTANCE × 4^kf = 陽の TxPartFaceFlow と同じ値・頭打ちなし)。違うレベルの面は粗い側の
+//     層の高さを細かい面の段へ写す(TxPartSideOnRow)。層の上の面(層 ⇄ 気体)は未知数の混ざったセルだけ(境のセルの層の上の面は陽の段が流す)。
+//     流れの和はセルのエネルギーへ(今の当てる段)、層の節の分は AddCondensedDelta で Ec へ(粗い側は送った分の整数部だけ。陽と同じ)。
+//     多重格子の段(BuildImplicitGrid)は変えない: 同じ座標の 2 節は最も細かい段の縮約で同じ親へ(熱容量の和)。相の層の欄が無い世界・混ざらないセルは今の 1 節のまま(ビット単位で同じ)
 // 浮動小数点は使わない(engine/src/sim は検査の対象)。
 #include <algorithm>
 #include <limits>
@@ -36,6 +42,7 @@
 #include "common/implicit_conduction.hlsli"
 #include "common/multires_conduction.hlsli"
 #include "common/transport_conduction.hlsli"
+#include "common/transport_conduction_parts.hlsli"
 #include "sim/implicit_conduction.h"
 #include "sim/multires_nest.h"
 #include "sim/multires_nest_internal.h"
@@ -60,6 +67,8 @@ namespace bicameral::sim {
             // --- セルごと: 木のどこか ---
             std::vector<uint32_t> slots;
             std::vector<uint32_t> indices;
+            // 節の部分: PL_PART_WHOLE・混ざったセルは層 PL_PART_CONDENSED(番号 n)と気体 PL_PART_GAS(n + 1)
+            std::vector<uint32_t> parts;
 
             std::vector<uint32_t> ids;        // [枠 × 512] → セルの番号(無ければ NOT_IN_SYSTEM)
             std::vector<ImplicitEdge> edges;  // 開いた世界の端の面(未知数のセルの。T-0790)
@@ -73,37 +82,84 @@ namespace bicameral::sim {
             return slot < nest.capacity.worldBlocks && block.kind == MR_BLOCK_REAL && !MrIsUniform(block) && !frozenNow;
         }
 
-        // セルを系に足す(熱容量 0 なら足さない)。番号を返す
+        // セルが系の節 2 つ(層・気体)になる混ざったセルか(部分の熱容量の上限がどちらも 0 でない時。相の層の欄が無ければ false)
+        bool IsTwoNodeCell(CellViews& thermals, uint32_t slot, uint32_t index) {
+            const TxCellParts& cellParts = thermals.Parts(slot, index);
+
+            return cellParts.mixed != 0 && cellParts.lateral.lower.capacityLimit != 0 &&
+                   cellParts.lateral.upper.capacityLimit != 0;
+        }
+
+        // 系の節 1 つを足す(熱容量 C = 8 × 上限の係数〔レベルによらない数〕。仮のエネルギーは刻みの初めの温度に当たる値)
+        void PushNode(ImplicitSystem& system, const MrBlock& block, uint32_t slot, uint32_t index,
+                      uint64_t capacityLimit, uint32_t conductance, uint32_t temperature, uint32_t part) {
+            ImplicitCell cell;
+            cell.level = block.level;
+            cell.x = block.originX + static_cast<int64_t>(MrCellX(index));
+            cell.y = block.originY + static_cast<int64_t>(MrCellY(index));
+            cell.z = block.originZ + static_cast<int64_t>(MrCellZ(index));
+            cell.heatCapacity = capacityLimit << IM_ENERGY_BITS_PER_LEVEL;
+            cell.conductance = conductance;
+            cell.startTemperature = int64_t{temperature} << IM_TEMPERATURE_SHIFT;
+            cell.energy = ImplicitEnergyFor(cell.heatCapacity, temperature);
+            cell.coarseFraction = block.fraction != MR_NO_FRACTION;
+
+            system.cells.push_back(cell);
+            system.slots.push_back(slot);
+            system.indices.push_back(index);
+            system.parts.push_back(part);
+        }
+
+        // セルを系に足す(熱容量 0 なら足さない)。番号(混ざったセルは層の節の番号)を返す
         uint32_t AddCell(ImplicitSystem& system, const MultiresNest& nest, CellViews& thermals, uint32_t slot,
                          uint32_t index) {
             const size_t address = (size_t{slot} * MR_BLOCK_CELLS) + index;
             if (system.ids[address] != NOT_IN_SYSTEM)
                 return system.ids[address];
 
+            const MrBlock& block = nest.blocks[slot];
+            const auto id = static_cast<uint32_t>(system.cells.size());
+
+            // --- 混ざったセルは層と気体の 2 節(見立ての部分の横の片側 = lower が層・upper が気体)---
+            if (IsTwoNodeCell(thermals, slot, index)) {
+                const TxCellParts& cellParts = thermals.Parts(slot, index);
+                const PlSideSlot& condensed = cellParts.lateral.lower;
+                const PlSideSlot& gas = cellParts.lateral.upper;
+                PushNode(system, block, slot, index, condensed.capacityLimit, condensed.conductance,
+                         condensed.temperature, PL_PART_CONDENSED);
+                PushNode(system, block, slot, index, gas.capacityLimit, gas.conductance, gas.temperature, PL_PART_GAS);
+                system.ids[address] = id;
+
+                return id;
+            }
+
             const MrThermal thermal = thermals.At(slot, index);
             if (thermal.capacityLimit == 0)
                 return NOT_IN_SYSTEM;
 
-            // --- 熱容量 C = 8 × 上限の係数(レベルによらない数)。仮のエネルギーは刻みの初めの温度に当たる値 ---
-            const MrBlock& block = nest.blocks[slot];
-            ImplicitCell cell;
-            cell.level = block.level;
-            cell.x = block.originX + static_cast<int64_t>(MrCellX(index));
-            cell.y = block.originY + static_cast<int64_t>(MrCellY(index));
-            cell.z = block.originZ + static_cast<int64_t>(MrCellZ(index));
-            cell.heatCapacity = thermal.capacityLimit << IM_ENERGY_BITS_PER_LEVEL;
-            cell.conductance = thermal.conductance;
-            cell.startTemperature = int64_t{thermal.temperature} << IM_TEMPERATURE_SHIFT;
-            cell.energy = ImplicitEnergyFor(cell.heatCapacity, thermal.temperature);
-            cell.coarseFraction = block.fraction != MR_NO_FRACTION;
-
-            const auto id = static_cast<uint32_t>(system.cells.size());
+            PushNode(system, block, slot, index, thermal.capacityLimit, thermal.conductance, thermal.temperature,
+                     PL_PART_WHOLE);
             system.ids[address] = id;
-            system.cells.push_back(cell);
-            system.slots.push_back(slot);
-            system.indices.push_back(index);
 
             return id;
+        }
+
+        // セルの節 id(AddCell の番号)のうち部分 part を受け持つ節(混ざらないセルは id のまま)
+        uint32_t NodeForPart(const ImplicitSystem& system, uint32_t id, uint32_t part) {
+            if (system.parts[id] == PL_PART_WHOLE || part != PL_PART_GAS)
+                return id;
+
+            return id + 1;
+        }
+
+        // セルの節 id の面 face の部分つきの片側(見立ての部分。混ざらないセルは見立ての熱の部分 1 つ = 今の面の値)
+        PlPartSide NodeSide(const ImplicitSystem& system, CellViews& thermals, uint32_t id, uint32_t face) {
+            const uint32_t slot = system.slots[id];
+            const uint32_t index = system.indices[id];
+            if (system.parts[id] == PL_PART_WHOLE)
+                return TxWholePartSide(thermals.At(slot, index));
+
+            return TxCellPartSide(thermals.Parts(slot, index), face);
         }
 
         // 面の係数(細かい側の単位。頭打ちなし)= min(G) × G の係数 × 4^kf(ADR-0019。陽解法の MrConductanceLimit と同じ値)
@@ -112,6 +168,38 @@ namespace bicameral::sim {
 
             return ImWideShiftLeft(ImWide(conductance * HC_LIMIT_PER_CONDUCTANCE),
                                    2 * static_cast<uint32_t>(fineLevel));
+        }
+
+        // 部分の組 1 つの面の係数(細かい側の単位。陽の TxPartPairFlow の係数の G の側と同じ min(G(重なり)) × 4^kf・頭打ちなし)。流れないなら 0
+        uint64_t PairConductance(const PlSideSlot& a, const PlSideSlot& b, uint32_t overlapQ16) {
+            if (overlapQ16 == 0)
+                return 0;
+
+            return std::min(PlSlotConductance(a, overlapQ16), PlSlotConductance(b, overlapQ16));
+        }
+
+        // 混ざったセルの節 id の開いた世界の端の面: 部分ごとに外のセル(混ざらない)と 1 本ずつ。安全網で戻す流れは陽の部分の道と同じ組の値
+        void AddPartEdges(ImplicitSystem& system, CellViews& thermals, uint32_t id, const MrBlock& block, uint32_t face,
+                          const CvCellView& outside) {
+            const PlPartSide self = NodeSide(system, thermals, id, face);
+            const PlPartSide other = TxWholePartSide(outside.thermal);
+            const PlPairOverlaps overlaps = PlPairOverlapsOf(self, other);
+            auto pair = [&](const PlSideSlot& selfSlot, const PlSideSlot& otherSlot, uint32_t overlap) {
+                const uint64_t conductance = PairConductance(selfSlot, otherSlot, overlap);
+                if (conductance == 0)
+                    return;
+
+                system.edges.push_back(
+                    {.cell = NodeForPart(system, id, selfSlot.part),
+                     .coefficient = FaceCoefficient(static_cast<uint32_t>(conductance),
+                                                    static_cast<uint32_t>(conductance), block.level),
+                     .temperature = int64_t{outside.thermal.temperature} << IM_TEMPERATURE_SHIFT,
+                     .explicitFlow = TxPartPairFlow(selfSlot, otherSlot, overlap, block.level, 0, 0)});
+            };
+            pair(self.lower, other.lower, overlaps.lowerLower);
+            pair(self.upper, other.upper, overlaps.upperUpper);
+            pair(self.lower, other.upper, overlaps.lowerUpper);
+            pair(self.upper, other.lower, overlaps.upperLower);
         }
 
         // 未知数のセル id の面 face が開いた世界の端なら、外のセル(自分と同じレベルの見立て。world_edge.hlsli)を温度を固定した境として
@@ -126,12 +214,46 @@ namespace bicameral::sim {
                 return;
 
             const CvCellView outside = thermals.Outside(edge.index, block.level);
+            if (system.parts[id] != PL_PART_WHOLE) {
+                AddPartEdges(system, thermals, id, block, face, outside);
+                return;
+            }
+
             const TxSelfSide side = TxMakeSelfSide(kind, thermals.View(system.slots[id], index), block.level);
             system.edges.push_back(
                 {.cell = id,
                  .coefficient = FaceCoefficient(system.cells[id].conductance, outside.thermal.conductance, block.level),
                  .temperature = int64_t{outside.thermal.temperature} << IM_TEMPERATURE_SHIFT,
                  .explicitFlow = TxEdgeFaceFlow(kind, side, outside)});
+        }
+
+        // どちらかが混ざったセルの面: 部分つきの片側の組ごとに 1 本(違うレベルは粗い側の層の高さを細かい面の段 row へ写す。陽の TxFlowConductionCell と同じ)
+        void AddPartFaces(ImplicitSystem& system, CellViews& thermals, uint32_t id, uint32_t other,
+                          const MrBlock& block, uint32_t index, uint32_t face, uint32_t gap) {
+            const PlPartSide self = NodeSide(system, thermals, id, face);
+            PlPartSide neighbor = NodeSide(system, thermals, other, face ^ 1u);
+            if (gap != 0) {
+                const uint32_t mask = gap < 32u ? (1u << gap) - 1u : 0xFFFFFFFFu;
+                const uint32_t row = static_cast<uint32_t>(block.originY + static_cast<int64_t>(MrCellY(index))) & mask;
+                neighbor = TxPartSideOnRow(neighbor, gap, row);
+            }
+
+            const PlPairOverlaps overlaps = PlPairOverlapsOf(self, neighbor);
+            auto pair = [&](const PlSideSlot& selfSlot, const PlSideSlot& otherSlot, uint32_t overlap) {
+                const uint64_t conductance = PairConductance(selfSlot, otherSlot, overlap);
+                if (conductance == 0)
+                    return;
+
+                const auto value = static_cast<uint32_t>(conductance);
+                system.faces.push_back({.fine = NodeForPart(system, id, selfSlot.part),
+                                        .coarse = NodeForPart(system, other, otherSlot.part),
+                                        .gap = gap,
+                                        .coefficient = FaceCoefficient(value, value, block.level)});
+            };
+            pair(self.lower, neighbor.lower, overlaps.lowerLower);
+            pair(self.upper, neighbor.upper, overlaps.upperUpper);
+            pair(self.lower, neighbor.upper, overlaps.lowerUpper);
+            pair(self.upper, neighbor.lower, overlaps.upperLower);
         }
 
         // 未知数のセル(基準より細かい)の 6 面。同じレベルの面は番号の小さい側が 1 回だけ足す。粗い側は境のセルとして足す
@@ -160,6 +282,11 @@ namespace bicameral::sim {
                     continue;
 
                 const uint32_t gap = neighbor.kind == MR_NEIGHBOR_SAME ? 0 : neighbor.gap;
+                if (system.parts[id] != PL_PART_WHOLE || system.parts[other] != PL_PART_WHOLE) {
+                    AddPartFaces(system, thermals, id, other, block, index, face, gap);
+                    continue;
+                }
+
                 system.faces.push_back({.fine = id,
                                         .coarse = other,
                                         .gap = gap,
@@ -185,8 +312,26 @@ namespace bicameral::sim {
 
             const TxConduction kind = TxMakeConduction(options.subcycleBaseLevel, options.maxSubcycleGap);
             const auto unknowns = static_cast<uint32_t>(system.cells.size());
-            for (uint32_t id = 0; id < unknowns; ++id)
-                AddCellFaces(system, nest, thermals, frozen, kind, id);
+            for (uint32_t id = 0; id < unknowns; ++id) {
+                if (system.parts[id] != PL_PART_GAS)
+                    AddCellFaces(system, nest, thermals, frozen, kind, id);
+            }
+
+            // --- 層の上の面(未知数の混ざったセルの層 → 気体。陽の TxPartInnerFlow と同じ直列の値)---
+            for (uint32_t id = 0; id < unknowns; ++id) {
+                if (system.parts[id] != PL_PART_CONDENSED)
+                    continue;
+
+                const TxCellParts& cellParts = thermals.Parts(system.slots[id], system.indices[id]);
+                const uint32_t series = PlClampU32(cellParts.seriesConductance);
+                if (series == 0)
+                    continue;
+
+                system.faces.push_back({.fine = id,
+                                        .coarse = id + 1,
+                                        .gap = 0,
+                                        .coefficient = FaceCoefficient(series, series, system.cells[id].level)});
+            }
 
             return system;
         }
@@ -210,6 +355,36 @@ namespace bicameral::sim {
             }
         };
 
+        // 層の上の面(同じセルの層の節 → 気体の節)か。セルのエネルギーは変えず層の分だけ
+        bool IsInnerFace(const ImplicitSystem& system, const ImplicitFace& face) {
+            return face.gap == 0 && system.slots[face.fine] == system.slots[face.coarse] &&
+                   system.indices[face.fine] == system.indices[face.coarse];
+        }
+
+        // 節 node が層の節なら、層の部分の変化 delta(そのセルのレベルの単位)を Ec へ(ADR-0512 の 2 の AddCondensed)
+        void AddNodeCondensed(MultiresNest& nest, const ImplicitSystem& system, uint32_t node, int64_t delta) {
+            if (delta == 0 || system.parts[node] != PL_PART_CONDENSED)
+                return;
+
+            nest_detail::AddCondensedDelta(nest, system.slots[node], system.indices[node], delta);
+        }
+
+        // 面の流れ flow(細かい側 → 相手が正)の層の節の分。違うレベルは陽の TxFlowConductionCell と同じ: 送った分(MrSplitCrossFlow)を細かい側から・
+        // 粗い側は送った分の整数部だけ(端数はセルのエネルギーにだけ)
+        void ApplyFaceCondensed(MultiresNest& nest, const ImplicitSystem& system, const ImplicitFace& face,
+                                int64_t flow) {
+            if (face.gap == 0) {
+                AddNodeCondensed(nest, system, face.fine, -flow);
+                AddNodeCondensed(nest, system, face.coarse, flow);
+                return;
+            }
+
+            const bool fraction = nest.blocks[system.slots[face.coarse]].fraction != MR_NO_FRACTION;
+            const int64_t sent = -MrSplitCrossFlow(flow, face.gap, fraction).fineDelta;
+            AddNodeCondensed(nest, system, face.fine, -sent);
+            AddNodeCondensed(nest, system, face.coarse, TxCoarseCondensedWhole(sent, face.gap));
+        }
+
         // 多重格子の段ごとの節の数と隣の最大(計測用。GPU の ImTail の境〔節 1024・隣 32〕を見る。T-0120)
         void RecordLevels(MultiresNest& nest, const ImplicitGrid& grid) {
             for (const ImplicitGridLevel& level : grid.levels) {
@@ -232,11 +407,16 @@ namespace bicameral::sim {
             nest.implicitFrozen.assign(frozen.begin(), frozen.end());
         }
 
-        // ブロックの未知数のセルの数(刻むセルで熱容量のあるもの。AddCell が足すものと同じ)
+        // ブロックの未知数の節の数(刻むセルで熱容量のあるもの・混ざったセルは 2。AddCell が足すものと同じ)
         uint32_t CountUnknowns(const MultiresNest& nest, CellViews& thermals, uint32_t slot) {
             uint32_t count = 0;
             for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-                if (MrIsSteppedCell(nest.blocks[slot], index) && thermals.At(slot, index).capacityLimit != 0)
+                if (!MrIsSteppedCell(nest.blocks[slot], index))
+                    continue;
+
+                if (IsTwoNodeCell(thermals, slot, index))
+                    count += 2;
+                else if (thermals.At(slot, index).capacityLimit != 0)
                     ++count;
             }
 
@@ -333,14 +513,21 @@ namespace bicameral::sim {
             const ImplicitApplyWorld world{.nest = &nest, .deltas = deltas};
             for (size_t f = 0; f < grid.faces.size(); ++f) {
                 const ImplicitFace& face = grid.faces[f];
+                if (IsInnerFace(system, face)) {
+                    AddNodeCondensed(nest, system, face.fine, -flows[f]);
+                    continue;
+                }
+
                 TxApplyFaceFlow(world, system.slots[face.fine], system.indices[face.fine], system.slots[face.coarse],
                                 system.indices[face.coarse], face.gap, flows[f]);
+                ApplyFaceCondensed(nest, system, face, flows[f]);
             }
 
             // --- 3 当てる・5 帳簿: 開いた世界の端の面(外のセルは変わらず、流れた分は帳簿の「世界の端」へ。陽の端と同じ。T-0790)---
             for (size_t e = 0; e < grid.edges.size(); ++e) {
                 const uint32_t cell = grid.edges[e].cell;
                 TxApplyEdgeFlow(world, system.slots[cell], system.indices[cell], edgeFlows[e]);
+                AddNodeCondensed(nest, system, cell, -edgeFlows[e]);
             }
         }
 

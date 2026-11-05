@@ -6,13 +6,19 @@
 //      (レベル 0 の係数は 0.5 m のセルの式と同じ)。段違いの水面(x の偶奇で層の高さが違う)で横の面の斜めの組も通す
 //   3. 保存量(ComputeConservedTotals)が刻みで変わらない・部分の熱が負にならない・層は気体より速く石の温度へ寄る
 //   4. 八分の一を細かくした木(違うレベルの面)でも保存量が変わらず、部分の熱が負にならない
+//   5. 陰の伝導の系(T-1230 段 2 ②): 混ざったセルの無い世界は欄の有無でビット単位で同じ(根だけ・細かくした木)/ 混ざったセルは系の節 2 つ
+//      (熱容量と温度が部分の値)・面が部分の組ごと(PlPartSideOf・PlPairOverlapsOf で手で数えた係数)・層の上の面 / 1 刻みの変化が、系の流れ
+//      (SolveImplicitFlows)を節ごとに足した値とビット単位で同じ / 保存量・部分の熱・層が先に寄る(120 刻み。根だけ・細かくした木 = 違うレベルの面と境のセル)
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <span>
 #include <vector>
 
+#include "common/implicit_conduction.hlsli"
 #include "multires_test_scene.h"
 #include "phase_layer_scene.h"
+#include "sim/implicit_conduction.h"
 #include "sim/multires_fields.h"
 #include "sim/multires_nest.h"
 
@@ -255,6 +261,266 @@ namespace {
         EXPECT(parts.condensed.temperature > parts.gas.temperature);
     }
 
+    // --- 5 陰の伝導の系 ---
+    // 根だけの世界は基準 −1(根のレベル 0 が陰の系)・細かくした木は基準 0(細かいレベル 1 が陰の系・根は境のセル)
+    MultiresStepOptions ImplicitStep(bool refine) {
+        MultiresStepOptions options = CONDUCTION;
+        options.subcycleBaseLevel = refine ? 0 : -1;
+        options.implicitConduction = true;
+
+        return options;
+    }
+
+    void Refine(World& world) {
+        const MrRequest request = MrMakeRequest(MR_REQUEST_REFINE, 1, 1, 0, 1);
+        SubmitRequests(world.nest, std::span(&request, 1));
+        ProcessRequests(world.nest);
+    }
+
+    bool SameEnergies(const World& a, const World& b) {
+        if (a.nest.blocks.size() != b.nest.blocks.size())
+            return false;
+
+        for (uint32_t slot = 0; slot < a.nest.capacity.worldBlocks; ++slot) {
+            const MrBlock& block = a.nest.blocks[slot];
+            if (block.kind != MR_BLOCK_REAL)
+                continue;
+
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                if (LoadNestCell(a.nest, slot, index).energy != LoadNestCell(b.nest, slot, index).energy)
+                    return false;
+            }
+        }
+
+        return true;
+    }
+
+    void TestImplicitNoMixed(const BakedReactionTable& table, bool refine) {
+        World plain = MakeWorld(table, false, 0);
+        World fielded = MakeWorld(table, true, 0);
+        if (refine) {
+            Refine(plain);
+            Refine(fielded);
+        }
+
+        const MultiresStepOptions options = ImplicitStep(refine);
+        for (uint64_t tick = 1; tick <= 30; ++tick) {
+            StepNest(plain.nest, table, SEED, tick, options);
+            StepNest(fielded.nest, table, SEED, tick, options);
+        }
+
+        EXPECT(SameEnergies(plain, fielded));
+        EXPECT(plain.nest.implicitCells != 0);
+    }
+
+    // 系の節のうち根のセル (x, y, z) のもの(作った順 = 混ざったセルは層・気体の順)
+    std::vector<uint32_t> NodesAt(const ImplicitGrid& grid, int64_t x, int64_t y, int64_t z) {
+        std::vector<uint32_t> nodes;
+        for (uint32_t n = 0; n < grid.cells.size(); ++n) {
+            const ImplicitCell& cell = grid.cells[n];
+            if (cell.level == 0 && cell.x == x && cell.y == y && cell.z == z)
+                nodes.push_back(n);
+        }
+
+        return nodes;
+    }
+
+    fx::FxU128 Coefficient(uint64_t conductance) {
+        return ImWideShiftLeft(ImWide(conductance * HC_LIMIT_PER_CONDUCTANCE), 0);
+    }
+
+    bool HasFace(const ImplicitGrid& grid, uint32_t a, uint32_t b, const fx::FxU128& coefficient) {
+        for (const ImplicitFace& face : grid.faces) {
+            const bool ends = (face.fine == a && face.coarse == b) || (face.fine == b && face.coarse == a);
+            if (ends && face.gap == 0 && face.coefficient.hi == coefficient.hi && face.coefficient.lo == coefficient.lo)
+                return true;
+        }
+
+        return false;
+    }
+
+    // 根のセル index の節(混ざったセルは層・気体の 2 つ)と面を、部分の面の式で手で数えた値と比べる。数えた面の数を返す
+    size_t CheckCellSystem(const BakedReactionTable& table, const World& world, const ImplicitGrid& grid,
+                           uint32_t index) {
+        const RxCell self = LoadNestCell(world.nest, world.root, index);
+        const int64_t selfEc = Ec(world, world.root, index);
+        const int64_t x = MrCellX(index);
+        const int64_t y = MrCellY(index);
+        const int64_t z = MrCellZ(index);
+        const std::vector<uint32_t> nodes = NodesAt(grid, x, y, z);
+        const bool mixed = PlLayerOf(table.View(), self).mixed != 0;
+        EXPECT(nodes.size() == (mixed ? 2u : 1u));
+        if (nodes.size() != (mixed ? 2u : 1u))
+            return 0;
+
+        // --- 節の熱容量と温度 = 見立ての部分の横の片側(層 = lower・気体 = upper)---
+        const PlPartSide lateral = PlPartSideOf(table.View(), self, selfEc, 0);
+        EXPECT(grid.cells[nodes[0]].heatCapacity == lateral.lower.capacityLimit << IM_ENERGY_BITS_PER_LEVEL);
+        EXPECT(grid.cells[nodes[0]].startTemperature == int64_t{lateral.lower.temperature} << IM_TEMPERATURE_SHIFT);
+        if (mixed) {
+            EXPECT(grid.cells[nodes[1]].heatCapacity == lateral.upper.capacityLimit << IM_ENERGY_BITS_PER_LEVEL);
+            EXPECT(grid.cells[nodes[1]].startTemperature == int64_t{lateral.upper.temperature} << IM_TEMPERATURE_SHIFT);
+        }
+
+        auto nodeOf = [&](const std::vector<uint32_t>& cellNodes, uint32_t part) {
+            return part == PL_PART_GAS ? cellNodes.back() : cellNodes.front();
+        };
+
+        // --- 6 面: 部分の組ごとに 1 本 ---
+        size_t count = 0;
+        for (uint32_t face = 0; face < MR_FACES; ++face) {
+            const int64_t axis = face >> 1;
+            const int64_t step = (face & 1u) != 0 ? 1 : -1;
+            const int64_t nx = x + (axis == 0 ? step : 0);
+            const int64_t ny = y + (axis == 1 ? step : 0);
+            const int64_t nz = z + (axis == 2 ? step : 0);
+            if (nx < 0 || ny < 0 || nz < 0 || nx >= MR_BLOCK_EDGE || ny >= MR_BLOCK_EDGE || nz >= MR_BLOCK_EDGE)
+                continue;
+
+            const uint32_t other = MrCellIndex(static_cast<uint32_t>(nx), static_cast<uint32_t>(ny),
+                                               static_cast<uint32_t>(nz));
+            const std::vector<uint32_t> otherNodes = NodesAt(grid, nx, ny, nz);
+            const PlPartSide a = PlPartSideOf(table.View(), self, selfEc, face);
+            const PlPartSide b = PlPartSideOf(table.View(), LoadNestCell(world.nest, world.root, other),
+                                              Ec(world, world.root, other), face ^ 1u);
+            const PlPairOverlaps overlaps = PlPairOverlapsOf(a, b);
+            auto pair = [&](const PlSideSlot& slotA, const PlSideSlot& slotB, uint32_t overlap) {
+                if (overlap == 0)
+                    return;
+
+                const uint64_t conductance = std::min(PlSlotConductance(slotA, overlap),
+                                                      PlSlotConductance(slotB, overlap));
+                if (conductance == 0)
+                    return;
+
+                EXPECT(
+                    HasFace(grid, nodeOf(nodes, slotA.part), nodeOf(otherNodes, slotB.part), Coefficient(conductance)));
+                ++count;
+            };
+            pair(a.lower, b.lower, overlaps.lowerLower);
+            pair(a.upper, b.upper, overlaps.upperUpper);
+            pair(a.lower, b.upper, overlaps.lowerUpper);
+            pair(a.upper, b.lower, overlaps.upperLower);
+        }
+
+        // --- 層の上の面 ---
+        if (mixed) {
+            const PlParts parts = PlPartsOf(table.View(), self, selfEc);
+            const uint32_t series = PlClampU32(PlInnerConductance(parts, PlLayerOf(table.View(), self)));
+            EXPECT(HasFace(grid, nodes[0], nodes[1], Coefficient(series)));
+            ++count;
+        }
+
+        return count;
+    }
+
+    // 1 刻みの変化 = 系の流れを節ごとに足した値(層の上の面はセルのエネルギーを変えず層の分だけ)
+    Expected FlowStep(const World& world, const ImplicitGrid& grid, const std::vector<int64_t>& flows, uint32_t index) {
+        const std::vector<uint32_t> nodes = NodesAt(grid, MrCellX(index), MrCellY(index), MrCellZ(index));
+        Expected expected{.energy = LoadNestCell(world.nest, world.root, index).energy,
+                          .condensed = Ec(world, world.root, index)};
+        const bool mixed = nodes.size() == 2;
+        auto ours = [&](uint32_t node) {
+            return node == nodes.front() || node == nodes.back();
+        };
+        for (size_t f = 0; f < grid.faces.size(); ++f) {
+            const ImplicitFace& face = grid.faces[f];
+            const bool inner = ours(face.fine) && ours(face.coarse);
+            if (!inner && ours(face.fine))
+                expected.energy -= flows[f];
+
+            if (!inner && ours(face.coarse))
+                expected.energy += flows[f];
+
+            if (mixed && face.fine == nodes.front())
+                expected.condensed -= flows[f];
+
+            if (mixed && face.coarse == nodes.front())
+                expected.condensed += flows[f];
+        }
+
+        return expected;
+    }
+
+    void TestImplicitSystem(const BakedReactionTable& table) {
+        World world = MakeWorld(table, true, 2);
+        const World before = world;
+        world.nest.captureImplicitGrid = true;
+        StepNest(world.nest, table, SEED, 1, ImplicitStep(false));
+        const ImplicitGrid& grid = world.nest.implicitGrid;
+        const uint32_t even = MrCellIndex(4, SURFACE_Y, 4);
+        const uint32_t odd = MrCellIndex(3, SURFACE_Y, 4);
+        const uint32_t stone = MrCellIndex(4, SURFACE_Y - 1, 4);
+        EXPECT(grid.cells.size() == MR_BLOCK_CELLS + MR_BLOCK_EDGE * MR_BLOCK_EDGE);
+        EXPECT(CheckCellSystem(table, before, grid, even) != 0);
+        EXPECT(CheckCellSystem(table, before, grid, odd) != 0);
+        EXPECT(CheckCellSystem(table, before, grid, stone) != 0);
+
+        // 同じ系を同じ形で解き直す(決定的なので当てる段に渡った流れと同じ)
+        ImplicitOptions solve;
+        solve.method = ImplicitMethod::Multigrid;
+        solve.cycles = ImplicitStep(false).implicitMaxCycles;
+        solve.toleranceMillikelvin = 1;
+        std::vector<int64_t> flows;
+        std::vector<int64_t> edgeFlows;
+        const ImplicitCost cost = SolveImplicitFlows(grid, solve, flows, edgeFlows);
+        EXPECT(cost.limitedCells == 0);
+        for (const uint32_t index : {even, odd, stone}) {
+            const Expected expected = FlowStep(before, grid, flows, index);
+            EXPECT(LoadNestCell(world.nest, world.root, index).energy == expected.energy);
+            EXPECT(Ec(world, world.root, index) == expected.condensed);
+        }
+
+        EXPECT(Ec(world, world.root, even) != Ec(before, before.root, even));
+    }
+
+    void TestImplicitRun(const BakedReactionTable& table, bool refine) {
+        World world = MakeWorld(table, true, 2);
+        if (refine)
+            Refine(world);
+
+        const MultiresStepOptions options = ImplicitStep(refine);
+        const int32_t finest = refine ? 1 : 0;
+        const ConservedTotals before = ComputeConservedTotals(world.nest, table, finest);
+        bool conserved = true;
+        bool nonNegative = true;
+        uint32_t limited = 0;
+        for (uint64_t tick = 1; tick <= 120; ++tick) {
+            StepNest(world.nest, table, SEED, tick, options);
+            conserved = conserved && ComputeConservedTotals(world.nest, table, finest) == before;
+            nonNegative = nonNegative && PartsNonNegative(table, world);
+            limited += world.nest.implicitCost.limitedCells;
+        }
+
+        EXPECT(conserved);
+        EXPECT(nonNegative);
+        EXPECT(world.nest.implicitCells != 0);
+        // 混ざったセル(陰の系のレベル)の層は下の石へ寄り、気体より暖かい
+        const int32_t level = refine ? 1 : 0;
+        bool found = false;
+        for (uint32_t slot = 0; slot < world.nest.capacity.worldBlocks && !found; ++slot) {
+            const MrBlock& block = world.nest.blocks[slot];
+            if (block.kind != MR_BLOCK_REAL || MrIsUniform(block) || block.level != level)
+                continue;
+
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS && !found; ++index) {
+                const RxCell cell = LoadNestCell(world.nest, slot, index);
+                if (!MrIsSteppedCell(block, index) || PlLayerOf(table.View(), cell).mixed == 0)
+                    continue;
+
+                found = true;
+                const PlParts parts = PlPartsOf(table.View(), cell, Ec(world, slot, index));
+                std::printf("陰の系(%s)120 刻み: 混ざったセルの層 %d mK・気体 %d mK・安全網 %u\n",
+                            refine ? "細かくした木" : "根だけ", parts.condensed.temperature, parts.gas.temperature,
+                            limited);
+                EXPECT(parts.condensed.temperature > static_cast<int32_t>(LAYER_MK));
+                EXPECT(parts.condensed.temperature > parts.gas.temperature);
+            }
+        }
+
+        EXPECT(found);
+    }
+
 }  // namespace
 
 int main() {
@@ -264,6 +530,11 @@ int main() {
     TestHandStep(table, 2);
     TestRun(table, false);
     TestRun(table, true);
+    TestImplicitNoMixed(table, false);
+    TestImplicitNoMixed(table, true);
+    TestImplicitSystem(table);
+    TestImplicitRun(table, false);
+    TestImplicitRun(table, true);
     if (failureCount != 0) {
         std::printf("%d 件の失敗\n", failureCount);
         return 1;
