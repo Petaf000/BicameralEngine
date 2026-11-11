@@ -12,6 +12,8 @@
 // 引数: [--measure](全部の場面。既定は ctest 用の 32 × 16 m・0.5 m だけ)[--coarse](2 本目の全部の場面)[--ticks n](掘った後の刻み。既定 600)
 //   [--beam n](違う大きさの面の形 sim::MixedBeam の番号。既定 0 = ④ 対の面。1 = ③ 面の点のばね・2 = ③'・3 = ②・4 = ①・5 = ④' 対のずれだけ〔T-1207 の前〕。T-1191・T-1207 の比べ)
 //   [--pair n](対の負の項に残す粗いセルの硬さ sim::MixedPairMaterial の番号。既定は SupportOptions の既定〔今は 0 = 無し〕。T-1261・T-1278)
+//   [--three](T-1295・★7: 2 次元の法則と、同じ塊を 3 次元の格子の梁〔sim/support_law_3d〕の奥行 1 セルにしたものの費用の比べ。
+//   掘る前の釣り合い・掘った後に釣り合いに着く刻みと節の値を解いた回数・1 刻みの ms・天井のたわみ。試験ではなく測り)
 #include <algorithm>
 #include <array>
 #include <chrono>
@@ -29,6 +31,7 @@
 #include "core/log.h"
 #include "core/singleton.h"
 #include "sim/support_law.h"
+#include "sim/support_law_3d.h"
 #include "support_scenes.h"
 
 using namespace bicameral;
@@ -716,9 +719,131 @@ namespace {
         }
     }
 
+    // --- 3 次元の法則の費用(T-1295・★7)---
+    struct LawCost {
+        uint32_t cells = 0;
+        uint32_t settleTicks = 0;  // 掘る前の釣り合い(セルに残る力 ≤ 重さ ÷ 10000 が 50 刻み続く)
+        double settleMs = 0;
+        uint32_t digTicks = 0;    // 掘った後に重さ ÷ 1000 に入って出なくなる刻み
+        uint64_t digUpdates = 0;  // そこまでに節の値を解いた回数の和
+        double tickMs = 0;        // 掘った後の 1 刻みの中央値(ほかの作業ツリーのビルドと重なった刻みを外す)
+        double fastestMs = 0;     // 掘った後の 1 刻みの最小
+        double buildMs = 0;       // 掘った後の作り直し + 運び
+        double sagMm = 0;         // 最後の穴の天井のたわみ
+        bool ledgerOk = true;
+    };
+
+    double SagOf(const sim::SupportLaw& law, const Geometry& g) {
+        return -(double)law.Value(g.centerX, g.holeHighUp, sim::SUPPORT_UP) / NM_UNITS / 1.0e6;
+    }
+
+    double SagOf(const sim::SupportLaw3D& law, const Geometry& g) {
+        return -(double)law.Value(g.centerX, g.holeHighUp, 0, sim::SUPPORT3_UP) / NM_UNITS / 1.0e6;
+    }
+
+    bool LedgerOk(const sim::SupportLaw& law) {
+        const sim::SupportLedger ledger = law.Ledger();
+        return ledger.netMn == ledger.reactionMn - ledger.weightMn;
+    }
+
+    bool LedgerOk(const sim::SupportLaw3D& law) {
+        const sim::SupportLedger3D ledger = law.Ledger();
+        for (uint32_t axis = 0; axis < sim::SUPPORT3_AXES; ++axis) {
+            if (ledger.netMn[axis] != ledger.reactionMn[axis] + ledger.loadMn[axis] ||
+                ledger.netTurn[axis] != ledger.reactionTurn[axis] + ledger.loadTurn[axis])
+                return false;
+        }
+
+        return true;
+    }
+
+    template <class Law, class Scene>
+    LawCost MeasureLaw(const Scene& intact, const Scene& dug, const Geometry& g, double weightMn, uint32_t ticks) {
+        LawCost cost;
+        Law before(intact, {});
+        cost.cells = before.CellCount();
+        const Clock::time_point settleStart = Clock::now();
+        uint32_t below = 0;
+        for (uint32_t tick = 1; tick <= 20000 && cost.settleTicks == 0; ++tick) {
+            before.Step();
+            below = (double)before.Ledger().worstCellMn <= weightMn / 10000.0 ? below + 1 : 0;
+            if (below >= 50)
+                cost.settleTicks = tick;
+        }
+
+        cost.settleMs = MsSince(settleStart);
+        const Clock::time_point buildStart = Clock::now();
+        Law law(dug, {});
+        law.CarryFrom(before);
+        cost.buildMs = MsSince(buildStart);
+        std::vector<uint64_t> worst;
+        std::vector<uint64_t> updates;
+        std::vector<double> tickMs;
+        for (uint32_t tick = 1; tick <= ticks; ++tick) {
+            const Clock::time_point start = Clock::now();
+            law.Step();
+            tickMs.push_back(MsSince(start));
+            worst.push_back(law.Ledger().worstCellMn);
+            updates.push_back(law.LastNodeUpdates());
+            cost.ledgerOk = cost.ledgerOk && LedgerOk(law);
+        }
+
+        for (uint32_t tick = (uint32_t)worst.size(); tick-- > 0;) {
+            if ((double)worst[tick] > weightMn / 1000.0)
+                break;
+
+            cost.digTicks = tick + 1;
+        }
+
+        for (uint32_t tick = 0; tick < cost.digTicks; ++tick)
+            cost.digUpdates += updates[tick];
+
+        rng::sort(tickMs);
+        cost.tickMs = tickMs.empty() ? 0.0 : tickMs[tickMs.size() / 2];
+        cost.fastestMs = tickMs.empty() ? 0.0 : tickMs.front();
+        cost.sagMm = SagOf(law, g);
+        return cost;
+    }
+
+    void LogCost(std::string_view name, std::string_view form, const LawCost& cost, uint32_t components) {
+        Log(Channel::Sim, Level::Info,
+            "[{}] {}: セル {}・掘る前の釣り合い {} 刻み {:.0f} ms・掘った後に着く刻み {}・解いた節 {}(× 成分 {} = {})・"
+            "1 刻み 中央値 {:.3f} ms・最小 {:.3f} ms・作り直し + 運び {:.2f} ms・天井のたわみ {:.5f} mm・帳簿 {}",
+            name, form, cost.cells, cost.settleTicks, cost.settleMs, cost.digTicks, cost.digUpdates, components,
+            cost.digUpdates * components, cost.tickMs, cost.fastestMs, cost.buildMs, cost.sagMm,
+            cost.ledgerOk ? "厳密" : "ずれ");
+    }
+
+    void RunThree(uint32_t ticks) {
+        const std::array<Case, 4> cases = {{{32000, 16000, 500, 1000, 1000},
+                                            {32000, 16000, 500, 4000, 2000},
+                                            {64000, 32000, 500, 4000, 2000},
+                                            {32000, 16000, 250, 4000, 2000}}};
+        for (const Case& c : cases) {
+            const Geometry g = GeometryOf(c);
+            const std::string name = CaseName(c);
+            const sim::SupportScene intact = Block(c, g, false);
+            const sim::SupportScene dug = Block(c, g, true);
+            const double weightMn = CellWeightMn(c);
+            const LawCost flat = MeasureLaw<sim::SupportLaw>(intact, dug, g, weightMn, ticks);
+            const LawCost solid = MeasureLaw<sim::SupportLaw3D>(test::Extruded(intact), test::Extruded(dug), g,
+                                                                weightMn, ticks);
+            LogCost(name, "2 次元", flat, sim::SUPPORT_COMPONENTS);
+            LogCost(name, "3 次元・奥行 1", solid, sim::SUPPORT3_COMPONENTS);
+            Log(Channel::Sim, Level::Info,
+                "[{}] 3 次元 ÷ 2 次元: 1 刻みの ms 中央値 {:.2f}・最小 {:.2f}・掘った後の解いた節 {:.2f}・"
+                "掘る前の釣り合いの ms {:.2f}・天井のたわみの差 {:.2e}",
+                name, solid.tickMs / std::max(flat.tickMs, 1.0e-9), solid.fastestMs / std::max(flat.fastestMs, 1.0e-9),
+                Ratio(solid.digUpdates, flat.digUpdates), solid.settleMs / std::max(flat.settleMs, 1.0e-9),
+                std::abs(solid.sagMm - flat.sagMm) / std::max(std::abs(flat.sagMm), 1.0e-12));
+            Expect(flat.ledgerOk && solid.ledgerOk, std::format("帳簿: {} 2 次元と 3 次元", name));
+        }
+    }
+
     int RunAll(std::span<char*> arguments) {
         bool measure = false;
         bool coarse = false;
+        bool three = false;
         uint32_t ticks = 600;
         sim::MixedBeam beam = sim::MixedBeam::FacePair;
         for (size_t i = 1; i < arguments.size(); ++i) {
@@ -727,6 +852,8 @@ namespace {
                 measure = true;
             else if (name == "--coarse")
                 coarse = true;
+            else if (name == "--three")
+                three = true;
             else if (name == "--ticks" && i + 1 < arguments.size())
                 ticks = (uint32_t)std::atoi(arguments[++i]);
             else if (name == "--beam" && i + 1 < arguments.size())
@@ -735,7 +862,9 @@ namespace {
                 pairMaterial = (sim::MixedPairMaterial)std::atoi(arguments[++i]);
         }
 
-        if (coarse) {
+        if (three) {
+            RunThree(ticks);
+        } else if (coarse) {
             RunCoarse(ticks, beam);
         } else if (!measure) {
             (void)TestCase({32000, 16000, 500, 1000, 1000}, ticks, true);
