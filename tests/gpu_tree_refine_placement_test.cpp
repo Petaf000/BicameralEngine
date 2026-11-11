@@ -8,6 +8,8 @@
 //     隣の無い世界・隣を同じ刻みに細かくする 2 つの要求(どちらの順でも)も
 //   - 層の場面(T-1240 の 4 段目): 層のある根(層の分は沈む側)・層を使う世界(粒の残りは舞う粒)・層の無い層を使う世界を、
 //     1 段・2 段の鎖・端(隣のブロックの層も写しの詰まりに入る)で。GPU は層の頁を持つ(layerPages)
+//   - 前線の順の場面(T-1314): 隣(ブロックの外 B・中の八分の一 0)を先の刻みに細かくした世界で A を細かくする。
+//     子に覆われた隣のセルは覆う子 2³ の和から読む(写しの 6 面)
 // 場面ごとに、要求を処理する段(RecordProcessRequests。置かれ方の世界は別の Work Graph のプログラム。ADR-0499)の GPU の時間を
 // 同じ処理 8 回の最小で出す(docs/perf.md)。段ごとの時間(SetStageTimestamps。T-1305)も段ごとの 8 回の最小で出す: 並びは
 // 解決・確定・割り当て・(置かれ方の世界だけ隣の写し)・Work Graph の細かくする・粗くする・解放・索引を消す・索引を作る。
@@ -189,6 +191,17 @@ namespace {
                          MakeEdgeWorld(materials, neighbors, requests, mode), requests, name, mode);
     }
 
+    // 前線の順の場面(T-1314): first を先の刻みに CPU で細かくした世界から、次の刻みに A の八分の一 1 を GPU で細かくする
+    std::expected<double, std::string> RunFrontScene(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                     gpu::DebugRing& ring, const Timestamps& timestamps,
+                                                     const Materials& materials, std::span<const MrRequest> first,
+                                                     std::string_view name, LayerMode mode = LayerMode::None) {
+        const MrRequest a = EdgeRequestA();
+
+        return RunWorlds(device, queue, ring, timestamps, materials, MakeEdgeWorld(materials, true, first, mode),
+                         MakeEdgeFrontWorld(materials, first, std::span(&a, 1), mode), std::span(&a, 1), name, mode);
+    }
+
     std::expected<void, std::string> RunScenes(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring,
                                                const sim::BakedReactionTable& baked) {
         const auto timestamps = CreateTimestamps(device);
@@ -266,6 +279,29 @@ namespace {
                 device, queue, ring, *timestamps, packed, true, abOrder,
                 mode == LayerMode::Layers ? "層・端・隣を同じ刻みに(A, B)" : "層・舞う粒・端・隣を同じ刻みに(A, B)",
                 mode);
+            if (!ran)
+                return std::unexpected(ran.error());
+        }
+
+        // --- 前線の順の場面(T-1314): 子に覆われた隣のセルを子の和から読む(ブロックの外 B・中の八分の一 0)---
+        const MrRequest b = EdgeRequestB();
+        const MrRequest inside = EdgeRequestInside();
+        const std::array<MrRequest, 2> bothFirst = {b, inside};
+        struct FrontScene {
+            std::span<const MrRequest> first;
+            LayerMode mode;
+            std::string_view name;
+        };
+        const FrontScene frontScenes[] = {
+            {std::span(&b, 1), LayerMode::None, "前線の順・隣のブロック B が先"},
+            {std::span(&inside, 1), LayerMode::None, "前線の順・中の八分の一 0 が先"},
+            {bothFirst, LayerMode::None, "前線の順・B と中が先"},
+            {bothFirst, LayerMode::Layers, "層・前線の順・B と中が先"},
+            {bothFirst, LayerMode::Floating, "層・舞う粒・前線の順・B と中が先"},
+        };
+        for (const FrontScene& scene : frontScenes) {
+            const auto ran = RunFrontScene(device, queue, ring, *timestamps, packed, scene.first, scene.name,
+                                           scene.mode);
             if (!ran)
                 return std::unexpected(ran.error());
         }

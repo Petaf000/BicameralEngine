@@ -8,8 +8,9 @@
 // 「数の空間」: 子 1 つの器 = レベル 0 のセルの体積 MR_CELL_VOLUME_MM3・配る量 = 親の数 × 8(子のレベルの単位)。
 // 寄せないセル(気体だけ・詰まり切った・据わる固体を含む・凝縮相が無い)は写したまま触らない。端数の枠は SAME のまま。
 // 隣は親のブロックの中と、ブロックの外は隣の写し(要求の処理の割り当ての後に sim/multires_refine_halo.hlsl が u6 の g_overflowBase から書く。
-// 刻みの前の、索引で同じレベルの本物のブロックの詰まり。T-1189・common/multires_refine_halo.hlsli)。子に覆われたセル・同じレベルのブロックが
-// 無い所は無いと読む(横 → 傾き 0・下 → 詰まり切る・上 → 空。T-1176 の仮のまま)。
+// 刻みの前の、索引で同じレベルの本物のブロックの詰まり。T-1189・common/multires_refine_halo.hlsli)。子に覆われたセルは写しの覆う子のセル 2³ の
+// 和から(ブロックの中のものは写しの中を向く面。T-1314)。同じレベルのブロックが無い所は無いと読む(横 → 傾き 0・下 → 詰まり切る・上 → 空。
+// T-1176 の仮のまま)。
 // 書き換えた構造体の配列を動的な添字で読まない(T-0397): 親のセルの成分は毎回バッファから読み、子のセルはバッファへ直接書く。
 // 64bit の引き算と同じ値どうしの比べを並べない(T-1078・T-1159): 差は 32bit の 2 つに分けて借りを手で回す(PrSubS64)。
 // 成分ごとの層(T-1240 の 4 段目。CPU の MaterialsOf・ChildCells): 層を持つ成分は「層の分 = 沈む側(凝縮相)」と「残り = 物質の置かれ方」の
@@ -276,6 +277,17 @@ int32_t PlaceFullnessRaw(int32_t x, int32_t y, int32_t z) {
     return (int32_t)g_treeWords[RefineHaloAddress(s_placeHalo, MrHaloIndexOf(x, y, z, s_placeOctant))];
 }
 
+// 親のブロックの子に覆われたセル t の詰まり(隣の写しの中を向く面。CPU の FullnessAt の覆われたセル。T-1314)
+int32_t PlaceCoveredFullness(uint32_t t) {
+    const int32_t x = (int32_t)MrCellX(t);
+    const int32_t y = (int32_t)MrCellY(t);
+    const int32_t z = (int32_t)MrCellZ(t);
+    if (s_placeHalo == MR_HALO_NONE || !MrHaloInWindow(x, y, z, s_placeOctant))
+        return MR_HALO_ABSENT;
+
+    return (int32_t)g_treeWords[RefineHaloAddress(s_placeHalo, MrHaloIndexOf(x, y, z, s_placeOctant))];
+}
+
 bool PlacePresent(int32_t x, int32_t y, int32_t z) {
     return PlaceFullnessRaw(x, y, z) >= 0;
 }
@@ -399,10 +411,13 @@ void PlaceRefineChildren(MrBlock parent, uint32_t parentSlot, uint32_t octant, u
     s_placeHalo = halo;
     s_placeOctant = octant;
 
-    // --- 1. 親のブロックのセル t の詰まり(子に覆われたセルは無い)。覆いは索引の見出しから(親を覆うのはこの段の後)---
+    // --- 1. 親のブロックのセル t の詰まり。覆いは索引の見出しから(親を覆うのはこの段の後)。子に覆われたセルは隣の写しの
+    // 中を向く面(覆う子のセル 2³ の和。T-1314)。窓の外・写しが無ければ無い ---
     int32_t fullness = -1;
     if (g_blocks[parentSlot].children[MrOctantOfCell(t)] == MR_NO_BLOCK)
         fullness = (int32_t)PlaceFullnessAt(PageCellAddress(parent.page, t), PlaceLayerBase(parentLayerPage, t));
+    else
+        fullness = PlaceCoveredFullness(t);
 
     gs_placeNarrow[t] = (uint32_t)fullness;
     GroupMemoryBarrierWithGroupSync();

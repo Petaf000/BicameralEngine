@@ -7,7 +7,8 @@
 // エネルギーは子の温度が親と揃うように熱(µJ)を子の熱容量の重みで配る(D-674)。
 // 傾きは隣の列から(SfSurfaceSlopeQ16)。親のブロックの中はそのまま、ブロックの外は要求の処理の割り当ての後に写した「隣の写し」
 // (SnapshotRefineHalos。索引で同じレベルの本物のブロック。T-1189・common/multires_refine_halo.hlsli)から読む。
-// 子に覆われたセル・同じレベルのブロックが無い所は無いと読む(T-1176 の仮のまま): 横が無い → 傾き 0・下が無い → 詰まり切る・上が無い → 空。
+// 子に覆われたセル(ブロックの中も外も)は写しの覆う子のセル 2³ の和から読む(CoveredFullness。量は子の和・置かれ方は子の平均。T-1314)。
+// 同じレベルのブロックが無い所は無いと読む(T-1176 の仮のまま): 横が無い → 傾き 0・下が無い → 詰まり切る・上が無い → 空。
 // 1 刻みに 1 つの親は 1 つの要求だけが触り、外は刻みの前の写しなので、読む所は順番に依存しない。
 // GPU は shaders/sim/multires_refine_place.hlsli(multires_graph.hlsl の RefineLevel が呼ぶ。T-1188。tests/gpu_tree_refine_placement_test.cpp)。
 // 世界の箱(MakeLabBoxNest)は既定で使う(D-664)。MakeMultiresNest だけで作る木は使わない(SAME)。
@@ -107,13 +108,87 @@ namespace bicameral::sim {
             return SfSettleFullnessQ16(SfSettledVolume(sum), MR_CELL_VOLUME_MM3 * 8, sum.anchored);
         }
 
+        // --- 子に覆われたセルの詰まり(T-1314。common/multires_refine_halo.hlsli の約束)---
+        // 子のセルの量を成分ごとに足した物(量は子のレベルの単位 = 子の和。層の分も成分ごとに足す)
+        struct CoveredSum {
+            std::vector<uint32_t> species;
+            std::vector<uint64_t> amounts;
+            std::vector<uint64_t> layers;
+
+            void Add(const RxCell& cell, const MrCellLayers& cellLayers) {
+                for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+                    const auto found = std::ranges::find(species, cell.species[i]);
+                    const auto at = (size_t)(found - species.begin());
+                    if (found == species.end()) {
+                        species.push_back(cell.species[i]);
+                        amounts.push_back(0);
+                        layers.push_back(0);
+                    }
+
+                    amounts[at] += cell.amounts[i];
+                    layers[at] += cellLayers.amounts[i];
+                }
+            }
+        };
+
+        // 足した量の沈み固まった体積(MaterialsOf と同じ分け方: 層の分は沈む側・層を使う世界の粒の残りは舞う粒。足す順は効かない)
+        SfSettleSum CoveredSettleSum(const MultiresNest& nest, std::span<const RxSpecies> table,
+                                     const CoveredSum& covered) {
+            SfSettleSum sum = SfMakeSettleSum();
+            for (size_t k = 0; k < covered.species.size(); ++k) {
+                const PlaceMaterial material = MaterialOf(table[covered.species[k]]);
+                const bool floats = nest.cellLayers.enabled && material.kind == SF_SETTLE_GRAIN;
+                const uint64_t layer = covered.layers[k];
+                const uint64_t amount = covered.amounts[k];
+                if (layer == 0 && !floats) {
+                    sum = SfAddSettleOf(sum, material.kind, material.densityKgPerM3, material.packedFractionPct,
+                                        material.molarVolumeMm3PerMol, (int64_t)amount);
+                    continue;
+                }
+
+                const uint32_t settledKind = material.kind == SF_SETTLE_GAS ? SF_SETTLE_GRAIN : material.kind;
+                const uint32_t restKind = floats ? SF_SETTLE_GAS : material.kind;
+                if (layer != 0)
+                    sum = SfAddSettleOf(sum, settledKind, material.densityKgPerM3, material.packedFractionPct,
+                                        material.molarVolumeMm3PerMol, (int64_t)layer);
+
+                if (amount > layer)
+                    sum = SfAddSettleOf(sum, restKind, material.densityKgPerM3, material.packedFractionPct,
+                                        material.molarVolumeMm3PerMol, (int64_t)(amount - layer));
+            }
+
+            return sum;
+        }
+
+        // 枠 slot のセル index(子に覆われている)の詰まり: 覆う子のブロックの子のセル 2³ の量を成分ごとに足し、子 8 つの器で読む
+        // (置かれ方は子の平均)。子のセル 2³ は子のブロックの同じ八分の一にあるので、孫に覆われていれば全部が覆われる → 無い
+        // (孫までは降りない。2:1 の木では細かくする八分の一に接する所には来ない)
+        int32_t CoveredFullness(const MultiresNest& nest, std::span<const RxSpecies> table, uint32_t slot,
+                                uint32_t index) {
+            const uint32_t childSlot = nest.blocks[slot].children[MrOctantOfCell(index)];
+            const uint32_t local = (MrCellX(index) & 3u) | ((MrCellY(index) & 3u) << 2) | ((MrCellZ(index) & 3u) << 4);
+            if (nest.blocks[childSlot].children[MrOctantOfCell(MrChildCell(local, 0))] != MR_NO_BLOCK)
+                return MR_HALO_ABSENT;
+
+            CoveredSum covered;
+            for (uint32_t j = 0; j < 8; ++j) {
+                const uint32_t childCell = MrChildCell(local, j);
+                covered.Add(LoadNestCell(nest, childSlot, childCell), LoadNestCellLayers(nest, childSlot, childCell));
+            }
+
+            const SfSettleSum sum = CoveredSettleSum(nest, table, covered);
+
+            return (int32_t)SfSettleFullnessQ16(SfSettledVolume(sum), MR_CELL_VOLUME_MM3 * 8, sum.anchored);
+        }
+
         bool InsideBlock(int32_t x, int32_t y, int32_t z) {
             const auto edge = (int32_t)MR_BLOCK_EDGE;
 
             return x >= 0 && y >= 0 && z >= 0 && x < edge && y < edge && z < edge;
         }
 
-        // --- 隣の読み方: 親のブロックの中は子に覆われていないセル、外は隣の写し(T-1189)の詰まり(Q16。器 = 子 8 つ)---
+        // --- 隣の読み方: 親のブロックの中の子に覆われていないセルはそのまま、外と子に覆われたセルは隣の写し(T-1189・T-1314)の
+        // 詰まり(Q16。器 = 子 8 つ)---
         struct Neighborhood {
             const MultiresNest& nest;
             std::span<const RxSpecies> table;
@@ -131,17 +206,21 @@ namespace bicameral::sim {
                 .halos[((size_t)halo * MR_HALO_CELLS) + MrHaloIndexOf(x, y, z, around.octant)];
         }
 
-        bool Present(const Neighborhood& around, int32_t x, int32_t y, int32_t z) {
-            if (!InsideBlock(x, y, z))
-                return HaloAt(around, x, y, z) != MR_HALO_ABSENT;
-
+        bool Covered(const Neighborhood& around, int32_t x, int32_t y, int32_t z) {
             const uint32_t index = MrCellIndex((uint32_t)x, (uint32_t)y, (uint32_t)z);
 
-            return around.nest.blocks[around.slot].children[MrOctantOfCell(index)] == MR_NO_BLOCK;
+            return around.nest.blocks[around.slot].children[MrOctantOfCell(index)] != MR_NO_BLOCK;
+        }
+
+        bool Present(const Neighborhood& around, int32_t x, int32_t y, int32_t z) {
+            if (!InsideBlock(x, y, z) || Covered(around, x, y, z))
+                return HaloAt(around, x, y, z) != MR_HALO_ABSENT;
+
+            return true;
         }
 
         int64_t FullnessAt(const Neighborhood& around, int32_t x, int32_t y, int32_t z) {
-            if (!InsideBlock(x, y, z))
+            if (!InsideBlock(x, y, z) || Covered(around, x, y, z))
                 return HaloAt(around, x, y, z);
 
             return CellFullness(around.nest, around.table, around.slot,
@@ -317,8 +396,8 @@ namespace bicameral::sim {
 
         namespace {
 
-            // 隣の写しの 1 つのセル: 親のブロック(レベル level・原点 origin)の中の座標 (x, y, z)(外に出る)を含む同じレベルの本物のブロックの、
-            // 子に覆われていないセルの詰まり。無ければ MR_HALO_ABSENT
+            // 隣の写しの 1 つのセル: 親のブロック(レベル level・原点 origin)の中の座標 (x, y, z)(外に出るか、P の別の八分の一)を含む
+            // 同じレベルの本物のブロックのセルの詰まり。子に覆われていれば子のセルから(T-1314)。ブロックが無ければ MR_HALO_ABSENT
             int32_t HaloFullness(const MultiresNest& nest, int32_t level, const std::array<int64_t, 3>& origin,
                                  const std::array<int32_t, 3>& cell) {
                 std::array<int64_t, 3> neighborOrigin{};
@@ -337,7 +416,7 @@ namespace bicameral::sim {
 
                 const uint32_t index = MrCellIndex(local[0], local[1], local[2]);
                 if (nest.blocks[slot].children[MrOctantOfCell(index)] != MR_NO_BLOCK)
-                    return MR_HALO_ABSENT;
+                    return CoveredFullness(nest, nest.refineCells.species, slot, index);
 
                 return (int32_t)CellFullness(nest, nest.refineCells.species, slot, index);
             }
