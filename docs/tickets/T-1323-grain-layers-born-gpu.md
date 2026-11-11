@@ -28,3 +28,12 @@ T-1322 の CPU の規則(層を使う世界で、反応・実験室の命令で�
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-11-12 wt2: T-1322 から分けた(チケットだけ)。
+- 2026-11-12 wt2(3 本目): 入れ物の再起動で止まった。コードは未変更(読んだだけ)。ブランチ t-1323-grain-layers-born-gpu(t-1322 c707f3a7 の上)にこのメモだけコミット。
+  **引き継ぎメモ(次の一手)**: 読んだ所 = CPU の規則 `nest_detail::GrowGrainLayers`(multires_cell_store.cpp 370 行)・合わせる段 shaders/sim/multires_layers.hlsl
+  (層の頁だけに投げる・MrLayerAfterWrite で min)・道具 sim/multires_layer_access.hlsli(層の頁を取るのは木の段の累積和 + 空きのスタック。
+  1 グループで取る形は無い = 合わせる段で取るなら InterlockedAdd(-1) で空きの数を下げる形を足す。取る順が番号に効くだけで結果には効かない)。
+  gpu_multires.cpp: 合わせる段を呼ぶ所 1362(影の後・min のまま)・1429 / 1448(刻みの段の後 = ここを「前のセルと比べる」に)・RecordLayerReconcile 1469・
+  RecordExpandPass 1508 / 1635 / 1720(刻みの段の中で広げる = 写しは広げた後に取る)・断り ProducesGrain 997 / 1033(外す)・m_producedSpecies 350。
+  順: ① 層を使う世界だけ「反応の前のセル」の写しのバッファ(頁 × 64 × 112 B)を広げる段の後・刻みの前に CopyBufferRegion
+  ② 合わせる段の 2 つ目の入口(全部のセルの頁に投げ、粒の物質〔粒の印の表が要る。u5 か定数で〕で増えた分を層へ。層の頁が無ければ取る・尽きたら CountLayerShortage)
+  ③ lab_box.hlsl の LabCells ④ gpu_multires_layers の 9 を燃える場面のビット一致に(HW/WARP)。u5 に前のセルを結べるか(64/64 語)を最初に確かめる。
