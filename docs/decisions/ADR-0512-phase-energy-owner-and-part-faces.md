@@ -150,3 +150,13 @@ Ec を載せようとすると、土台の共通部分に足りない形が 2 �
 - 変えたのは系を作る側(engine/src/sim/multires_implicit_conduction.cpp)だけ。共通の段(BuildImplicitGrid・SolveImplicitFlows・implicit_conduction.hlsli)・ImBlockCellBound の式は変えていない(圧力・支えの系はビット一致のまま)。
 - 混ざったセルは層・気体の 2 節(熱容量・温度 = 見立ての部分の値)。面は部分の組ごとに 1 本(陽の TxPartFaceFlow と同じ係数・頭打ちなし)・違うレベルは TxPartSideOnRow・層の上の面は未知数の混ざったセルだけ・層の節の分は AddCondensed の列へ。系の大きさの見込みは混ざったセルを 2 と数える(CountUnknowns)。
 - 足りないもの(足していない・司令塔へ): 安全網の陽の流れ(ExplicitFlows)は節の熱容量の 1/8 で頭打ちし、部分の組の重なりで縮めない。安全網に入った刻みだけ陽の部分の道と値が違い、凸結合の保証(1 面 ≤ C/8)が層の節(面が最大 13 本)で崩れうる。保存はビット単位のまま。直すなら面ごとの陽の流れを呼ぶ側が渡す形(ImplicitEdge の explicitFlow と同じ)を ImplicitFace に。
+
+## 段 2 ③ の前の直し: 安全網の陽の流れを面ごとに呼ぶ側が渡す(2026-11-12 ユーザーの答え ★8 = (a) 直す。wt6)
+- **土台の共通部分の変更**(司令塔が docs/design/21 §3 と照らす): 陰の系の面 `ImplicitFace`(engine/src/sim/implicit_conduction.h)に `explicitFlow`・`explicitFlowGiven` を足した(`ImplicitEdge::explicitFlow` と同じ形)。
+  `explicitFlowGiven = false`(既定)の面は今の道(`ExplicitFlows` = min(係数, 両側の C/8, 粗い側 × 2^d))のまま = 圧力(gas_projection)・支え(equilibrium)・case_b・物の箱の系はビット単位で同じ。
+- 使い手は木の陰の伝導の系だけ(multires_implicit_conduction.cpp): 部分の組の面は `TxPartPairFlow(自分の部分, 相手の部分, 重なり, kf, d, 0)`・層の上の面は `TxPartInnerFlow`(= 陽の部分の道の値。上限を重なりで縮める)を渡す。開いた世界の端の面(AddPartEdges)と同じ置き方。
+- GPU: `ImGpuFace` を 32 → 40 バイト(`int64_t explicitFlow` を足し、`coarseFraction` を印の語 `flags` に: `IM_FACE_COARSE_FRACTION`・`IM_FACE_EXPLICIT_FLOW`。`IM_GPU_FACE_BYTES`)。
+  `ImFlows`(implicit_conduct.hlsl)は印のある面だけ渡された値を陽の流れにする(CPU の ExplicitFlows と同じ)。GPU の木の系を作る段(implicit_build.hlsl)はまだ混ざったセルを作らないので印は付けない(③ で付ける)。
+  費用: 系のバッファの面の欄が 1.25 倍(面の上限 × 8 バイト。GpuImplicit・GpuImplicitBuild)。計算は面ごとに 1 語読むだけ。
+- 21 §3 の一覧との照らし: 陰の系の面の値を使う現象(伝導・気体の圧力の投影・支えの釣り合い)のうち、面ごとの陽の流れを別に持つのは「部分の組の面」だけ(混ざったセルの層・気体)。ほかの現象は今の式で足りる(印を付けない)。
+  部分を持つ 2 つ目の種類(放射・運ぶの部分)が陰の系に入る時も同じ口で足りる(呼ぶ側が陽の部分の道の値を渡す)。

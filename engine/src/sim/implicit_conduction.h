@@ -52,6 +52,13 @@ namespace bicameral::sim {
         uint32_t gap = 0;  // レベルの差 d
         fx::FxU128
             coefficient{};  // 面の係数(2^-32 × 細かい側の単位 / mK)= min(G) × HC_LIMIT_PER_CONDUCTANCE × 4^kf(上限なし)
+
+        // --- 安全網で陽解法に戻す時の流れ(ImplicitEdge の explicitFlow と同じ形。T-1230 段 2 ③・2026-11-12 ユーザーの答え ★8)---
+        // explicitFlowGiven が false なら、係数と両側の熱容量の 1/8 から求める(ExplicitFlows。今の道)。
+        // 部分の組の面(混ざったセルの層・気体の節)は、上限を重なりで縮めた陽の部分の道の値を呼ぶ側が渡す(節の熱容量の 1/8 のままだと
+        // 面が多い層の節で「1 面 ≤ C/8 で凸結合」が崩れうる)。細かい側 → 粗い側が正・細かい側の単位・刻みの初めの値から
+        int64_t explicitFlow = 0;
+        bool explicitFlowGiven = false;
     };
 
     // 開いた世界の端の面(T-0790。木の世界の端 world_edge.hlsli の MR_NEIGHBOR_EDGE)。外のセルは変わらない = 温度を固定した境

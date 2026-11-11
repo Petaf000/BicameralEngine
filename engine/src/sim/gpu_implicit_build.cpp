@@ -29,7 +29,7 @@ namespace bicameral::sim {
         constexpr uint32_t SCAN_THREADS = 1024;  // implicit_build.hlsl の SCAN_THREADS(接頭和の 1 グループ)
         constexpr uint32_t FROZEN_MARKS_BIT = 1u << 24;
 
-        static_assert(sizeof(ImGpuCell) == 40 && sizeof(ImGpuFace) == 32,
+        static_assert(sizeof(ImGpuCell) == 40 && sizeof(ImGpuFace) == IM_GPU_FACE_BYTES,
                       "implicit_build.hlsl の CELL_BYTES・FACE_BYTES");
 
         // implicit_build.hlsl の入口(段の順)

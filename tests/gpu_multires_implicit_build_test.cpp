@@ -164,12 +164,14 @@ namespace {
         }
 
         for (const sim::ImplicitFace& face : grid.faces) {
-            system.faceList.push_back({.coefficientHigh = face.coefficient.hi,
-                                       .coefficientLow = face.coefficient.lo,
-                                       .fine = face.fine,
-                                       .coarse = face.coarse,
-                                       .gap = face.gap,
-                                       .coarseFraction = grid.cells[face.coarse].coarseFraction ? 1u : 0u});
+            system.faceList.push_back(
+                {.coefficientHigh = face.coefficient.hi,
+                 .coefficientLow = face.coefficient.lo,
+                 .explicitFlow = face.explicitFlowGiven ? face.explicitFlow : 0,
+                 .fine = face.fine,
+                 .coarse = face.coarse,
+                 .gap = face.gap,
+                 .flags = ImFaceFlags(grid.cells[face.coarse].coarseFraction, face.explicitFlowGiven)});
         }
 
         return system;
@@ -182,7 +184,7 @@ namespace {
 
     bool SameFace(const ImGpuFace& a, const ImGpuFace& b) {
         return a.coefficientHigh == b.coefficientHigh && a.coefficientLow == b.coefficientLow && a.fine == b.fine &&
-               a.coarse == b.coarse && a.gap == b.gap && a.coarseFraction == b.coarseFraction;
+               a.coarse == b.coarse && a.gap == b.gap && a.flags == b.flags && a.explicitFlow == b.explicitFlow;
     }
 
     std::expected<void, std::string> CompareSystem(const sim::GpuImplicitSystem& expected,

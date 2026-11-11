@@ -42,14 +42,25 @@ struct ImGpuCell {
     uint32_t faceEnd;
 };
 
+// 面の印(ImGpuFace::flags)。COARSE_FRACTION = 粗い側が端数を受けられる(無ければ整数の単位の倍数だけ。ADR-0017。T-0127)/
+// EXPLICIT_FLOW = 安全網で陽に戻す流れは explicitFlow(呼ぶ側が渡した値。CPU の ImplicitFace::explicitFlowGiven。T-1230 段 2 ③)
+FX_CONST uint32_t IM_FACE_COARSE_FRACTION = 1u;
+FX_CONST uint32_t IM_FACE_EXPLICIT_FLOW = 2u;
+
 struct ImGpuFace {
     uint64_t coefficientHigh;  // 面の係数(128bit)
     uint64_t coefficientLow;
+    int64_t explicitFlow;  // 安全網で陽に戻す流れ(細かい側の単位。flags に IM_FACE_EXPLICIT_FLOW がある時だけ読む)
     uint32_t fine;
     uint32_t coarse;
     uint32_t gap;
-    uint32_t coarseFraction;  // 粗い側が端数を受けられるか(0 なら整数の単位の倍数だけ。ADR-0017。T-0127)
+    uint32_t flags;  // IM_FACE_COARSE_FRACTION・IM_FACE_EXPLICIT_FLOW
 };
+FX_CONST uint32_t IM_GPU_FACE_BYTES = 40;  // sizeof(ImGpuFace)(implicit_build.hlsl・implicit_levels.hlsl の番地)
+
+FX_FN uint32_t ImFaceFlags(bool coarseFraction, bool explicitFlowGiven) {
+    return (coarseFraction ? IM_FACE_COARSE_FRACTION : 0u) | (explicitFlowGiven ? IM_FACE_EXPLICIT_FLOW : 0u);
+}
 
 // 多重格子の節(全部の段を 1 本に並べた番号。段 0 = セル)
 struct ImGpuNode {

@@ -37,8 +37,8 @@ static const uint32_t HEADER_WORDS = 16;
 // 面の候補の印(EntryInfo): 下位 8bit = レベルの差、ビット 8 = 先が境のセル
 static const uint32_t ENTRY_BOUNDARY = 256u;
 
-static const uint32_t CELL_BYTES = 40;  // sizeof(ImGpuCell)
-static const uint32_t FACE_BYTES = 32;  // sizeof(ImGpuFace)
+static const uint32_t CELL_BYTES = 40;                 // sizeof(ImGpuCell)
+static const uint32_t FACE_BYTES = IM_GPU_FACE_BYTES;  // sizeof(ImGpuFace)
 
 // --- 定数と番地 --------------------------------------------------------------------------------
 
@@ -536,7 +536,8 @@ uint32_t EntryCount() {
     face.fine = fine;
     face.coarse = coarse;
     face.gap = LoadWord(EntryInfoWord(entry)) & 0xFFu;
-    face.coarseFraction = coarseBlock.fraction != MR_NO_FRACTION ? 1u : 0u;
+    face.explicitFlow = 0;
+    face.flags = coarseBlock.fraction != MR_NO_FRACTION ? IM_FACE_COARSE_FRACTION : 0u;
     g_system.Store<ImGpuFace>(FaceByte(LoadWord(EntryFaceWord(entry))), face);
 
     g_build.InterlockedAdd(CellCountWord(fine) * 4, 1u);
