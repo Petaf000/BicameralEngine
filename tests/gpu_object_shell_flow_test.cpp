@@ -12,7 +12,11 @@
 //   --profile(T-1223。比べを飛ばす): 紙 24 列の層 2・4・6 段を物 1・4・16・46 個で、段を 1 つずつだけ回した時の 1 刻みの時間を出し、
 //         段ごとの費用(段なしとの差)・固定の費用・物 1 つあたり・ボクセル 1 つあたりに分ける(段を外すと結果は変わるので測るだけ)。
 //   --threads 256 / 512 / 1024: グループのスレッドの数を変えた形(object_shell_flow_t256 など。費用の比べ)。
-// 引数は gpu_test_options.h と --measure / --measure-only / --profile / --threads N / --sweeps N / --rule N。
+//   --scale(T-1320 の段 0。比べを飛ばす): 紙 24 列の層 2・4 段を燃える物 1・10・100・1000 個で、散らばり(物ごとに別のセル)と
+//         密な山(8 個で 1 つのセルを分ける)に置いて 1 刻みの時間を出し、物 1 つあたり・ボクセル 1 つあたりと、
+//         山の並べ方での層の箱の和の体積と重なりを除いた体積(燃えている空気の体積)を出す。
+//         密な山は今の形では同じセルへの受け渡し(⑨)が物どうしで重なる(決定的でない)ので、時間だけを見る(測るだけ)。
+// 引数は gpu_test_options.h と --measure / --measure-only / --profile / --scale / --threads N / --sweeps N / --rule N。
 #include <cstdlib>
 #include <cstring>
 
@@ -207,15 +211,15 @@ namespace {
         return world;
     }
 
-    // 物 1 つの世界を copies 個に(物ごとに別のセル)
-    test::OhWorld Replicate(const test::OhWorld& one, uint32_t copies) {
+    // 物 1 つの世界を copies 個に(objectsPerCell 個ごとに 1 つのセル。1 = 物ごとに別のセル)
+    test::OhWorld Replicate(const test::OhWorld& one, uint32_t copies, uint32_t objectsPerCell = 1) {
         test::OhWorld world;
         const auto voxels = static_cast<uint32_t>(one.voxels.size());
         const auto blocks = static_cast<uint32_t>(one.blocks.size());
         for (uint32_t k = 0; k < copies; ++k) {
             rx::OhObject object = one.objects[0];
             object.voxelBegin = k * voxels;
-            object.cell = k;
+            object.cell = k / objectsPerCell;
             object.blockBegin = one.objects[0].blockBegin + (k * blocks);
             world.objects.push_back(object);
             for (rx::OhVoxelInfo info : one.infos) {
@@ -226,8 +230,13 @@ namespace {
             world.voxels.insert(world.voxels.end(), one.voxels.begin(), one.voxels.end());
             world.light.insert(world.light.end(), one.light.begin(), one.light.end());
             world.waits.insert(world.waits.end(), one.waits.begin(), one.waits.end());
-            world.cells.push_back(one.cells[0]);
-            world.ranges.push_back({.cell = k, .objectBegin = k, .objectCount = 1});
+            if (k % objectsPerCell == 0) {
+                const uint32_t count = std::min(objectsPerCell, copies - k);
+                world.cells.push_back(one.cells[0]);
+                world.ranges.push_back({.cell = k / objectsPerCell, .objectBegin = k, .objectCount = count});
+                world.cellChangedPasses.push_back(one.cellChangedPasses[0]);
+            }
+
             world.carries.push_back(one.carries[0]);
             for (rx::OhBlock block : one.blocks) {
                 block.object = k;
@@ -235,7 +244,6 @@ namespace {
             }
 
             world.blockStates.insert(world.blockStates.end(), one.blockStates.begin(), one.blockStates.end());
-            world.cellChangedPasses.push_back(one.cellChangedPasses[0]);
         }
 
         world.pass = one.pass;
@@ -615,12 +623,12 @@ namespace {
     // 戻り値 = 1 刻みの平均の GPU の ms。stageMask を全部でなくすると暖機の後だけ段を外す(結果は変わるので数え上げは見ない・書き出さない)
     std::expected<double, std::string> Measure(const Context& context, const Shape& shape, uint32_t copies,
                                                bool sharedPotential, const PressureRule& rule,
-                                               uint32_t stageMask = ALL_STAGES) {
+                                               uint32_t stageMask = ALL_STAGES, uint32_t objectsPerCell = 1) {
         const auto one = MakePaper(context.table, context.shared, context.tables.gases, shape);
         if (!one)
             return std::unexpected("層を作れない");
 
-        const test::OhWorld world = Replicate(*one, copies);
+        const test::OhWorld world = Replicate(*one, copies, objectsPerCell);
         auto queue = gpu::ImmediateQueue::Create(context.device, context.queueType);
         auto debugRing = gpu::DebugRing::Create(context.device);
         auto gpuState = CreateGpu(context.device, context.table, context.tables, world, sharedPotential,
@@ -698,11 +706,92 @@ namespace {
         return {};
     }
 
+    // --- 規模の測り(T-1320 の段 0)---
+    // 密な山の並べ方: 骨格(列 × 1 × 高さ)を x に列 + 2・y に 1 + 2・z に高さ + 2 ボクセルの間を空けて、
+    // 1 辺 ⌈∛n⌉ 個の立方の並びに置く(紙の間 15.6 mm。層 2 段 = 15.6 mm・層 4 段 = 31 mm の層は隣と重なる)。
+    // 戻り値 = { 箱の体積の和, 重なりを除いた体積 }(ボクセル)
+    std::pair<uint64_t, uint64_t> HeapVolumes(const Shape& shape, uint32_t count) {
+        uint32_t side = 1;
+        while (side * side * side < count)
+            side += 1;
+
+        const std::array<uint32_t, 3> body = {shape.columns, 1u, shape.sizeZ};
+        std::array<uint32_t, 3> extent{};
+        for (uint32_t axis = 0; axis < 3; ++axis)
+            extent[axis] = (side * (body[axis] + 2)) + (2 * shape.layers);
+
+        std::vector<uint8_t> covered(static_cast<size_t>(extent[0]) * extent[1] * extent[2], 0);
+        uint64_t sum = 0;
+        for (uint32_t k = 0; k < count; ++k) {
+            const std::array<uint32_t, 3> slot = {k % side, (k / side) % side, k / (side * side)};
+            std::array<uint32_t, 3> low{};
+            std::array<uint32_t, 3> size{};
+            for (uint32_t axis = 0; axis < 3; ++axis) {
+                low[axis] = slot[axis] * (body[axis] + 2);
+                size[axis] = body[axis] + (2 * shape.layers);
+            }
+
+            sum += static_cast<uint64_t>(size[0]) * size[1] * size[2];
+            for (uint32_t z = 0; z < size[2]; ++z) {
+                for (uint32_t y = 0; y < size[1]; ++y) {
+                    for (uint32_t x = 0; x < size[0]; ++x) {
+                        const size_t index = (((static_cast<size_t>(low[2]) + z) * extent[1] + low[1] + y) *
+                                              extent[0]) +
+                                             low[0] + x;
+                        covered[index] = 1;
+                    }
+                }
+            }
+        }
+
+        uint64_t merged = 0;
+        for (const uint8_t value : covered)
+            merged += value;
+
+        return {sum, merged};
+    }
+
+    std::expected<void, std::string> Scale(const Context& context) {
+        const std::array<Shape, 2> shapes = {Shape{"紙 24 列・層 2 段", 24, 3, 2},
+                                             Shape{"紙 24 列・層 4 段", 24, 3, 4}};
+        const std::array<PressureRule, 2> rules = {PressureRule{"0 から収まるまで(既定)", 1024, 1},
+                                                   PressureRule{"多重格子 + 収まるまで", 1024, 5}};
+        for (const Shape& shape : shapes) {
+            const uint64_t voxels = (shape.columns + (2 * shape.layers)) * (1 + (2 * shape.layers)) *
+                                    (shape.sizeZ + (2 * shape.layers));
+            for (const PressureRule& rule : rules) {
+                for (const uint32_t copies : {1u, 10u, 100u, 1000u}) {
+                    for (const uint32_t perCell : {1u, 8u}) {
+                        if (perCell != 1 && copies == 1)
+                            continue;
+
+                        const auto measured = Measure(context, shape, copies, true, rule, ALL_STAGES, perCell);
+                        if (!measured)
+                            return std::unexpected(measured.error());
+
+                        const auto [sum, merged] = HeapVolumes(shape, copies);
+                        const double perObject = *measured / static_cast<double>(copies);
+                        const double perVoxelNs = *measured * 1.0e6 / static_cast<double>(voxels * copies);
+                        Log(Channel::Gpu, Level::Info,
+                            "規模: {}・{}・{} 個・{}: 1 刻み {:.3f} ms・1 物 {:.4f} ms・1 ボクセル {:.1f} ns・"
+                            "山の体積 和 {} / 重なりを除く {}({:.2f} 倍)",
+                            shape.name, rule.name, copies, perCell == 1 ? "散らばり" : "密な山(8 個で 1 セル)",
+                            *measured, perObject, perVoxelNs, sum, merged,
+                            static_cast<double>(sum) / static_cast<double>(std::max<uint64_t>(merged, 1)));
+                    }
+                }
+            }
+        }
+
+        return {};
+    }
+
     int Run(std::span<char*> arguments) {
         std::vector<char*> rest;
         bool measure = false;
         bool compare = true;
         bool profile = false;
+        bool scale = false;
         uint32_t threads = 1024;
         uint32_t measureSweeps = 24;
         int32_t onlyRule = -1;
@@ -717,6 +806,9 @@ namespace {
                 threads = static_cast<uint32_t>(std::strtoul(arguments[++i], nullptr, 10));
             } else if (text == "--profile") {
                 profile = true;
+                compare = false;
+            } else if (text == "--scale") {
+                scale = true;
                 compare = false;
             } else if (text == "--measure") {
                 measure = true;
@@ -775,6 +867,13 @@ namespace {
         if (profile) {
             if (auto profiled = Profile(context); !profiled) {
                 Log(Channel::Gpu, Level::Error, "gpu_object_shell_flow_test: FAILED({})", profiled.error());
+                return 1;
+            }
+        }
+
+        if (scale) {
+            if (auto scaled = Scale(context); !scaled) {
+                Log(Channel::Gpu, Level::Error, "gpu_object_shell_flow_test: FAILED({})", scaled.error());
                 return 1;
             }
         }
