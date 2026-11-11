@@ -1190,7 +1190,10 @@ void FaceFlows(GpuShellTable table, GpuShellGases gases, ShellBox box, uint32_t 
         const uint32_t minus = MinusSide(box, axis, c);
         const uint32_t plus = PlusSide(box, axis, c);
         const OhFlow moved = MovedThrough(table, gases, box, q, q > 0 ? minus : plus, billion);
-        const OhFlow flow = q > 0 ? moved : SubtractFlow(OhZeroFlow(), moved);
+        OhFlow flow = moved;
+        if (q < 0)
+            flow = SubtractFlow(OhZeroFlow(), moved);
+
         g_faceFlows[global] = flow;
         // + 側が箱の外ならセルへ入る・− 側が箱の外ならセルから出る
         if (plus == OH_SHELL_OUTSIDE)
@@ -1227,7 +1230,10 @@ void ApplyFaceFlows(GpuShellGases gases, ShellBox box, uint32_t thread) {
                 continue;
 
             const OhFlow flow = g_faceFlows[global];
-            delta = plusFace ? SubtractFlow(delta, flow) : OhAddFlow(delta, flow);
+            if (plusFace)
+                delta = SubtractFlow(delta, flow);
+            else
+                delta = OhAddFlow(delta, flow);
         }
 
         if (OhFlowIsZero(delta))
