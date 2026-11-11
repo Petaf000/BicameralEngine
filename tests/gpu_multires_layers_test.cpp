@@ -13,6 +13,7 @@
 //   5 は粗くする刻み(COARSEN_TICK から 1 段ずつ)まで比べる(T-1240 の 3 段目: 子の層の和 ÷ 8・子の層の頁を返す)。
 //   7. 一様の枠の層(T-1240 の 3・4 段目): 層まで同じ静かな頁を畳む(層ごと一様の枠の層へ)→ 一様な根を本物の鎖で細かくする(子は親と同じ
 //      一様の枠の層)→ 粗くして戻す。燃える一様な根(一様の枠の層)を刻むと頁に広げる(一様の枠の層を頁へ)。毎刻み比べる
+//   9. 層を使う世界で反応が粒を生む表(T-1322): CPU は生まれた粒を層に足すが GPU にはまだ無い(T-1323)ので写さずに断る
 //   8. 一様な親の影の鎖(影の頁へ一様の枠の層を今の値と結んで写す)・一様な親へ層の違う一様な子を粗くする(親を頁に広げて
 //      子の層の和 ÷ 8。T-1240 の 4 段目で試していなかった道)
 // 時間(WARP では測らない): 層のある場面の 1 刻み(全部を刻む)を層の頁あり・なしで測り、層を合わせる段の分を見る(docs/perf.md)。
@@ -711,6 +712,56 @@ namespace {
         return static_cast<double>(stamps[1] - stamps[0]) * 1000.0 / static_cast<double>(frequency) / MEASURE_STEPS;
     }
 
+    // --- 9. 層を使う世界で反応が粒を生む表(T-1322)---
+
+    // 層を使う世界(EnableCellLayers)の根の場面を GPU に写せるか(grainProducts なら表の規則の生成物を全部粒の印に、
+    // でなければ生成物の粒の印を全部外す〔熱分解の炭は表の粒〕)
+    std::expected<bool, std::string> UploadsLayeredWorld(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                         gpu::DebugRing& ring, const sim::BakedReactionTable& table,
+                                                         bool grainProducts) {
+        sim::MultiresNest cpu = MakeScene(table, false);
+        sim::EnableCellLayers(cpu, table);
+        for (const RxRule& rule : table.rules) {
+            for (uint32_t k = 0; k < rule.productCount; ++k)
+                cpu.cellLayers.grain[rule.products[k]] = grainProducts ? 1 : 0;
+        }
+
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, GpuOptions(StepMode::Full, LAYER_PAGES));
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        bool uploaded = false;
+        const auto record = [&](ID3D12GraphicsCommandList10* list) {
+            uploaded = gpu->RecordUpload(list, cpu);
+            return true;
+        };
+        if (auto read = Execute(queue, ring, *gpu, record); !read && uploaded)
+            return std::unexpected(std::format("粒を生む表: {}", read.error()));
+
+        return uploaded;
+    }
+
+    // CPU は生まれた粒を層に足すが、GPU にはまだその規則が無い(T-1323)ので写さずに断る。粒の印が生成物に無ければ今のまま写す
+    std::expected<void, std::string> RunGrainProductRefused(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                            gpu::DebugRing& ring,
+                                                            const sim::BakedReactionTable& table) {
+        const auto refused = UploadsLayeredWorld(device, queue, ring, table, true);
+        if (!refused)
+            return std::unexpected(refused.error());
+
+        if (*refused)
+            return std::unexpected("粒を生む表: 層を使う世界で反応が粒を生む表を GPU が断らない");
+
+        const auto plain = UploadsLayeredWorld(device, queue, ring, table, false);
+        if (!plain)
+            return std::unexpected(plain.error());
+
+        if (!*plain)
+            return std::unexpected("粒を生む表: 生成物が粒でない層を使う世界まで断る");
+
+        return {};
+    }
+
     std::expected<void, std::string> RunScenes(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring,
                                                const sim::BakedReactionTable& table) {
         if (auto image = TestImage(table); !image)
@@ -743,6 +794,9 @@ namespace {
 
         if (auto coarsen = RunUniformCoarsenExpand(device, queue, ring, table); !coarsen)
             return coarsen;
+
+        if (auto refused = RunGrainProductRefused(device, queue, ring, table); !refused)
+            return refused;
 
         return RunBatch(device, queue, ring, table);
     }

@@ -347,6 +347,12 @@ namespace bicameral::sim {
         result.m_constants.ledgerColumns = capacity.ledgerColumns;
         result.m_wideCells = options.wideCells;
         result.m_layerCapacity = options.layerPages;
+        result.m_producedSpecies.assign(table.species.size(), 0);
+        for (const RxRule& rule : table.rules) {
+            for (uint32_t k = 0; k < rule.productCount; ++k)
+                result.m_producedSpecies[rule.products[k]] = 1;
+        }
+
         result.m_constants.overflowBase = result.OverflowBaseWord();
         if (options.wideCells) {
             const auto doubled = static_cast<uint32_t>(result.PageCount() * 2);
@@ -988,6 +994,16 @@ namespace bicameral::sim {
         return bytes;
     }
 
+    bool GpuMultires::ProducesGrain(const MultiresNest& nest) const {
+        const std::vector<uint8_t>& grain = nest.cellLayers.grain;
+        for (size_t species = 0; species < grain.size() && species < m_producedSpecies.size(); ++species) {
+            if (grain[species] != 0 && m_producedSpecies[species] != 0)
+                return true;
+        }
+
+        return false;
+    }
+
     bool GpuMultires::RecordUpload(ID3D12GraphicsCommandList10* list, const MultiresNest& nest) {
         if (nest.blocks.size() != m_blockCapacity || nest.seeds.size() != m_capacity.worldBlocks ||
             DenseCellCount(nest) * sizeof(RxCell) != BufferSizes()[BufferCells] ||
@@ -1009,6 +1025,14 @@ namespace bicameral::sim {
         if (m_layerCapacity == 0 && nest.cellLayers.enabled) {
             Log(Channel::Gpu, Level::Error,
                 "層を使う世界は層の頁を持たない GPU に写せない(GpuMultiresOptions::layerPages。T-1240)");
+            return false;
+        }
+
+        // 層を使う世界で反応が粒を生む表は、まだ GPU に写さない: CPU は生まれた粒を層に足す(T-1322。ADR-0489 の 3 (B))が、
+        // GPU の層を合わせる段は反応の前の量を持たず 層 = min(前の層, 量) だけ(舞う粒のまま = 結果が CPU と変わる。D-428)。同じ規則は T-1323
+        if (nest.cellLayers.enabled && ProducesGrain(nest)) {
+            Log(Channel::Gpu, Level::Error,
+                "層を使う世界で反応が粒を生む表は GPU に写せない(生まれた粒を層に足す規則が GPU にまだ無い。T-1323)");
             return false;
         }
 

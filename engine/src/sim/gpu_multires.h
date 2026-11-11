@@ -330,6 +330,10 @@ namespace bicameral::sim {
         void StampStage(ID3D12GraphicsCommandList10* list);
         // 層を合わせる段(T-1221。層の頁を持たなければ何もしない): u4 に層の置き場を結び、層の頁のセルの層を付け替える
         void RecordLayerReconcile(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
+
+        // 層を使う世界の粒の印のある物質を、表の規則が生むか(生むなら写さない。T-1322・T-1323)
+        [[nodiscard]] bool ProducesGrain(const MultiresNest& nest) const;
+
         // 外のバッファの口(u4・u5)と定数の結び先(T-1240: 木の段の間は u4 に層の置き場を結ぶ)
         struct ExternalBinding {
             std::array<D3D12_GPU_VIRTUAL_ADDRESS, 2> views{};
@@ -427,8 +431,9 @@ namespace bicameral::sim {
         std::unique_ptr<GpuMultiresImplicit> m_implicit;
 
         // --- セルの成分ごとの層の量(T-1221。GpuMultiresOptions::layerPages。並びは common/multires_layers.hlsli)---
-        uint32_t m_layerCapacity = 0;  // 層の頁の数(0 = 層を持たない)
-        uint32_t m_layerUsed = 0;      // 写した時に使った層の頁の数(0 なら層を合わせる段を投げない)
+        uint32_t m_layerCapacity = 0;            // 層の頁の数(0 = 層を持たない)
+        std::vector<uint8_t> m_producedSpecies;  // [物質] 表の規則の生成物なら 1(層を使う世界の断り。T-1322)
+        uint32_t m_layerUsed = 0;                // 写した時に使った層の頁の数(0 なら層を合わせる段を投げない)
         ComPtr<ID3D12PipelineState> m_layerPipeline;
         ComPtr<ID3D12Resource> m_layerBuffer;
         ComPtr<ID3D12Resource> m_layerUpload;

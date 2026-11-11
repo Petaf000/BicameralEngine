@@ -16,7 +16,8 @@
 - [x] ② CPU: 層を使う世界の `PlaceRootBlock(nest, …, cells)`(層を渡さない置き口)は粒を全部層に・実験室の命令(NestCells::Apply)も ① と同じ道
 - [x] 層を使わない世界はビット単位で今と同じ(道は `cellLayers.enabled` の時だけ・粒の増えないセルは前の道で書く)
 - [ ] CPU の試験(multires_layers の 2 つ・層の試験の組)・release 警告 0・archmap --check
-- [ ] ① ② の GPU(T-1323)と CPU とのビット一致(gpu_multires_layers に層を使う世界の燃える場面)
+- [x] GPU はそれまで断る(層を使う世界で粒を生む表は写さない。gpu_multires_layers の 9)
+- [ ] ① ② の GPU(T-1323)と CPU とのビット一致(gpu_multires_layers に層を使う世界の燃える場面)= 分けた
 
 ## メモ・参考
 - **作り手から見た違い**: 層を使う世界で、燃えかす・析出した粒は生まれた所に積もった側から始まる(細かくしても空中に広がらない・その頁は眠れる)。
@@ -40,8 +41,14 @@
    尽きたら CountLayerShortage と同じ計器で断る)・組の空きに物質を足す。
 3. 実験室の命令(lab_box.hlsl の LabCells)も同じ規則。
 4. 試験: gpu_multires_layers に「層を使う世界・生成物を粒の印にした燃える場面」(この CPU の試験と同じ形)を CPU と GPU HW/WARP でビット一致。
-- それまでの GPU: 層を使う世界で反応が粒を生むと、GPU は舞う粒のまま(CPU と違う)。今エンジン本体が層を使う世界を作る所は無い
-  (ApplyCellLayersChoice を呼ぶのは試験だけ)、GPU の層を使う世界の試験(gpu_tree_refine_placement の層の場面)は反応を刻まないので、今の試験は通る。
+- **それまでの GPU は断る**(D-428。結果を変えて回すより写さない): 層を使う世界(`cellLayers.enabled`)で、粒の印のある物質を表の規則が生む時は
+  `GpuMultires::RecordUpload` が写さない(`ProducesGrain`。`m_producedSpecies` = 規則の生成物の印を Create で作る)。gpu_multires_layers の 9 で確かめる
+  (生成物を粒の印にした世界は断る・生成物の粒の印を外した世界は写す)。real_reactions では熱分解の炭(carbon。書かなければ粒)が生まれるので、
+  セルロースの燃える層を使う世界は GPU に写らない。今エンジン本体が層を使う世界を作る所は無く(ApplyCellLayersChoice を呼ぶのは試験だけ)、
+  GPU の層を使う世界の試験(gpu_tree_refine_placement の層の場面。表はセルロースの規則を外した試験の表)は断られない。
+- 実験室の命令の GPU(lab_box.hlsl)も同じ規則が要る(実験室の箱は層を使う世界にならない = MakeLabBoxNest は EnableCellLayers を呼ばない)。
+- **GPU の難所(T-1323 の作業役へ)**: 刻みの段の中で一様な枠を頁に広げる(RecordStepWait の RecordExpandPass)ので、「反応の前のセル」は
+  刻みの段の前の写しだけでは足りない(広げた頁は広げた後の値が前)。広げる段の後にもう一度写すか、広げる段が写しにも書く。
 
 ## 土台に足りないもの(印。司令塔へ)
 1. 粗くする時の層の切り捨ての余り(成分ごとに 0〜7 µmol)は層から残りへ移る(ADR-0489 の 5)= 「出来事」でない舞う粒。層を使う世界では
