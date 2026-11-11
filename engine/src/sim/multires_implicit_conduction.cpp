@@ -171,36 +171,25 @@ namespace bicameral::sim {
                                    2 * static_cast<uint32_t>(fineLevel));
         }
 
-        // 部分の組 1 つの面の係数(細かい側の単位。陽の TxPartPairFlow の係数の G の側と同じ min(G(重なり)) × 4^kf・頭打ちなし)。流れないなら 0
-        uint64_t PairConductance(const PlSideSlot& a, const PlSideSlot& b, uint32_t overlapQ16) {
-            if (overlapQ16 == 0)
-                return 0;
-
-            return std::min(PlSlotConductance(a, overlapQ16), PlSlotConductance(b, overlapQ16));
-        }
-
         // 混ざったセルの節 id の開いた世界の端の面: 部分ごとに外のセル(混ざらない)と 1 本ずつ。安全網で戻す流れは陽の部分の道と同じ組の値
         void AddPartEdges(ImplicitSystem& system, CellViews& thermals, uint32_t id, const MrBlock& block, uint32_t face,
                           const CvCellView& outside) {
             const PlPartSide self = NodeSide(system, thermals, id, face);
-            const PlPartSide other = TxWholePartSide(outside.thermal);
-            const PlPairOverlaps overlaps = PlPairOverlapsOf(self, other);
-            auto pair = [&](const PlSideSlot& selfSlot, const PlSideSlot& otherSlot, uint32_t overlap) {
-                const uint64_t conductance = PairConductance(selfSlot, otherSlot, overlap);
-                if (conductance == 0)
+            const TxPartPairs pairs = TxPartPairsOf(self, TxWholePartSide(outside.thermal), block.level, 0);
+            auto push = [&](const TxPartPair& pair) {
+                if (pair.conductance == 0)
                     return;
 
-                system.edges.push_back(
-                    {.cell = NodeForPart(system, id, selfSlot.part),
-                     .coefficient = FaceCoefficient(static_cast<uint32_t>(conductance),
-                                                    static_cast<uint32_t>(conductance), block.level),
-                     .temperature = int64_t{outside.thermal.temperature} << IM_TEMPERATURE_SHIFT,
-                     .explicitFlow = TxPartPairFlow(selfSlot, otherSlot, overlap, block.level, 0, 0)});
+                const auto value = static_cast<uint32_t>(pair.conductance);
+                system.edges.push_back({.cell = NodeForPart(system, id, pair.selfPart),
+                                        .coefficient = FaceCoefficient(value, value, block.level),
+                                        .temperature = int64_t{outside.thermal.temperature} << IM_TEMPERATURE_SHIFT,
+                                        .explicitFlow = pair.explicitFlow});
             };
-            pair(self.lower, other.lower, overlaps.lowerLower);
-            pair(self.upper, other.upper, overlaps.upperUpper);
-            pair(self.lower, other.upper, overlaps.lowerUpper);
-            pair(self.upper, other.lower, overlaps.upperLower);
+            push(pairs.lowerLower);
+            push(pairs.upperUpper);
+            push(pairs.lowerUpper);
+            push(pairs.upperLower);
         }
 
         // 未知数のセル id の面 face が開いた世界の端なら、外のセル(自分と同じレベルの見立て。world_edge.hlsli)を温度を固定した境として
@@ -239,26 +228,25 @@ namespace bicameral::sim {
                 neighbor = TxPartSideOnRow(neighbor, gap, row);
             }
 
-            const PlPairOverlaps overlaps = PlPairOverlapsOf(self, neighbor);
-            auto pair = [&](const PlSideSlot& selfSlot, const PlSideSlot& otherSlot, uint32_t overlap) {
-                const uint64_t conductance = PairConductance(selfSlot, otherSlot, overlap);
-                if (conductance == 0)
+            // 組の値は transport_conduction_parts.hlsli の TxPartPairsOf(GPU の木の系を作る段と同じ関数)。
+            // 安全網で戻す流れ = 陽の部分の道の組の値(上限を重なりで縮める。開いた世界の端 AddPartEdges と同じ置き方)
+            const TxPartPairs pairs = TxPartPairsOf(self, neighbor, block.level, gap);
+            auto push = [&](const TxPartPair& pair) {
+                if (pair.conductance == 0)
                     return;
 
-                // 安全網で戻す流れ = 陽の部分の道の組の値(上限を重なりで縮める。開いた世界の端 AddPartEdges と同じ置き方)
-                const auto value = static_cast<uint32_t>(conductance);
-                system.faces.push_back(
-                    {.fine = NodeForPart(system, id, selfSlot.part),
-                     .coarse = NodeForPart(system, other, otherSlot.part),
-                     .gap = gap,
-                     .coefficient = FaceCoefficient(value, value, block.level),
-                     .explicitFlow = TxPartPairFlow(selfSlot, otherSlot, overlap, block.level, gap, 0),
-                     .explicitFlowGiven = true});
+                const auto value = static_cast<uint32_t>(pair.conductance);
+                system.faces.push_back({.fine = NodeForPart(system, id, pair.selfPart),
+                                        .coarse = NodeForPart(system, other, pair.otherPart),
+                                        .gap = gap,
+                                        .coefficient = FaceCoefficient(value, value, block.level),
+                                        .explicitFlow = pair.explicitFlow,
+                                        .explicitFlowGiven = true});
             };
-            pair(self.lower, neighbor.lower, overlaps.lowerLower);
-            pair(self.upper, neighbor.upper, overlaps.upperUpper);
-            pair(self.lower, neighbor.upper, overlaps.lowerUpper);
-            pair(self.upper, neighbor.lower, overlaps.upperLower);
+            push(pairs.lowerLower);
+            push(pairs.upperUpper);
+            push(pairs.lowerUpper);
+            push(pairs.upperLower);
         }
 
         // 未知数のセル(基準より細かい)の 6 面。同じレベルの面は番号の小さい側が 1 回だけ足す。粗い側は境のセルとして足す

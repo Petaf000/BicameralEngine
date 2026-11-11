@@ -146,6 +146,7 @@ bicameral_add_shader(sim/probe_conduct.hlsl PROFILE lib_6_8)  # 伝導の Work G
 bicameral_add_shader(sim/work_graph_limits_probe.hlsl PROFILE lib_6_8)  # ノードのカウンタと上限の試験(T-0008)
 bicameral_add_shader(sim/reaction_cells.hlsl PROFILE cs_6_8 ENTRY Main)  # 1 セルの反応の評価(T-0014)
 bicameral_add_shader(sim/phase_layer_cells.hlsl PROFILE cs_6_8 ENTRY Main)  # 混ざったセルの 2 つのエネルギーのセルの段(T-1211)
+bicameral_add_shader(sim/phase_layer_faces.hlsl PROFILE cs_6_8 ENTRY Main)  # 混ざったセルの伝導の面を部分ごとに流す式の GPU の確かめ(T-1230 段 2 ③)
 # 物理の 1 刻みの Compute のパス(T-0090。呼ぶ順は engine/src/sim/gpu_physics.cpp)
 foreach(_entry IN ITEMS Initialize BeginSubstep Broadphase Narrowphase PrepareManifolds ColorRound FinishColoring Recollide SolveColor UpdateDuals UpdateVelocity Finish BuildManifolds CollectHeat HeatSum HeatShare HeatFinish)
   string(REGEX REPLACE "([a-z])([A-Z])" "\\1_\\2" _snake "${_entry}")
