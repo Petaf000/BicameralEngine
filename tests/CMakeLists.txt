@@ -395,6 +395,11 @@ add_executable(support_3d_test support_3d_test.cpp)
 target_link_libraries(support_3d_test PRIVATE bicameral_multires bicameral_core)
 add_test(NAME support_3d COMMAND support_3d_test)
 set_tests_properties(support_3d PROPERTIES TIMEOUT 3000)
+
+add_executable(support_3d_mixed_test support_3d_mixed_test.cpp)
+target_link_libraries(support_3d_mixed_test PRIVATE bicameral_multires bicameral_core)
+add_test(NAME support_3d_mixed COMMAND support_3d_mixed_test)
+set_tests_properties(support_3d_mixed PROPERTIES TIMEOUT 1800)
 # T-1120: 0.5 m と 0.25 m のセルが混ざる場面(違う大きさの梁 2 通り)を全部 0.25 m と比べる
 add_executable(support_mixed_test support_mixed_test.cpp)
 target_link_libraries(support_mixed_test PRIVATE bicameral_multires bicameral_core)

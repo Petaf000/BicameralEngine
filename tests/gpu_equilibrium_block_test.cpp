@@ -299,9 +299,17 @@ namespace {
             {"3 次元: ねじれの腕", test::TwistArm(8, 1000000)},
             {"3 次元: 斜めの梁 (1,1,1) 0.25 m(辺と角の段の棒。T-1293)", test::TiltedBeam({1, 1, 1}, 250).scene},
             {"3 次元: 回したアーチ 45° 0.5 m(T-1293)", test::RotatedArch(45, 500).scene},
+            {"3 次元: 片持ち梁の上の段だけ 0.25 m(奥行 1。T-1294)",
+             test::Extruded(test::MarkedFine(test::Beam(16, 2, 500, false), 0, 16, 1, 2))},
+            {"3 次元: 壁と梁の上の角の壁の側だけ 0.25 m(違う大きさの段の棒。T-1294)",
+             test::Extruded(test::MarkedFine(test::WallBeam(), 1, 2, 4, 5), 2)},
         };
+        sim::SupportOptions formA = options;
+        formA.mixedPairMaterial = sim::MixedPairMaterial::NeighborStrain;
         for (const auto& [name, scene] : scenes) {
-            sim::SupportLaw3D law(scene, options);
+            const bool mixed = !scene.fine.empty();
+            sim::SupportLaw3D law(
+                scene, mixed && std::string_view(name).find("段の棒") != std::string_view::npos ? formA : options);
             const std::vector<int64_t> warm = law.BlockValues();
             std::vector<std::vector<int64_t>> cpuTicks;
             for (uint32_t tick = 0; tick < ticks; ++tick) {

@@ -70,6 +70,7 @@ add_library(bicameral_multires STATIC
   src/sim/equilibrium_fields.cpp  # 部品の温めた始まりを C-1 の欄(温めた始まりの印)に置く口(T-0922)
   src/sim/support_law.cpp  # 支えの法則の試作(研究 R-B1。C-0 の使い手。T-0871)
   src/sim/support_law_3d.cpp  # 支えの法則の 3 次元の格子の梁(変位 3 + 回り 3。T-0960)
+  src/sim/support_law_3d_mixed.cpp  # 3 次元の違う大きさのセル(2 × 2 × 2・4 つの組の面。T-1294)
   src/sim/support_fracture.cpp  # 支えの法則の割れの試作(研究 R-B2。T-0872)
   src/sim/support_fracture_fine.cpp  # 支えの割れを細かい格子の面ごとに・割れかけの所を細かくする(T-1067)
   src/sim/lab_box.cpp
