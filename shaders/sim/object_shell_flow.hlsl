@@ -43,10 +43,25 @@ struct OhShellFace {
     uint32_t padding;
 };
 
+// 圧力の赤黒が毎回読む欄を 32bit の重みで詰めたもの(T-1320 段 1。48 バイト = 今の 72 バイトの 2/3)。
+// 色ごとの並び(色 c の k 番目 = PressureColour の k)に置くので、隣のスレッドが続いた所を読む。箱のどこかで重みが 32bit に入らなければ
+// その小刻みは g_voxelWork の 64bit の欄を読む(gs_wideWeights。値は同じなので結果はビット単位で同じ)
+struct OhShellPressure {
+    int64_t residual;  // 膨らみたい体積 − 予測の出る体積(Q16)
+    FxRecip64 recip;   // 重みの和の逆数
+    uint32_t weightMinusX;
+    uint32_t weightPlusX;
+    uint32_t weightMinusY;
+    uint32_t weightPlusY;
+    uint32_t weightMinusZ;
+    uint32_t weightPlusZ;
+};
+
 // 物ごとの面の並びの始まり(軸 0・1・2 の順に続く。g_momentum と g_faceWork で同じ)
 struct OhShellObject {
     uint32_t faceBegin[3];
     uint32_t multigridBegin;  // 圧力の多重格子の作業場 g_multigrid の始まり(全部の段を続けて。T-1222)
+    uint32_t pressureBegin;   // 詰めた圧力の欄 g_pressure の始まり(色 2 つ × PressureSlots。T-1320 段 1)
 };
 
 // 圧力の多重格子の段のボクセル(作業場。段 0 = 細かい格子・段 1.. = 粗い格子。T-1222)
@@ -78,10 +93,11 @@ RWStructuredBuffer<OhShellVoxel> g_voxelWork : register(u8);
 RWStructuredBuffer<OhVoxelGas> g_gasWork : register(u9);
 RWStructuredBuffer<OhShellFace> g_faceWork : register(u10);
 RWStructuredBuffer<OhShellMultigrid> g_multigrid : register(u11);
-RWStructuredBuffer<RxCell> g_cellViews
-    : register(u12);  // 物ごとの囲むセルの見立て(刻みの初めのセル + この物の分。作業。T-1332)
-RWStructuredBuffer<OhFlow> g_exchanges
-    : register(u13);  // 物ごとのこの刻みにセルへ渡す粗い量の和(セルの単位。作業。T-1332)
+// 物ごとの囲むセルの見立て(刻みの初めのセル + この物の分)と、この刻みにセルへ渡す粗い量の和(セルの単位)。どちらも作業(T-1332)
+RWStructuredBuffer<RxCell> g_cellViews : register(u12);
+RWStructuredBuffer<OhFlow> g_exchanges : register(u13);
+// 詰めた圧力の欄(作業。T-1320 段 1)
+RWStructuredBuffer<OhShellPressure> g_pressure : register(u14);
 StructuredBuffer<RxSpecies> g_species : register(t0);
 StructuredBuffer<OhSpecies> g_objectSpecies : register(t1);
 StructuredBuffer<uint32_t> g_molarMasses : register(t2);
@@ -159,6 +175,7 @@ groupshared uint32_t gs_limited;
 groupshared uint32_t gs_fastest;
 groupshared uint32_t gs_failed;
 groupshared uint32_t gs_overflow;
+groupshared uint32_t gs_wideWeights;  // この小刻みに 32bit に入らない面の重みがあった(詰めた欄を使わない。T-1320 段 1)
 groupshared uint32_t
     gs_pressureMoved[3];  // 赤黒の回ごと(回 % 3)に、値が変わったボクセルがあったか(読む回・書く回・0 に戻す回を分ける)
 // 収まるまでの赤黒の「汚れた」印(T-1222 2 本目): 色ごとに、その色の並び(PressureColour の k)の 1 bit。
@@ -174,6 +191,7 @@ struct ShellBox {
     uint3 size;
     uint32_t faceBegin[3];
     uint32_t multigridBegin;  // 圧力の多重格子の作業場の始まり
+    uint32_t pressureBegin;   // 詰めた圧力の欄の始まり
 };
 
 uint32_t Axis(uint3 value, uint32_t axis) {
@@ -461,6 +479,51 @@ void AdvectFaces(ShellBox box, uint32_t thread, uint64_t gravity) {
     }
 }
 
+// 色の並びの数(行ごとに x を 2 つおき。色 0 と色 1 で同じ数え方)
+uint32_t PressureSlots(ShellBox box) {
+    return ((box.size.x + 1) >> 1) * box.size.y * box.size.z;
+}
+
+// ボクセル (x, y, z) の色の並びの番号(どちらの色でも x ÷ 2 + 行 × 半分の幅)
+uint32_t PressureSlotOf(ShellBox box, uint32_t x, uint32_t y, uint32_t z) {
+    return (x >> 1) + (((box.size.x + 1) >> 1) * (y + (box.size.y * z)));
+}
+
+// 詰めた圧力の欄の置き場(色 (x + y + z) の偶奇 × 並びの数 + 並びの番号)
+uint32_t PackedIndex(ShellBox box, uint3 c) {
+    const uint32_t colour = (c.x + c.y + c.z) & 1u;
+
+    return box.pressureBegin + (colour * PressureSlots(box)) + PressureSlotOf(box, c.x, c.y, c.z);
+}
+
+bool FitsUint32(uint64_t value) {
+    return (uint32_t)(value >> 32) == 0;
+}
+
+// ④ の詰めた欄を書く(重みが 1 つでも 32bit に入らなければ印だけ立てる = この小刻みは 64bit の欄を読む)
+void StorePacked(ShellBox box, uint3 c, int64_t residual, FxRecip64 recip, uint64_t inner[6]) {
+    bool fits = true;
+    FX_UNROLL
+    for (uint32_t i = 0; i < 6; ++i)
+        fits = fits && FitsUint32(inner[i]);
+
+    if (!fits) {
+        gs_wideWeights = 1;
+        return;
+    }
+
+    OhShellPressure packed;
+    packed.residual = residual;
+    packed.recip = recip;
+    packed.weightMinusX = (uint32_t)inner[0];
+    packed.weightPlusX = (uint32_t)inner[1];
+    packed.weightMinusY = (uint32_t)inner[2];
+    packed.weightPlusY = (uint32_t)inner[3];
+    packed.weightMinusZ = (uint32_t)inner[4];
+    packed.weightPlusZ = (uint32_t)inner[5];
+    g_pressure[PackedIndex(box, c)] = packed;
+}
+
 // ④ 残り = 膨らみたい体積 − 予測の出る体積・重みの和
 void PrepareResidual(ShellBox box, uint32_t thread) {
     const uint32_t count = box.size.x * box.size.y * box.size.z;
@@ -488,7 +551,9 @@ void PrepareResidual(ShellBox box, uint32_t thread) {
         g_voxelWork[box.begin + v].weightPlusZ = inner[5];
         g_voxelWork[box.begin + v].residual = residual;
         g_voxelWork[box.begin + v].total = total;
-        g_voxelWork[box.begin + v].recip = FxMakeRecipU64(total > 0 ? total : (uint64_t)1);
+        const FxRecip64 recip = FxMakeRecipU64(total > 0 ? total : (uint64_t)1);
+        g_voxelWork[box.begin + v].recip = recip;
+        StorePacked(box, c, residual, recip, inner);
         if ((g_pressureMode & OH_PRESSURE_WARM_START) != 0)
             continue;
 
@@ -496,16 +561,6 @@ void PrepareResidual(ShellBox box, uint32_t thread) {
         if (g_sharedPotential != 0)
             gs_potential[v] = 0;
     }
-}
-
-// 色の並びの数(行ごとに x を 2 つおき。色 0 と色 1 で同じ数え方)
-uint32_t PressureSlots(ShellBox box) {
-    return ((box.size.x + 1) >> 1) * box.size.y * box.size.z;
-}
-
-// ボクセル (x, y, z) の色の並びの番号(どちらの色でも x ÷ 2 + 行 × 半分の幅)
-uint32_t PressureSlotOf(ShellBox box, uint32_t x, uint32_t y, uint32_t z) {
-    return (x >> 1) + (((box.size.x + 1) >> 1) * (y + (box.size.y * z)));
 }
 
 void MarkDirty(uint32_t colour, uint32_t slot) {
@@ -536,6 +591,7 @@ void PressureColour(ShellBox box, uint32_t thread, uint32_t colour, uint32_t slo
     const uint32_t slots = halfX * box.size.y * box.size.z;
     const uint32_t strideY = box.size.x;
     const uint32_t strideZ = box.size.x * box.size.y;
+    const uint32_t wide = gs_wideWeights;
     for (uint32_t k = thread; k < slots; k += OH_SHELL_THREADS) {
         const uint32_t row = k / halfX;
         const uint32_t y = row % box.size.y;
@@ -553,21 +609,43 @@ void PressureColour(ShellBox box, uint32_t thread, uint32_t colour, uint32_t slo
         }
 
         const uint32_t v = x + (strideY * y) + (strideZ * z);
-        const OhShellVoxel work = g_voxelWork[box.begin + v];
-        int64_t sum = work.residual * 65536;
-        sum += (int64_t)work.weightMinusX * PotentialAt(box, x > 0 ? v - 1 : OH_SHELL_OUTSIDE);
-        sum += (int64_t)work.weightPlusX * PotentialAt(box, x + 1 < box.size.x ? v + 1 : OH_SHELL_OUTSIDE);
-        sum += (int64_t)work.weightMinusY * PotentialAt(box, y > 0 ? v - strideY : OH_SHELL_OUTSIDE);
-        sum += (int64_t)work.weightPlusY * PotentialAt(box, y + 1 < box.size.y ? v + strideY : OH_SHELL_OUTSIDE);
-        sum += (int64_t)work.weightMinusZ * PotentialAt(box, z > 0 ? v - strideZ : OH_SHELL_OUTSIDE);
-        sum += (int64_t)work.weightPlusZ * PotentialAt(box, z + 1 < box.size.z ? v + strideZ : OH_SHELL_OUTSIDE);
+        const int64_t minusX = PotentialAt(box, x > 0 ? v - 1 : OH_SHELL_OUTSIDE);
+        const int64_t plusX = PotentialAt(box, x + 1 < box.size.x ? v + 1 : OH_SHELL_OUTSIDE);
+        const int64_t minusY = PotentialAt(box, y > 0 ? v - strideY : OH_SHELL_OUTSIDE);
+        const int64_t plusY = PotentialAt(box, y + 1 < box.size.y ? v + strideY : OH_SHELL_OUTSIDE);
+        const int64_t minusZ = PotentialAt(box, z > 0 ? v - strideZ : OH_SHELL_OUTSIDE);
+        const int64_t plusZ = PotentialAt(box, z + 1 < box.size.z ? v + strideZ : OH_SHELL_OUTSIDE);
+        int64_t sum = 0;
+        FxRecip64 recip;
+        // 詰めた欄(32bit の重み・色の並び)か 64bit の欄か。gs_wideWeights はグループで 1 つなので全スレッドが同じ道を通る
+        if (wide == 0) {
+            const OhShellPressure work = g_pressure[box.pressureBegin + (colour * slots) + k];
+            sum = work.residual * 65536;
+            sum += (int64_t)work.weightMinusX * minusX;
+            sum += (int64_t)work.weightPlusX * plusX;
+            sum += (int64_t)work.weightMinusY * minusY;
+            sum += (int64_t)work.weightPlusY * plusY;
+            sum += (int64_t)work.weightMinusZ * minusZ;
+            sum += (int64_t)work.weightPlusZ * plusZ;
+            recip = work.recip;
+        } else {
+            const OhShellVoxel work = g_voxelWork[box.begin + v];
+            sum = work.residual * 65536;
+            sum += (int64_t)work.weightMinusX * minusX;
+            sum += (int64_t)work.weightPlusX * plusX;
+            sum += (int64_t)work.weightMinusY * minusY;
+            sum += (int64_t)work.weightPlusY * plusY;
+            sum += (int64_t)work.weightMinusZ * minusZ;
+            sum += (int64_t)work.weightPlusZ * plusZ;
+            recip = work.recip;
+        }
 
         // = OhMulDivToward0(sum, 1, 重みの和)(0 の向きに切る。逆数の掛け算は厳密)
-        const int64_t quotient = (int64_t)FxDivRecipU64(FxAbsU64(sum), work.recip);
+        const int64_t quotient = (int64_t)FxDivRecipU64(FxAbsU64(sum), recip);
         const int64_t potential = sum < 0 ? -quotient : quotient;
         bool changed = false;
         if (g_sharedPotential == 0) {
-            changed = !SameInt64(potential, work.potential);
+            changed = !SameInt64(potential, g_voxelWork[box.begin + v].potential);
             g_voxelWork[box.begin + v].potential = potential;
         } else {
             if (!FitsInt32(potential))
@@ -1240,6 +1318,7 @@ void WakeChanged(OhObject object, ShellBox box, uint32_t thread, uint64_t tick, 
     box.faceBegin[1] = shell.faceBegin[1];
     box.faceBegin[2] = shell.faceBegin[2];
     box.multigridBegin = shell.multigridBegin;
+    box.pressureBegin = shell.pressureBegin;
     const uint64_t tick = FX_U64(g_tickHigh, g_tickLow);
     const uint32_t pass = g_passBase + objectIndex + 1;
     const uint64_t gravity = OhFlowGravityQ16(object.bodyLevel, g_substeps);
@@ -1266,6 +1345,7 @@ void WakeChanged(OhObject object, ShellBox box, uint32_t thread, uint64_t tick, 
         if (thread == 0) {
             PrepareCell(table, gases, g_cellViews[objectIndex]);
             gs_pressureMoved[0] = 0;
+            gs_wideWeights = 0;
         }
 
         for (uint32_t w = thread; w < OH_SHELL_DIRTY_WORDS; w += OH_SHELL_THREADS) {

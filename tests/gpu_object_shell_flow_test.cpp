@@ -62,9 +62,9 @@ namespace {
     constexpr uint32_t ROOT_CONSTANT_COUNT = 11;
     constexpr uint32_t APPLY_THREADS = 64;  // object_shell_flow.hlsl の OH_SHELL_APPLY_THREADS
     constexpr uint32_t SWEEP_STATS = 4;     // g_stats の後ろ: 解いた回数・赤黒の和・一番多い・上限で止まった(T-1201)
-    // u0〜u13 / b0 / デバッグのリング / t0〜t8(14 × 2 + 11 + 2 + 9 × 2 = 59 語。物の熱の 63 語とは別の署名)
+    // u0〜u14 / b0 / デバッグのリング / t0〜t8(15 × 2 + 11 + 2 + 9 × 2 = 61 語。物の熱の 63 語とは別の署名)
     constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
-        .uavCount = 14, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = 9};
+        .uavCount = 15, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = 9};
 
     // 段の印(object_shell_flow.hlsl の OH_STAGE_*。1 つずつだけ回して費用を分ける。T-1223)
     constexpr uint32_t ALL_STAGES = 0xFFFFFFFFu;
@@ -101,7 +101,18 @@ namespace {
     struct ShellObject {
         uint32_t faceBegin[3];
         uint32_t multigridBegin;  // 圧力の多重格子の作業場の始まり(T-1222)
+        uint32_t pressureBegin;   // 詰めた圧力の欄の始まり(色 2 つ × 色の並びの数。T-1320 段 1)
     };
+
+    // 詰めた圧力の欄(object_shell_flow.hlsl の OhShellPressure。T-1320 段 1)
+    struct ShellPressureWork {
+        int64_t residual;
+        uint64_t recipMultiplier;
+        uint32_t recipShift1;
+        uint32_t recipShift2;
+        std::array<uint32_t, 6> weights;
+    };
+    static_assert(sizeof(ShellPressureWork) == 48);
 
     // 圧力の多重格子の段のボクセル(object_shell_flow.hlsl の OhShellMultigrid。T-1222)
     struct ShellMultigridWork {
@@ -131,6 +142,7 @@ namespace {
         UavMultigrid,
         UavCellViews,  // 物ごとの囲むセルの見立て(T-1332)
         UavExchanges,  // 物ごとのセルへ渡す粗い量の和(T-1332)
+        UavPressure,   // 詰めた圧力の欄(T-1320 段 1)
         UAV_COUNT,
     };
     constexpr uint32_t SRV_COUNT = 9;
@@ -279,10 +291,12 @@ namespace {
         }
     }
 
-    std::vector<ShellObject> ShellObjectsOf(const test::OhWorld& world, uint32_t& faceCount, uint32_t& multigridCount) {
+    std::vector<ShellObject> ShellObjectsOf(const test::OhWorld& world, uint32_t& faceCount, uint32_t& multigridCount,
+                                            uint32_t& pressureCount) {
         std::vector<ShellObject> shells;
         faceCount = 0;
         multigridCount = 0;
+        pressureCount = 0;
         for (const rx::OhObject& object : world.objects) {
             const test::OhFlowBox box = test::FlowBoxOf(object);
             ShellObject shell{};
@@ -293,6 +307,8 @@ namespace {
 
             shell.multigridBegin = multigridCount;
             multigridCount += MultigridVoxels(box);
+            shell.pressureBegin = pressureCount;
+            pressureCount += 2 * ((box.size[0] + 1) / 2) * box.size[1] * box.size[2];
             shells.push_back(shell);
         }
 
@@ -364,7 +380,9 @@ namespace {
             return std::unexpected("パイプラインを作れない");
 
         uint32_t multigridCount = 0;
-        const std::vector<ShellObject> shells = ShellObjectsOf(world, result.faceCount, multigridCount);
+        uint32_t pressureCount = 0;
+        const std::vector<ShellObject> shells = ShellObjectsOf(world, result.faceCount, multigridCount, pressureCount);
+        const std::vector<ShellPressureWork> pressureWork(pressureCount, ShellPressureWork{});
         const std::vector<int64_t> momentum(result.faceCount, 0);
         const std::vector<uint32_t> stats(StatsCount(world.objects.size()), 0);
         const std::vector<ShellVoxelWork> voxelWork(world.voxels.size(), ShellVoxelWork{});
@@ -386,7 +404,8 @@ namespace {
                                                                            BytesOf(faceWork),
                                                                            BytesOf(multigridWork),
                                                                            BytesOf(cellViews),
-                                                                           BytesOf(exchanges)};
+                                                                           BytesOf(exchanges),
+                                                                           BytesOf(pressureWork)};
         for (size_t i = 0; i < initial.size(); ++i) {
             result.uavs[i] = gpu::CreateBuffer(device, initial[i].size(), gpu::BufferKind::UnorderedAccess);
             result.uploads[i] = gpu::CreateFilledUpload(device, initial[i]);
