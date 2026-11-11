@@ -247,6 +247,8 @@ namespace bicameral::sim {
         struct PhaseLayer {
             uint32_t field = UINT32_MAX;  // 欄の番号(無ければ MULTIRES_NO_FIELD と同じ値)
             std::vector<reaction::RxSpecies> species;
+            // 伝導の当てる段が溜める層の部分の変化(頁のセルの添字ごと。1 刻みの中だけの置き場 = 状態に入らない。T-1230 段 2 ①)
+            std::vector<int64_t> conductionDeltas;
         } phaseLayer;
 
         // --- 活性の種(T-0100)。次の StepActive で刻むブロックの元(世界の枠ごとに 0 / 1)。

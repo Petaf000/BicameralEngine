@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "common/multires_conduction.hlsli"
+#include "common/transport_conduction_parts.hlsli"
 #include "sim/cell_view.h"
 #include "sim/multires_nest.h"
 
@@ -163,6 +164,16 @@ namespace bicameral::sim::nest_detail {
         entry = multires::MrAddEnergyDelta(entry, delta);
     }
 
+    // 層の部分の変化(当てる段の世界の AddCondensed。頁のセルの添字ごと。相の層の欄がある世界だけ。T-1230 段 2 ①・ADR-0512 の 2)
+    inline void AddCondensedDelta(MultiresNest& nest, uint32_t slot, uint32_t index, int64_t delta) {
+        const multires::MrBlock& block = nest.blocks[slot];
+        FX_ASSERT(!multires::MrIsUniform(block) && !nest.phaseLayer.conductionDeltas.empty());
+        nest.phaseLayer.conductionDeltas[PageCellAddress(nest, block.page, index)] += delta;
+    }
+
+    // 溜めた層の部分の変化を Ec の欄へ書いて 0 に戻す(伝導の変化をセルに足す所と同じ時に。頁のあるブロックのセル)。変わったら true
+    bool ApplyCondensedDelta(MultiresNest& nest, uint32_t slot, uint32_t index);
+
     // 開いた世界の端の面から外へ出た流れ outflow(出ていくのが正。枠 slot のレベルの単位)を世界の帳簿の「世界の端」のエネルギーの列へ
     // (当てる段の世界の AddEdge。陽の面・陰の面が同じ 1 つを使う。T-0762 の帳簿の書き方の約束。multires_conduction.cpp。T-0790)
     void AddConductionEdge(MultiresNest& nest, uint32_t slot, int64_t outflow);
@@ -245,6 +256,10 @@ namespace bicameral::sim::nest_detail {
         // 伝導のセルの熱(陰解法が読む。見立ての thermal = MrCellThermal と同じ値。T-0713)
         [[nodiscard]] multires::MrThermal At(uint32_t slot, uint32_t index) { return View(slot, index).thermal; }
 
+        // 相の層の部分の見立て(CV_VIEW_PHASE_LAYER。刻みの初めの値。相の層の欄が無い世界・混ざらないセルは mixed = 0。
+        // 溢れを使う世界はまだ mixed = 0 = 部分の道を通らない〔未対応〕。T-1230 段 2 ①・ADR-0512 の 2)
+        [[nodiscard]] const multires::TxCellParts& Parts(uint32_t slot, uint32_t index);
+
         void Invalidate(uint32_t slot);
 
         // 世界の端の外の柱の行 row のセルの見立て(レベル level。T-0721。外のセルは変わらないので作るだけ)
@@ -254,11 +269,18 @@ namespace bicameral::sim::nest_detail {
         // 見立てを作って置き場の position に入れる(読む種類の部分だけ)
         void Build(uint32_t slot, uint32_t index, uint32_t position);
 
+        // 部分の見立ての枠ごとの置き場(相の層の欄がある世界で、初めて読んだ枠だけ)
+        struct PartPage {
+            std::array<multires::TxCellParts, multires::MR_BLOCK_CELLS + 1> parts;
+            std::array<uint8_t, multires::MR_BLOCK_CELLS + 1> known;
+        };
+
         const MultiresNest* m_nest;
         CellViewTable m_table;
         uint32_t m_parts;
         CellViewPool* m_pool;
         std::vector<std::unique_ptr<CellViewPage>> m_pages;  // 枠ごと(初めて読んだ枠だけ塊を借りる)
+        std::vector<std::unique_ptr<PartPage>> m_partPages;
     };
 
     // 刻むブロック(stepped)のセルの面の流れを調べ、流れのある一様なブロック(自分の面か、細かい側から送られてくる面)に MR_PAGE_WANTED を付ける。

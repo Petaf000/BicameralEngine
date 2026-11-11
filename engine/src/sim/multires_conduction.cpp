@@ -25,6 +25,8 @@
 #include <memory>
 
 #include "common/transport_conduction.hlsli"
+#include "common/transport_conduction_parts.hlsli"
+#include "sim/multires_fields.h"
 #include "sim/multires_nest.h"
 #include "sim/multires_nest_internal.h"
 
@@ -111,6 +113,37 @@ namespace bicameral::sim {
                 nest_detail::AddConductionDelta(*nest, deltas, slot, index, delta);
             }
 
+            // 部分の見立て(CV_VIEW_PHASE_LAYER)と層の部分の変化(TxFlowConductionCell の口。T-1230 段 2 ①・ADR-0512 の 2)
+            [[nodiscard]] const TxCellParts& Parts(uint32_t slot, uint32_t index) const {
+                return views->Parts(slot, index);
+            }
+
+            // 混ざったセルが片側にある面か(印の回: 部分の道の流れは丸ごとの流れと違うので、粗い側を頁に広げる。相の層の欄が無ければ false)
+            [[nodiscard]] bool MixedFace(uint32_t slot, uint32_t index, const MrFaceNeighbor& neighbor) const {
+                if (nest->phaseLayer.field == MULTIRES_NO_FIELD)
+                    return false;
+
+                if (views->Parts(slot, index).mixed != 0)
+                    return true;
+
+                return neighbor.kind != MR_NEIGHBOR_EDGE && views->Parts(neighbor.slot, neighbor.index).mixed != 0;
+            }
+
+            // 層と気体の温度が違う混ざったセルか(層の上の面が流れる = 一様なブロックでも頁が要る)
+            [[nodiscard]] bool InnerFlows(uint32_t slot, uint32_t index) const {
+                if (nest->phaseLayer.field == MULTIRES_NO_FIELD)
+                    return false;
+
+                const TxCellParts& parts = views->Parts(slot, index);
+
+                return parts.mixed != 0 && parts.lateral.lower.temperature != parts.lateral.upper.temperature;
+            }
+
+            void AddCondensed(uint32_t slot, uint32_t index, int64_t delta) const {
+                FX_ASSERT(ledger != nullptr);
+                nest_detail::AddCondensedDelta(*ledger, slot, index, delta);
+            }
+
             // 5 帳簿: 開いた端の面の流れ outflow(出ていくのが正。枠 slot のレベルの単位)を世界の帳簿の「世界の端」のエネルギーの列へ
             // (出 = 外へ出た・入 = 外から入った。T-0762 の帳簿の書き方の約束)
             void AddEdge(uint32_t slot, uint32_t /*index*/, int64_t outflow) const {
@@ -145,7 +178,16 @@ namespace bicameral::sim {
         // 粗い側へ送る面 1 つの印(送るなら相手も変わるので一様なら頁に広げる。端数が要るなら相手に印)。送るなら true。
         // 流れは端数の枠があるとした場合
         bool MarkCoarseSend(MultiresNest& nest, int64_t flow, const MrFaceNeighbor& neighbor,
-                            std::span<uint8_t> wantsFraction) {
+                            std::span<uint8_t> wantsFraction, bool mixedFace) {
+            // 混ざったセルの面は部分の道で流れるので、丸ごとの流れが 0 でも送るとして印を付ける(T-1230 段 2 ①)
+            if (mixedFace) {
+                if (nest.blocks[neighbor.slot].page == MR_NO_PAGE)
+                    nest.blocks[neighbor.slot].page = MR_PAGE_WANTED;
+
+                wantsFraction[neighbor.slot] = 1;
+                return true;
+            }
+
             const MrCrossTransfer transfer = MrSplitCrossFlow(flow, neighbor.gap, true);
             if (transfer.fineDelta == 0)
                 return false;
@@ -166,7 +208,7 @@ namespace bicameral::sim {
             const MrBlock block = nest.blocks[slot];
             const TxSelfSide side = TxMakeSelfSide(kind, world.View(slot, index), block.level);
             int64_t sameLevelOutflow = 0;
-            bool sends = false;
+            bool sends = world.InnerFlows(slot, index);
             for (uint32_t face = 0; face < MR_FACES; ++face) {
                 const MrFaceNeighbor neighbor = world.Neighbor(slot, block, index, face);
                 if (neighbor.kind != MR_NEIGHBOR_SAME && neighbor.kind != MR_NEIGHBOR_COARSER &&
@@ -175,12 +217,14 @@ namespace bicameral::sim {
 
                 // 開いた世界の端の面も自分だけが変わる(同じレベルの面と同じ数え方。T-0721)
                 const int64_t flow = TxSideFaceFlow(kind, world, side, neighbor);
+                const bool mixedFace = world.MixedFace(slot, index, neighbor);
                 if (neighbor.kind == MR_NEIGHBOR_SAME || neighbor.kind == MR_NEIGHBOR_EDGE) {
                     sameLevelOutflow += flow;
+                    sends = sends || mixedFace;
                     continue;
                 }
 
-                const bool sent = MarkCoarseSend(nest, flow, neighbor, wantsFraction);
+                const bool sent = MarkCoarseSend(nest, flow, neighbor, wantsFraction, mixedFace);
                 sends = sends || sent;
             }
 
@@ -207,7 +251,8 @@ namespace bicameral::sim {
                     sideMade = true;
                 }
 
-                MarkCoarseSend(nest, TxSideFaceFlow(kind, world, side, neighbor), neighbor, wantsFraction);
+                MarkCoarseSend(nest, TxSideFaceFlow(kind, world, side, neighbor), neighbor, wantsFraction,
+                               world.MixedFace(slot, index, neighbor));
             }
         }
 
@@ -278,8 +323,14 @@ namespace bicameral::sim {
 
                 bool blockChanged = false;
                 for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                    if (!MrIsSteppedCell(block, index))
+                        continue;
+
+                    // 層の部分の変化(相の層の欄がある世界だけ。層の上の面だけの時はセルのエネルギーの変化が 0 でも変わる)
+                    const bool condensedChanged = nest_detail::ApplyCondensedDelta(nest, slot, index);
+                    blockChanged = blockChanged || condensedChanged;
                     MrEnergyDelta& delta = deltas[nest_detail::PageCellAddress(nest, block.page, index)];
-                    if (!MrIsSteppedCell(block, index) || !TxWakes(delta))
+                    if (!TxWakes(delta))
                         continue;
 
                     RxCell cell = nest_detail::LoadCellAt(nest, slot, index);
@@ -319,7 +370,11 @@ namespace bicameral::sim {
 
         CellViews::CellViews(MultiresNest& nest, const ReactionTableView& view, std::span<const CvSpeciesPhase> phases,
                              uint32_t parts)
-            : m_nest(&nest), m_table{.reaction = view, .phases = phases}, m_parts(parts), m_pages(nest.blocks.size()) {
+            : m_nest(&nest),
+              m_table{.reaction = view, .phases = phases},
+              m_parts(parts),
+              m_pages(nest.blocks.size()),
+              m_partPages(nest.blocks.size()) {
             // 取っておきは木の写しどうしで共有しない(写した木は自分の取っておきを作る)
             if (!nest.conductionViewPool || nest.conductionViewPool.use_count() != 1)
                 nest.conductionViewPool = std::make_shared<CellViewPool>();
@@ -366,6 +421,52 @@ namespace bicameral::sim {
         void CellViews::Invalidate(uint32_t slot) {
             if (m_pages[slot])
                 m_pages[slot]->known.fill(0);
+
+            if (m_partPages[slot])
+                m_partPages[slot]->known.fill(0);
+        }
+
+        const TxCellParts& CellViews::Parts(uint32_t slot, uint32_t index) {
+            static const TxCellParts NONE{};
+            if (m_nest->phaseLayer.field == MULTIRES_NO_FIELD || m_nest->wideCells)
+                return NONE;
+
+            const uint32_t position = MrIsUniform(m_nest->blocks[slot]) ? MR_BLOCK_CELLS : index;
+            std::unique_ptr<PartPage>& page = m_partPages[slot];
+            if (!page)
+                page = std::make_unique<PartPage>();
+
+            if (page->known[position] == 0) {
+                // 刻みの初めのセルと Ec から(混ざらないセルは mixed = 0 だけ)
+                const RxCell cell = LoadNestCell(*m_nest, slot, index);
+                const PlLayer layer = PlLayerOf(m_table.reaction, cell);
+                TxCellParts parts{};
+                if (layer.mixed != 0) {
+                    const int64_t condensedEnergy = LoadNestPhaseLayerEnergy(*m_nest, slot, index);
+                    parts = TxMakeCellParts(PlPartsOf(m_table.reaction, cell, condensedEnergy), layer);
+                }
+
+                page->parts[position] = parts;
+                page->known[position] = 1;
+            }
+
+            return page->parts[position];
+        }
+
+        bool ApplyCondensedDelta(MultiresNest& nest, uint32_t slot, uint32_t index) {
+            std::vector<int64_t>& condensedDeltas = nest.phaseLayer.conductionDeltas;
+            if (condensedDeltas.empty())
+                return false;
+
+            int64_t& delta = condensedDeltas[PageCellAddress(nest, nest.blocks[slot].page, index)];
+            if (delta == 0)
+                return false;
+
+            const uint32_t field = nest.phaseLayer.field;
+            StoreNestField(nest, field, slot, index, 0, LoadNestField(nest, field, slot, index, 0) + delta);
+            delta = 0;
+
+            return true;
         }
 
         void AddConductionEdge(MultiresNest& nest, uint32_t slot, int64_t outflow) {
@@ -403,6 +504,8 @@ namespace bicameral::sim {
                                         .implicitBlocks = implicitBlocks,
                                         .deltas = deltas,
                                         .ledger = &nest};
+            // 相の層の欄がある世界は混ざったセルの面を部分ごとに(transport_conduction_parts.hlsli。混ざらない面は TxFlowCell と同じ値)
+            const bool parts = nest.phaseLayer.field != MULTIRES_NO_FIELD;
             for (uint32_t slot = 0; slot < nest.blocks.size(); ++slot) {
                 const MrBlock& block = nest.blocks[slot];
                 if (!IsSteppedSlot(stepped, slot) || IsFrozen(frozen, slot) || MrIsUniform(block) ||
@@ -410,7 +513,12 @@ namespace bicameral::sim {
                     continue;
 
                 for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
-                    if (MrIsSteppedCell(block, index))
+                    if (!MrIsSteppedCell(block, index))
+                        continue;
+
+                    if (parts)
+                        TxFlowConductionCell(kind, world, slot, block, index);
+                    else
                         TxFlowCell(kind, world, slot, block, index);
                 }
             }
@@ -425,6 +533,8 @@ namespace bicameral::sim {
             const uint32_t substeps = 1u << (2 * options.maxSubcycleGap);
             CellViews views(nest, view, phases, MakeConductionKind(options).ViewParts());
             std::vector<MrEnergyDelta> deltas(nest_detail::CellAddressCount(nest), MrMakeEnergyDelta());
+            if (nest.phaseLayer.field != MULTIRES_NO_FIELD)
+                nest.phaseLayer.conductionDeltas.assign(nest_detail::CellAddressCount(nest), 0);
             std::vector<uint8_t> active(nest.blocks.size(), 0);
             for (uint32_t substep = 0;; ++substep) {
                 // --- 印 → 頁 → 端数の枠と流れ(T-0019 の 1 刻みと同じ順)---
