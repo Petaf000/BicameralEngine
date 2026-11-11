@@ -39,11 +39,11 @@ namespace bicameral::sim {
         Jump,
     };
 
-    // 違う刻みで歩を始めた単位どうしの境の面の誤差の扱い(T-1269。研究。既定は None = 今の形)。
+    // 違う刻みで歩を始めた単位どうしの境の面の誤差の扱い(T-1269。既定は Coupling の 2^0 = Q181・ADR-0507・T-1273)。
     // 長い側は歩の初めの隣の温度を固定した面で解き、面の流れは短い側が長い側の歩の初めの温度で記録する(短い側が持ち主)。
     // そのずれは歩の終わりに「解いた温度」と「真実 + 歩の変化から出した温度」の差(食い違い)として測れる(TimeTreeSteps::worstMismatch)
     enum class TimeTreeBorder : uint8_t {
-        None,      // 今の形(隣の差 1 段だけ)
+        None,      // 前の既定(隣の差 1 段だけ。T-1273 の前)
         Mismatch,  // (a) 歩の終わりの食い違いも望みの e に入れる(N² に比例と見る = 規則 B の段)
         Restart,   // (b) 歩の途中の単位は、隣が歩を始めたら打ち切る(隣の差 1 段はそのまま)
         Gap0,      // (b) の行き着く形: 隣の差 0 段(面でつながる単位は同じ e)
@@ -135,8 +135,9 @@ namespace bicameral::sim {
         // 窓を外した時(格子・groupShift・unit=block の比べ)と退く道(Jump)は枠のまま
         uint32_t unitEdgeCells = 1;
 
-        // 境の面の誤差の扱い(T-1269)。couplingShift は Coupling の閾値(結びつきの数 ≤ 2^-これ なら隣の差 1 段を許す)
-        TimeTreeBorder border = TimeTreeBorder::None;
+        // 境の面の誤差の扱い(T-1269)。couplingShift は Coupling の閾値(結びつきの数 ≤ 2^-これ なら隣の差 1 段を許す)。
+        // 既定 = (c) の 2^0(Q181・ADR-0507・T-1273: 精度の予算 0.1 K をどの歩の終わりでも守る。歩の終わりの差 11〜13 mK)
+        TimeTreeBorder border = TimeTreeBorder::Coupling;
         int32_t couplingShift = 0;  // 負なら緩める(結びつきの数 ≤ 2^-これ)
 
         // --- 見る口(結果に効かない)---

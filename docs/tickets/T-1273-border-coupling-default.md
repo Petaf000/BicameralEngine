@@ -1,0 +1,28 @@
+# T-1273 時間を飛ばす試作の境の面の扱いの既定を (c) Coupling に(Q181 の切り替え・ADR-0507 Accepted)
+
+- Status: Doing
+- 種類: 工学
+- PC: 必須(CPU の試験・GPU の比べ)
+- 見積もり: チャット 1 回分
+- マイルストーン: 試作の列 6(docs/plan/ROADMAP.md。T-1269・T-1270・T-1271 の続き)
+- 設計: docs/design/20-transport-substrate.md §14 / 決定: Q181(2026-11-12 ユーザー「おすすめでいい」= (c) を既定に)・ADR-0507
+
+## 目的(1〜2 行)
+刻みを選ぶ単位どうしの刻みの差を「面の結びつきの数(係数 × 2^e ÷ 容量)≤ 1 の e まで 1 段・それより長い e では 0 段」にする形 (c)(TimeTreeBorder::Coupling・couplingShift 0)を既定にする。
+精度の予算 0.1 K(D-642)を「どの歩の終わりでも」守る意味に読み替える(歩の終わりの差 11〜13 mK)。
+
+## 完了条件(チェックできる形で)
+- [x] 既定の 2 行: `TimeTreeSetup::border = TimeTreeBorder::Coupling`(couplingShift 0)・time_step_tree_test の `borderMode = "c0"`(none = 前の既定は border=none で選べるまま)
+- [ ] GPU の選ぶ段の表(T-1271 の looseExponents)が既定の choose-dump でも作られ、gpu_time_step_choose(既定の写し)が CPU とビット一致
+- [ ] CPU: time_step_tree・time_step_span_dump・time_step_event_merge・time_step_choose_dump 系 / GPU: gpu_time_step_span・gpu_time_step_event・gpu_time_step_event_cost・gpu_time_step_choose 系
+- [ ] 記録したハッシュの取り直し(早送りの要約・火事の系・列のまとめ)
+- [ ] release のビルド(警告 0)・archmap --check
+
+## メモ・参考
+- T-1270 の材料: 夜は写しの刻みでの毎刻みとの差が 5〜6 mK → 11 mK(予算の内)・静かな夜の解きが 0.46〜0.73 倍(軽く)・火事 1.003 倍以下。書き直す試験の期待は無い見込み。
+- ctest の time_step_choose_dump_coupling(border=c0)は既定と同じになる(残してよい。消すかは本体が決める)。
+- 変わるのは時間を飛ばす試作(TimeTreeSetup を使う所)だけ。毎刻みの解き・圧力・支え・伝導は変わらない。
+- T-1337(最も粗い段の掃き出し 2 回)の上に重ねた(ハッシュの取り直しを重ねない = このブランチのハッシュは T-1337 込み)。
+
+## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
+- 2026-11-12(wt4・ブランチ t-1273-step-gap-default。t-1337-coarse-sweeps-2 の上): 本体がまだチケットのファイルを作っていないので ★ の文から作った。既定の 2 行を変えてコミット。

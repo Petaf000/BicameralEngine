@@ -157,8 +157,8 @@ namespace {
     // 燃える物を置く所(T-1153。空 = どこにも置く。x〔m〕→ 置くか)
     std::function<bool(double)> fuelAt;
 
-    // 境の面の扱い(border=。T-1270: 案 (c) を既定にした時の差を測る。none・mismatch・restart・gap0・c<n>。既定 none = 今の既定)
-    std::string borderMode = "none";
+    // 境の面の扱い(border=。none・mismatch・restart・gap0・c<n>。既定 c0 = TimeTreeSetup の既定〔Q181・T-1273〕。none = 前の既定)
+    std::string borderMode = "c0";
     // 根の並び(roots=XxYxZ。T-1287。空 = shape= のまま)
     std::string rootsGiven;
 
