@@ -1,6 +1,6 @@
 # T-1314 木を細かくする段の隣の写し: 子に覆われた隣のセルを読む(T-1257 の不具合候補)
 
-- Status: Doing(2026-11-05 wt5・t-1314-halo-covered: 直しのコードは入れた・**未ビルド・未試験**。下の「引き継ぎ」)
+- Status: Review(2026-11-12 wt5・t-1314-halo-covered: release ビルド警告 0・CPU 6 本と GPU HW / WARP 4 本合格。前線の順 = 一度に がビット単位で同じ。runner/ready/ に印)
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1 回分
@@ -18,9 +18,9 @@
 - 要求の確定は親のブロック 1 つに 1 刻み 1 つ(multires_tree.cpp の claims)なので、同じ根の八分の一は必ず別の刻みになり、前線では隣が先に細かくなるのが普通。
 
 ## 完了条件(チェックできる形で)
-- [ ] 隣の写しが、子に覆われたセルを子から読む(案は下)。CPU(SnapshotRefineHalos)と GPU(TreeRefineHalo)で同じ・ビット一致(gpu_tree_refine_placement に前線の順の場面)
-- [ ] `case_b_r3_test 15` の「隣を読む・前線の順」が 1 mm/s・粒 0 になる(表を T-1257 の形で)
-- [ ] 保存・2 回の実行でハッシュ一致・tree_refine_placement の端の場面が今と同じ(覆われたセルの無い場面)
+- [x] 隣の写しが、子に覆われたセルを子から読む(案は下)。CPU(SnapshotRefineHalos)と GPU(TreeRefineHalo)で同じ・ビット一致(gpu_tree_refine_placement に前線の順の場面 5 つ。HW・WARP)
+- [x] `case_b_r3_test 15` の「隣を読む・前線の順」が 1 mm/s・粒 0 になる(表を T-1257 の形で。下の「結果」)
+- [x] 保存・2 回の実行でハッシュ一致・tree_refine_placement の端の場面が今と同じ(覆われたセルの無い場面)
 
 ## 案(作り手から見て違いは無い。どれも D-664 の約束を守るための作りの違い)
 - (a) **覆われたセルは子 8 つの詰まりの平均(粗くする規則 = 和 ÷ 8)を読む**(おすすめ。子が動いた後も今の値。費用は細かくする出来事の時だけ・写しの段で子のブロックを 1 段引く)。
@@ -57,3 +57,15 @@
   ⑤ CPU 先: case_b_r3_tree_slope・tree_refine_placement・placement_refine・multires・multires_layers・dxil_alloca_check → GPU 最後に 1 回(HW・WARP)・archmap --check
   ⑥ 変わる試験を数える(覆われた隣のある場面だけ変わるはず)・設計 20 §10.5 の「子に覆われたセルは無いと読む」を直す・rebase main → 印。
 - 気になる所: GPU の CoveredSpeciesSeen / CoveredSpeciesSum は成分ごとに子 8 つを読み直す(最悪 8 × 8 × 8 × 8 読み。写しの段だけ・細かくする出来事の時だけ)。費用は測っていない。
+
+## 結果(2026-11-12 wt5。release・RTX 3070 Ti)
+- `case_b_r3_test 15`(4 秒の空気の速さ 0.25 / 0.5 / 4 秒・粒の最大): 隣を読む・一度に 1 / 1 / 1 mm/s・粒 0 / **隣を読む・前線の順 1 / 1 / 1 mm/s・粒 0**(T-1314 の前は 160 / 850 / 690 mm/s・粒 2.2 m/s)/
+  読まない・一度に = 読まない・前線の順 321 / 898 / 3487 mm/s・粒 6192 mm/s。子の粒(z = 0 の断面)は前線の順と一度にで 0 セルの差(EXPECT にした)。読まない形も前線の順 = 一度に(ブロックの中の覆われたセルも子から読むため)。
+- tree_refine_placement の TestFrontOrder(隣のブロック B・中の八分の一 0・両方を先の刻みに → A の子は A だけの刻みと同じ。層なし・層・舞う粒)・前の端の場面は前と同じ答え。
+- gpu_tree_refine_placement(HW・WARP)に前線の順の場面 5 つ: 全部 CPU とビット一致。「B が先」の要約は前からある「同じ刻みに (B, A)」と同じ(最後の状態が同じ)。
+  要求を処理する段(8 回の最小・HW): B が先 0.76 ms・中が先 0.26・両方 0.29・層 1.32・層 + 舞う粒 1.36(同じ回の端・同じ刻み (A, B) 0.165・層 1.37)。細かくする出来事の時だけの費用。
+- 変わった試験: 無し(記録したハッシュの取り直しは要らなかった。覆われた隣のある場面は前線の順の場面だけ)。
+
+## 作業ログ(続き)
+- 2026-11-12(wt5): ビルド(警告 0)・前線の順の試験(CPU の器・case_b_r3 の EXPECT・GPU の 5 場面)・CPU 6 本(case_b_r3_tree_slope・tree_refine_placement・placement_refine・multires・multires_layers・dxil_alloca_check)・
+  GPU 4 本(gpu_tree_refine_placement・_warp・gpu_placement_refine・_warp)合格・設計 20 §10.5 を直した・archmap --check OK。気になる所(覆われたセルを読む費用の最悪)は上の測りで細かくする段 0.26〜0.76 ms。
