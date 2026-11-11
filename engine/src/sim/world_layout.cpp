@@ -81,7 +81,8 @@ namespace bicameral::sim {
             return written;
         }
 
-        // 層を書かなかった粒の物質: Settled なら全部が層、Floating なら層 0 のまま知らせを足す
+        // 層を書かなかった粒の物質: Settled なら層を使う世界で全部が層(使わない世界は層 0 のまま。層の無い世界をビット単位で今と同じに保つ。
+        // 層があると頁が層を持ち、置かれ方の配りの物質の並びも変わる)。Floating なら層 0 のまま知らせを足す
         void ReadUnwrittenGrains(const WorldCellRegionDefinition& region, const BakedReactionTable& table,
                                  uint32_t written, UnwrittenGrainLayers grainReading, WorldCellRegion& baked,
                                  std::vector<std::string>& notes) {
@@ -93,7 +94,9 @@ namespace bicameral::sim {
                     continue;
 
                 if (grainReading == UnwrittenGrainLayers::Settled) {
-                    baked.layers[i] = cell.amounts[i];
+                    if (table.environment.cellLayers)
+                        baked.layers[i] = cell.amounts[i];
+
                     continue;
                 }
 

@@ -398,29 +398,40 @@ namespace {
         if (!baked)
             return;
 
-        // --- (a) 舞う粒(今の読み方): 書いた層だけ。書かなかった粒は層 0 で、領域ごとに知らせる ---
-        const WorldLayout& floating = baked->worldLayout;
-        const size_t floor = floating.cellRegions.size() - 2;
-        const size_t heap = floating.cellRegions.size() - 1;
-        EXPECT(RegionLayer(*baked, floating, floor, "test_sand") == 15000000);
-        EXPECT(RegionLayer(*baked, floating, floor, "nitrogen") == 0);
-        EXPECT(RegionLayer(*baked, floating, heap, "test_sand") == 0);
-        EXPECT(floating.unsettledGrainNotes.size() == 1 && NotesNaming(floating, "sand_heap") == 1 &&
-               NotesNaming(floating, "test_sand") == 1);
+        // --- 今の読み方(全部が層。T-1338)の層を使わない世界: 書いた層だけ。書かなかった粒は層 0(層の無い世界は前と同じ)・知らせなし ---
+        const WorldLayout& layout = baked->worldLayout;
+        const size_t floor = layout.cellRegions.size() - 2;
+        const size_t heap = layout.cellRegions.size() - 1;
+        EXPECT(RegionLayer(*baked, layout, floor, "test_sand") == 15000000);
+        EXPECT(RegionLayer(*baked, layout, floor, "nitrogen") == 0);
+        EXPECT(RegionLayer(*baked, layout, heap, "test_sand") == 0);
+        EXPECT(layout.unsettledGrainNotes.empty());
 
-        // --- (b) 全部が層: 書かなかった粒は層 = 量・知らせなし。書いた層はそのまま ---
-        const auto settled = BakeWorldLayout(definition->worldLayout, *baked, UnwrittenGrainLayers::Settled);
-        EXPECT(settled.has_value());
-        if (settled) {
-            EXPECT(RegionLayer(*baked, *settled, heap, "test_sand") == 1000000);
-            EXPECT(RegionLayer(*baked, *settled, floor, "test_sand") == 15000000);
-            EXPECT(settled->unsettledGrainNotes.empty());
+        // --- (a) 舞う粒(前の読み方。戻す時の道): 書かなかった粒は層 0 で、領域ごとに知らせる。書いた層はそのまま ---
+        const auto floating = BakeWorldLayout(definition->worldLayout, *baked, UnwrittenGrainLayers::Floating);
+        EXPECT(floating.has_value());
+        if (floating) {
+            EXPECT(RegionLayer(*baked, *floating, heap, "test_sand") == 0);
+            EXPECT(RegionLayer(*baked, *floating, floor, "test_sand") == 15000000);
+            EXPECT(floating->unsettledGrainNotes.size() == 1 && NotesNaming(*floating, "sand_heap") == 1 &&
+                   NotesNaming(*floating, "test_sand") == 1);
         }
 
-        // --- 0 と書けば舞わせると書いたことになる(知らせない)---
-        const auto zero = BakeWithMod(SandMod("test_sand = 0"));
-        EXPECT(zero && RegionLayer(*zero, zero->worldLayout, floor, "test_sand") == 0 &&
-               NotesNaming(zero->worldLayout, "sand_floor") == 0 && NotesNaming(zero->worldLayout, "sand_heap") == 1);
+        // --- 0 と書けば舞わせると書いたことになる(舞う粒の読み方でも知らせない)---
+        const auto zeroDefinition = DefinitionWithMod(SandMod("test_sand = 0"));
+        EXPECT(zeroDefinition.has_value());
+        if (!zeroDefinition)
+            return;
+
+        const auto zero = BakeReactionTable(*zeroDefinition);
+        EXPECT(zero.has_value());
+        if (!zero)
+            return;
+
+        const auto zeroFloating = BakeWorldLayout(zeroDefinition->worldLayout, *zero, UnwrittenGrainLayers::Floating);
+        EXPECT(RegionLayer(*zero, zero->worldLayout, floor, "test_sand") == 0);
+        EXPECT(zeroFloating && NotesNaming(*zeroFloating, "sand_floor") == 0 &&
+               NotesNaming(*zeroFloating, "sand_heap") == 1);
 
         // --- 書き間違い: 層 > 量・中身に無い物質・知らない物質・負の数・同じ物質が 2 回 ---
         EXPECT(FailsWith(SandMod("test_sand = 20000001"), "超える"));
@@ -430,7 +441,7 @@ namespace {
 
         // --- 層つきで根を置く(多重解像度の世界。根のセル 1 つ = 格子のセル 1 つ)---
         MultiresNest nest = MakeMultiresNest(test::MakeMultiresCapacity(*baked, 4, 0, 4));
-        const uint32_t root = PlaceLayoutRootBlock(nest, floating, 0, 0, 0);
+        const uint32_t root = PlaceLayoutRootBlock(nest, layout, 0, 0, 0);
         const uint32_t sand = baked->SpeciesId("test_sand");
         bool placed = true;
         for (uint32_t index = 0; index < multires::MR_BLOCK_CELLS; ++index) {
@@ -478,7 +489,8 @@ namespace {
             table.warnings, [&](const std::string& warning) { return warning.find(text) != std::string::npos; });
     }
 
-    // 層を書かなかった粒の知らせは組み立てにはいつも残り、表の警告には層を使う世界だけ出る。木には ApplyCellLayersChoice が選びを当てる
+    // 層を書かなかった粒は、層を使う世界では全部が層(T-1338・ADR-0489 の 3 = (b))・使わない世界は層 0。知らせも警告も出ない。
+    // 木には ApplyCellLayersChoice が選びを当てる
     void TestCellLayersWorld() {
         const auto plain = BakeWithMod(SandMod("test_sand = 15000000"));
         const auto layered = BakeWithMod(WithCellLayers(SandMod("test_sand = 15000000"), "true"));
@@ -487,13 +499,25 @@ namespace {
         if (!plain || !layered || !off)
             return;
 
-        // --- 警告: 層を使う世界だけ、知らせ(砂の山の 1 つ)がそのまま 1 回 ---
+        // --- 警告: どの世界でも知らせ・警告は出ない(層を書かなかった粒は全部が層として読む。T-1338)---
         EXPECT(!plain->environment.cellLayers && layered->environment.cellLayers && !off->environment.cellLayers);
-        EXPECT(plain->worldLayout.unsettledGrainNotes == layered->worldLayout.unsettledGrainNotes);
-        EXPECT(WarningsNaming(*plain, "settled_umol") == 0 && WarningsNaming(*off, "settled_umol") == 0);
-        EXPECT(WarningsNaming(*layered, "settled_umol") == 1 && WarningsNaming(*layered, "sand_heap") == 1);
-        for (const std::string& note : layered->worldLayout.unsettledGrainNotes)
-            EXPECT(rng::count(layered->warnings, note) == 1);
+        EXPECT(plain->worldLayout.unsettledGrainNotes.empty() && layered->worldLayout.unsettledGrainNotes.empty());
+        EXPECT(WarningsNaming(*plain, "settled_umol") == 0 && WarningsNaming(*off, "settled_umol") == 0 &&
+               WarningsNaming(*layered, "settled_umol") == 0);
+
+        // --- 層: 使う世界では書かなかった砂の山が全部が層・書いた床はそのまま。使わない世界は層 0(前と同じ)---
+        const size_t floor = layered->worldLayout.cellRegions.size() - 2;
+        const size_t heap = layered->worldLayout.cellRegions.size() - 1;
+        EXPECT(RegionLayer(*layered, layered->worldLayout, heap, "test_sand") == 1000000);
+        EXPECT(RegionLayer(*layered, layered->worldLayout, floor, "test_sand") == 15000000);
+        EXPECT(RegionLayer(*off, off->worldLayout, heap, "test_sand") == 0);
+        EXPECT(RegionLayer(*plain, plain->worldLayout, heap, "test_sand") == 0);
+
+        // 0 と書いた粒は、使う世界でも舞う(層 0)
+        const auto layeredZero = BakeWithMod(WithCellLayers(SandMod("test_sand = 0"), "true"));
+        EXPECT(layeredZero && RegionLayer(*layeredZero, layeredZero->worldLayout, floor, "test_sand") == 0 &&
+               RegionLayer(*layeredZero, layeredZero->worldLayout, heap, "test_sand") == 1000000 &&
+               WarningsNaming(*layeredZero, "settled_umol") == 0);
 
         // --- 木に当てる: 使う世界は粒の印を持ち、使わない世界は層を使わない形に戻る ---
         MultiresNest nest = MakeMultiresNest(test::MakeMultiresCapacity(*layered, 4, 0, 4));
