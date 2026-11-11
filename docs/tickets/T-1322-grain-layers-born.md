@@ -1,6 +1,6 @@
 # T-1322 層を使う世界で、反応で生まれた粒・層を渡さずに置いた粒を層にする(Q175 (B) の残り)
 
-- Status: Doing(CPU は入れた。GPU の同じ規則は T-1323 に分けた = 下の「GPU」)
+- Status: Done(ブランチ t-1322-grain-layers-born。CPU の規則 + GPU はそれまで断る。GPU の同じ規則は T-1323 に分けた = 下の「GPU」。マージは本体)
 - 種類: 工学(土台の共通の規則の変更。司令塔が docs/design/21 §3 と照らして受け取った形 = 2026-11-12 司令塔の照らし)
 - PC: 必須
 - 見積もり: チャット 1 回分(CPU)+ 1 回分(GPU。T-1323)
@@ -15,7 +15,7 @@
 - [x] ① CPU: 刻みの反応が書く所で、粒の物質の増えた分を層に足す(層 = 前の層 + 増えた量。減った分は舞う側から = 層 = min(前の層, 量)のまま)
 - [x] ② CPU: 層を使う世界の `PlaceRootBlock(nest, …, cells)`(層を渡さない置き口)は粒を全部層に・実験室の命令(NestCells::Apply)も ① と同じ道
 - [x] 層を使わない世界はビット単位で今と同じ(道は `cellLayers.enabled` の時だけ・粒の増えないセルは前の道で書く)
-- [ ] CPU の試験(multires_layers の 2 つ・層の試験の組)・release 警告 0・archmap --check
+- [x] CPU の試験(multires_layers の 2 つ・層の試験の組)・release 警告 0・archmap --check
 - [x] GPU はそれまで断る(層を使う世界で粒を生む表は写さない。gpu_multires_layers の 9)
 - [ ] ① ② の GPU(T-1323)と CPU とのビット一致(gpu_multires_layers に層を使う世界の燃える場面)= 分けた
 
@@ -58,3 +58,7 @@
 - 2026-11-12 wt2(2 本目): t-1338-grain-layers-default の上の t-1322-grain-layers-born で CPU の ① ② を入れた(GrowGrainLayers・StoreGrownGrainCell・
   SettledGrainLayers・PlaceRootBlock の層なしの置き口・実験室の命令)。試験 multires_layers に TestReactionBornGrainSettles・TestPlaceSettledGrain。
   GPU は T-1323 に分けた。
+- 2026-11-12 wt2(2 本目): 合格(release 警告 0): multires_layers・multires・multires_sparse・multires_wide・multires_quiet・world_layout・environment_package・
+  phase_layer_world・phase_layer_tree・placement_refine・tree_refine_placement・dxil_alloca_check / GPU(RTX 3070 Ti)gpu_multires_layers〔HW・WARP〕・
+  gpu_tree_refine_placement〔HW・WARP〕・gpu_lab_box。archmap --check OK。記録したハッシュの取り直しは要らなかった(層を使う世界で反応を刻む試験は無かった)。
+  lab_box(CPU)は ctest で Disabled のまま。rebase main d9eed9db。
