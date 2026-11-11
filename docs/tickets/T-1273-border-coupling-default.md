@@ -13,14 +13,17 @@
 
 ## 完了条件(チェックできる形で)
 - [x] 既定の 2 行: `TimeTreeSetup::border = TimeTreeBorder::Coupling`(couplingShift 0)・time_step_tree_test の `borderMode = "c0"`(none = 前の既定は border=none で選べるまま)
-- [ ] GPU の選ぶ段の表(T-1271 の looseExponents)が既定の choose-dump でも作られ、gpu_time_step_choose(既定の写し)が CPU とビット一致
+- [x] GPU の選ぶ段の表(T-1271 の looseExponents)が既定の choose-dump でも作られ、gpu_time_step_choose(既定の写し)が CPU とビット一致
+      (既定の time_step_choices.bin と border=c0 の time_step_choices_coupling.bin がバイト一致〔cmp〕・gpu_time_step_choose 合格)
 - [ ] CPU: time_step_tree・time_step_span_dump・time_step_event_merge・time_step_choose_dump 系 / GPU: gpu_time_step_span・gpu_time_step_event・gpu_time_step_event_cost・gpu_time_step_choose 系
 - [ ] 記録したハッシュの取り直し(早送りの要約・火事の系・列のまとめ)
 - [ ] release のビルド(警告 0)・archmap --check
 
 ## メモ・参考
 - T-1270 の材料: 夜は写しの刻みでの毎刻みとの差が 5〜6 mK → 11 mK(予算の内)・静かな夜の解きが 0.46〜0.73 倍(軽く)・火事 1.003 倍以下。書き直す試験の期待は無い見込み。
-- ctest の time_step_choose_dump_coupling(border=c0)は既定と同じになる(残してよい。消すかは本体が決める)。
+- ctest の time_step_choose_dump_coupling(border=c0)は既定と同じになった(書く .bin がバイト一致)。**仮(司令塔の仮のまま)**: その組を消し、
+  代わりに前の既定 None(border=none。表を持たない道)の組 time_step_choose_dump_none・gpu_time_step_choose_none を置いた(本数は同じ。
+  None は選べるまま残るので、その道の GPU 版のビット一致も残す)。区画 2 つ以上・池の border=c0 の組は既定と同じ値を明示するだけなのでそのまま。
 - 変わるのは時間を飛ばす試作(TimeTreeSetup を使う所)だけ。毎刻みの解き・圧力・支え・伝導は変わらない。
 - T-1337(最も粗い段の掃き出し 2 回)の上に重ねた(ハッシュの取り直しを重ねない = このブランチのハッシュは T-1337 込み)。
 
