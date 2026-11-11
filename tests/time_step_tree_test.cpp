@@ -135,8 +135,9 @@ namespace {
     int32_t shortExponent = 8;  // 短い刻み = e がこれ以下(shorte=。既定 8)
     bool unitByLength = true;   // 刻みを選ぶ単位を物の長さ 4 m で(D-640 の一旦。unit=block で外す)
     bool solverGalerkin = false;
-    double conductScale = 1.0;    // 火事の伝導率の倍率(conductscale=。T-1139 の速い伝導の測り)
-    uint32_t coarsestSweeps = 4;  // 試しの V の最も粗い段の掃き出し(coarsest=。T-1139。毎刻みの写しは 4 のまま)
+    double conductScale = 1.0;  // 火事の伝導率の倍率(conductscale=。T-1139 の速い伝導の測り)
+    // 試しの V の最も粗い段の掃き出し(coarsest=。既定は TimeTreeSetup の 2 回 = Q180・T-1337。毎刻みの写しは 4 のまま)
+    uint32_t coarsestSweeps = sim::TimeTreeSetup{}.coarsestSweeps;
     TimeTreeSelect selectRule = TimeTreeSelect::Previous;
     uint32_t groupShift = 0;   // 細かさの比べで 0.5 m の木の枠を揃える段(1 = 8 m のブロックに)
     uint32_t trialCycles = 0;  // 0 = longCycles と同じ
@@ -1090,8 +1091,11 @@ namespace {
             } else
                 return;
 
-            records.push_back(
-                {.exponent = solve.exponent, .start = solve.start, .cycles = solve.cycles, .system = solve.system});
+            records.push_back({.exponent = solve.exponent,
+                               .start = solve.start,
+                               .cycles = solve.cycles,
+                               .coarsestSweeps = solve.coarsestSweeps,
+                               .system = solve.system});
         };
 
         setup.spanObserver = &observer;
@@ -1118,6 +1122,7 @@ namespace {
     std::vector<int64_t> SolveSystem(const EquilibriumSystem& system, uint32_t cycles) {
         EquilibriumOptions options;
         options.solver.cycles = cycles;
+        options.solver.coarsestSweeps = coarsestSweeps;  // 試作の解きと同じ(T-1337)
         options.faceValues = false;
         EquilibriumState state;
         (void)SolveEquilibrium(system, options, state);
@@ -1227,6 +1232,7 @@ namespace {
                                        .start = pendingStart,
                                        .cycles = span.cycles,
                                        .event = static_cast<uint32_t>(counts.events),
+                                       .coarsestSweeps = coarsestSweeps,
                                        .system = span.system});
                 }
             }

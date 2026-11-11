@@ -767,8 +767,11 @@ namespace bicameral::sim {
             options.galerkinCoarse = setup.galerkin;
             options.solver.coarsestSweeps = setup.coarsestSweeps;
             if (setup.spanObserver != nullptr && setup.residualStop == 0) {
-                (*setup.spanObserver)(
-                    {.system = solved.built.system, .exponent = span.exponent, .start = span.start, .cycles = cycles});
+                (*setup.spanObserver)({.system = solved.built.system,
+                                       .exponent = span.exponent,
+                                       .start = span.start,
+                                       .cycles = cycles,
+                                       .coarsestSweeps = setup.coarsestSweeps});
             }
 
             // 残差で止める形(T-1108): V を 1 回ずつ、残差の計器の最大が閾値以下になるか上限 cycles 回まで(整数の判定 = 決定的)

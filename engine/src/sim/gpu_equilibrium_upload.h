@@ -25,6 +25,8 @@ namespace bicameral::sim {
         uint32_t cyclesPerRecord = 1;
         // 段 0 の段の測りの変種(0 = 本物。1 = 右辺の項を割らない・2 = 段 0 を仕上げず読むだけ。値は壊れる = 段 0 の時間だけを測る。T-1141)
         uint32_t stageVariant = 0;
+        // V の最も粗い段の掃き出しの回数(ImplicitOptions::coarsestSweeps。CPU の解きと同じ値を渡す。T-1337)
+        uint32_t coarsestSweeps = ImplicitOptions{}.coarsestSweeps;
     };
 
     class GpuEquilibriumUpload {

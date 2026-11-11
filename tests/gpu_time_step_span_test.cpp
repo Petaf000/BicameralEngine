@@ -51,6 +51,15 @@ namespace {
     constexpr uint32_t MEASURE_WARMUP = 2;
     constexpr uint32_t MEASURE_ROUNDS = 8;
 
+    // V の最も粗い段の掃き出し(ファイルの記録の値。--coarsest n で上書き = 同じ系で回数ごとの費用を比べる。T-1337)
+    uint32_t coarsestSweeps = 4;
+
+    sim::GpuEquilibriumUploadOptions UploadWith(sim::GpuEquilibriumUploadOptions options = {}) {
+        options.coarsestSweeps = coarsestSweeps;
+
+        return options;
+    }
+
     struct Context {
         ID3D12Device5* device = nullptr;
         gpu::ImmediateQueue* queue = nullptr;
@@ -68,6 +77,7 @@ namespace {
     CpuSolve SolveCpu(const sim::EquilibriumSystem& system, uint32_t cycles) {
         sim::EquilibriumOptions options;
         options.solver.cycles = cycles;
+        options.solver.coarsestSweeps = coarsestSweeps;
         options.faceValues = false;
         CpuSolve result;
         const sim::EquilibriumObserver observer = [&result](const sim::EquilibriumSolveView& view) {
@@ -144,7 +154,7 @@ namespace {
             cyclesList.erase(std::unique(cyclesList.begin(), cyclesList.end()), cyclesList.end());
             for (const uint32_t cycles : cyclesList) {
                 const CpuSolve cpu = SolveCpu(record.system, cycles);
-                auto gpu = sim::GpuEquilibriumUpload::Create(context.device, record.system, cpu.grid);
+                auto gpu = sim::GpuEquilibriumUpload::Create(context.device, record.system, cpu.grid, UploadWith());
                 if (!gpu)
                     return std::unexpected(std::format("{}: {}", NameOf(record, index), gpu.error()));
 
@@ -314,7 +324,7 @@ namespace {
             const size_t index = round < 3 ? 0 : round - 3;
             const test::TimeStepSpanRecord& record = records[index];
             const CpuSolve cpu = SolveCpu(record.system, 1);
-            auto gpu = sim::GpuEquilibriumUpload::Create(context.device, record.system, cpu.grid);
+            auto gpu = sim::GpuEquilibriumUpload::Create(context.device, record.system, cpu.grid, UploadWith());
             if (!gpu)
                 return std::unexpected(gpu.error());
 
@@ -394,7 +404,7 @@ namespace {
                                                      uint32_t cycles,
                                                      const sim::GpuEquilibriumUploadOptions& options = {}) {
         const CpuSolve cpu = SolveCpu(system, 1);
-        auto gpu = sim::GpuEquilibriumUpload::Create(context.device, system, cpu.grid, options);
+        auto gpu = sim::GpuEquilibriumUpload::Create(context.device, system, cpu.grid, UploadWith(options));
         if (!gpu)
             return std::unexpected(gpu.error());
 
@@ -435,7 +445,7 @@ namespace {
                                                                      const sim::ImplicitGrid& grid,
                                                                      uint32_t cyclesPerRecord) {
         auto gpu = sim::GpuEquilibriumUpload::Create(context.device, system, grid,
-                                                     {.cyclesPerRecord = cyclesPerRecord});
+                                                     UploadWith({.cyclesPerRecord = cyclesPerRecord}));
         if (!gpu)
             return std::unexpected(gpu.error());
 
@@ -929,7 +939,7 @@ namespace {
             }
 
             const CpuSolve merged = SolveCpu(group.system, group.cycles);
-            auto gpu = sim::GpuEquilibriumUpload::Create(context.device, group.system, merged.grid);
+            auto gpu = sim::GpuEquilibriumUpload::Create(context.device, group.system, merged.grid, UploadWith());
             if (!gpu)
                 return std::unexpected(gpu.error());
 
@@ -1072,7 +1082,7 @@ namespace {
             for (uint32_t variant = 0; variant < ms.size(); ++variant) {
                 const CpuSolve cpu = SolveCpu(record.system, 1);
                 auto gpu = sim::GpuEquilibriumUpload::Create(context.device, record.system, cpu.grid,
-                                                             {.stageVariant = variant});
+                                                             UploadWith({.stageVariant = variant}));
                 if (!gpu)
                     return std::unexpected(gpu.error());
 
@@ -1101,6 +1111,7 @@ namespace {
         bool stageVariants = false;
         bool continuous = false;
         bool clock = false;
+        uint32_t coarsestOverride = 0;  // 0 = ファイルの記録の値
         std::vector<char*> rest = {arguments[0]};
         for (size_t index = 1; index < arguments.size(); ++index) {
             const std::string_view argument = arguments[index];
@@ -1118,6 +1129,8 @@ namespace {
                 continuous = true;
             else if (argument == "--clock")
                 clock = true;
+            else if (argument == "--coarsest" && index + 1 < arguments.size())
+                coarsestOverride = (uint32_t)std::stoul(arguments[++index]);
             else
                 rest.push_back(arguments[index]);
         }
@@ -1126,7 +1139,7 @@ namespace {
         if (!options || spansPath.empty()) {
             Log(Channel::Gpu, Level::Error,
                 "使い方: gpu_time_step_span_test --spans <ファイル> [--warp] [--queue direct|compute] [--no-gbv] "
-                "[--measure]");
+                "[--measure] [--coarsest n]");
             return 2;
         }
 
@@ -1150,6 +1163,18 @@ namespace {
             return 1;
         }
 
+        // 掃き出しの回数: ファイルの記録(全部の系で同じ)か --coarsest(T-1337)
+        coarsestSweeps = coarsestOverride != 0 ? coarsestOverride : records->front().coarsestSweeps;
+        const bool sameSweeps = std::ranges::all_of(*records, [&](const test::TimeStepSpanRecord& record) {
+            return record.coarsestSweeps == records->front().coarsestSweeps;
+        });
+        if (!sameSweeps) {
+            Log(Channel::Gpu, Level::Error, "gpu_time_step_span_test: FAILED(系ごとに掃き出しの回数が違う)");
+            return 1;
+        }
+
+        Log(Channel::Gpu, Level::Info, "最も粗い段の掃き出し {} 回(ファイルの記録 {} 回)", coarsestSweeps,
+            records->front().coarsestSweeps);
         Context context{.device = device->Get(), .queue = &*queue, .ring = &*ring, .frequency = frequency};
         const bool eventFile = records->front().event != test::TimeStepSpanRecord::NO_EVENT;
         std::expected<void, std::string> ran;
