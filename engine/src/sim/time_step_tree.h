@@ -54,9 +54,10 @@ namespace bicameral::sim {
     // 残差で止める形(residualStop)の時は呼ばない
     struct TimeTreeSpanSolve {
         const EquilibriumSystem& system;
-        int32_t exponent = 0;  // 列の刻みの長さ e(2^e 刻み)
-        uint64_t start = 0;    // 列の歩の初めの刻み
-        uint32_t cycles = 0;   // V の回数(e ごとの表。TimeTreeSetup の cycles・cyclesAtZero・shortExponent)
+        int32_t exponent = 0;         // 列の刻みの長さ e(2^e 刻み)
+        uint64_t start = 0;           // 列の歩の初めの刻み
+        uint32_t cycles = 0;          // V の回数(e ごとの表。TimeTreeSetup の cycles・cyclesAtZero・shortExponent)
+        uint32_t coarsestSweeps = 0;  // V の最も粗い段の掃き出し(TimeTreeSetup::coarsestSweeps。T-1337)
     };
 
     using TimeTreeSpanObserver = std::function<void(const TimeTreeSpanSolve&)>;
@@ -105,8 +106,10 @@ namespace bicameral::sim {
         // (上限は上の回数)
         uint64_t residualStop = 0;
         bool galerkin = false;  // C-0 の粗い段の面の係数を子の和のまま(EquilibriumOptions::galerkinCoarse)
-        // C-0 の V の最も粗い段の掃き出しの回数(ImplicitOptions::coarsestSweeps。e = 0 の系は段 1 つなので V 1 = これだけ。T-1139 の測り)
-        uint32_t coarsestSweeps = 4;
+        // C-0 の V の最も粗い段の掃き出しの回数(ImplicitOptions::coarsestSweeps。e = 0 の系は段 1 つなので V 1 = これだけ)。
+        // 2 回(Q180・T-1337。T-1139 の測りで 4 回との差は伝導 ×10 で最大 0.27 mK = 予算 0.1 K の 0.3 %)。
+        // 毎刻みの解き(ImplicitOptions・EquilibriumOptions の既定 4 回)は変えない
+        uint32_t coarsestSweeps = 2;
         TimeTreeSelect select = TimeTreeSelect::Previous;
         // 同じレベルで 2^これ ブロック角の枠は同じ e に揃える(細かさを同じ物の長さのブロックで比べる。0 = ブロックごと)
         uint32_t groupShift = 0;

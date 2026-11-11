@@ -166,11 +166,12 @@ namespace bicameral::sim {
         // 箱を作り、V の記録の形を前の解きの数から選ぶ(本物の GPU 版と同じ。GpuImplicit::ShapeFrom。値は同じ)
         std::expected<void, std::string> MakeProbeBox(ID3D12Device5* device, gpu::ImmediateQueue& queue,
                                                       gpu::DebugRing& ring, uint32_t side, int32_t exponent,
-                                                      ProbeBox& box) {
+                                                      uint32_t coarsestSweeps, ProbeBox& box) {
             box.system = TimeTreeProbeBox(side, exponent);
             box.cells = box.system.nodes.size();
             box.grid = GridOf(box.system);
-            auto created = GpuEquilibriumUpload::Create(device, box.system, box.grid);
+            auto created = GpuEquilibriumUpload::Create(device, box.system, box.grid,
+                                                        {.coarsestSweeps = coarsestSweeps});
             if (!created)
                 return std::unexpected(created.error());
 
@@ -413,7 +414,7 @@ namespace bicameral::sim {
             {{options.smallSide, 0}, {options.largeSide, 0}, {options.largeSide, options.levelExponent}}};
         for (size_t index = 0; index < PROBE_BOXES; ++index) {
             const auto made = MakeProbeBox(device, queue, ring, shapes[index].first, shapes[index].second,
-                                           boxes[index]);
+                                           options.coarsestSweeps, boxes[index]);
             if (!made)
                 return std::unexpected(made.error());
         }
