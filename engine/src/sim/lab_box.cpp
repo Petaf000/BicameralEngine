@@ -152,7 +152,10 @@ namespace bicameral::sim {
 
                 const RxCell before = nest_detail::LoadCellAt(*nest, slot, local);
                 const RxCell target = lab::LabApplyCommand(table, before, command);
-                nest_detail::StoreCellAt(*nest, slot, local, target);
+
+                // --- 層を使う世界で置いた粒は層(T-1322。ADR-0489 の 3 (B))。ほかは前と同じ書き方 ---
+                if (!nest_detail::StoreGrownGrainCell(*nest, nest->blocks[slot].page, local, RxWidenCell(target)))
+                    nest_detail::StoreCellAt(*nest, slot, local, target);
 
                 // --- 改造の帳簿(T-0712): 消した中身は出・置いた中身は入(lab_box.hlsl の LabCells と同じ)---
                 const int32_t level = nest->blocks[slot].level;

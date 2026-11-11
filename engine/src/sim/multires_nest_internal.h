@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <span>
 #include <vector>
 
@@ -100,6 +101,21 @@ namespace bicameral::sim::nest_detail {
     // 層を使う世界で、セルに舞う粒(粒の物質の 量 > 層)があるか(使わない世界はいつも false。眠る判定)
     [[nodiscard]] bool HasFloatingGrain(const MultiresNest& nest, const reaction::RxWideCell& cell,
                                         std::span<const uint64_t> layers);
+
+    // 層を使う世界で、反応の前のセル before(層 layers)が反応で after になった時の層(T-1322。ADR-0489 の 3 (B)・D-687):
+    // 粒の物質の増えた分は層に足す(層 = 前の層 + 増えた量。舞う粒は崩れ・吹き上げの出来事からだけ)、ほかは 層 = min(前の層, 量)。
+    // 増えた粒が無ければ無し(呼ぶ側は前の付け替えの道で書く = 層を使わない世界・粒の増えないセルはビット単位で今と同じ)
+    [[nodiscard]] std::optional<std::vector<uint64_t>> GrowGrainLayers(const MultiresNest& nest,
+                                                                       const reaction::RxWideCell& before,
+                                                                       std::span<const uint64_t> layers,
+                                                                       const reaction::RxWideCell& after);
+
+    // 層を使う世界で、層を書かずに置くセル cell の層: 粒の物質は全部が層・ほかは 0(T-1322。層を渡さない置き口が使う)
+    [[nodiscard]] MrCellLayers SettledGrainLayers(const MultiresNest& nest, const reaction::RxCell& cell);
+
+    // 層を使う世界で、粒が増えたセルを頁 page のセル index に書く: 増えた分は層へ(GrowGrainLayers。書く前の頁のセルが前のセル)。
+    // 刻みの反応・実験室の命令が書く所が呼ぶ(T-1322)。増えた粒が無い・層を使わない世界なら書かずに false(呼ぶ側が前の道で書く)
+    bool StoreGrownGrainCell(MultiresNest& nest, uint32_t page, uint32_t index, const reaction::RxWideCell& after);
 
     // 一様な枠 slot の 0 でない層を要約に足す(層の無い枠は何も足さない)
     [[nodiscard]] uint64_t HashUniformLayers(uint64_t hash, const MultiresNest& nest, uint32_t slot, uint64_t address);

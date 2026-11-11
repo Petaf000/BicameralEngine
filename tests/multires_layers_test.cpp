@@ -12,6 +12,9 @@
 //   - 一様の枠: 層まで一様な頁は層ごと畳む・一様な子へ写す・同じ層なら一様な親のまま・頁に広げると写す・要約と保存点に入る
 //   - 溢れ: インライン ↔ 溢れの間で物質が動いても層は物質についていく・要約と保存点
 //   - 層を使う世界の眠る: 粒の物質の残り(舞う粒)のある頁は畳まない(気体などほかの物質の残りは数えない)
+// 層を使う世界の反応で生まれた粒・層を渡さずに置いた粒(T-1322。ADR-0489 の 3 (B)):
+//   - 反応の生成物を粒の印にした世界で、生まれた粒は層に積もり、舞う粒は増えない。セルの値は層を使わない世界と毎刻みビット一致
+//   - 層を渡さない根の置き口は、層を使う世界では粒を全部層にする(頁の根・一様な根)。使わない世界は層を持たない
 // 層つきの根の置き口(T-1236):
 //   - 層が全部 0(か空)の置き方は層の無い置き方とビット単位で同じ(要約・頁に層の並びを持たない。インライン・溢れの世界)
 //   - 層まで一様なら一様の枠の層・セルか層が違えば頁の層。層は読め、要約(HashWholeNest)と保存点に入る
@@ -670,6 +673,127 @@ namespace {
         Expect(!foldsWith(0), "層を使う世界: 層の無い粒は舞う粒(畳まない)");
     }
 
+    // --- 層を使う世界の反応で生まれた粒・層を渡さずに置いた粒(T-1322。ADR-0489 の 3 (B)・D-687)---
+
+    // 根のセルごと・粒の物質ごとの舞う粒(量 − 層。層の欄に入れて返す)
+    std::vector<std::vector<LayerEntry>> RootFloatingGrain(const MultiresNest& nest) {
+        std::vector<std::vector<LayerEntry>> result(MR_BLOCK_CELLS);
+        for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+            const RxCell cell = LoadNestCell(nest, test::MULTIRES_ROOT_SLOT, index);
+            const MrCellLayers layers = LoadNestCellLayers(nest, test::MULTIRES_ROOT_SLOT, index);
+            for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+                if (nest.cellLayers.grain[cell.species[i]] != 0)
+                    result[index].push_back({.species = cell.species[i], .layer = cell.amounts[i] - layers.amounts[i]});
+            }
+        }
+
+        return result;
+    }
+
+    // entries の中で previous より値の増えた組の数
+    uint64_t CountRisen(const std::vector<std::vector<LayerEntry>>& previous,
+                        const std::vector<std::vector<LayerEntry>>& entries) {
+        uint64_t risen = 0;
+        for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+            for (const LayerEntry& entry : entries[index])
+                risen += entry.layer > PreviousLayer(previous[index], entry.species) ? 1u : 0u;
+        }
+
+        return risen;
+    }
+
+    // 燃える場面(層を使う世界と使わない世界)を刻む: 反応の生成物を粒の印にした層を使う世界では、生まれた粒は層に積もり、
+    // 舞う粒は増えない(舞う粒は崩れ・吹き上げの出来事からだけ)。セルの値は使わない世界と毎刻みビット一致
+    void TestReactionBornGrainSettles(const BakedReactionTable& table) {
+        MultiresNest plain = test::MakeMultiresNestForTest(table);
+        MultiresNest layered = test::MakeMultiresNestForTest(table);
+
+        // --- 生成物を粒の印に(物質の表は変えない = 反応は同じ)。置いた時の生成物は層を使う世界にする前に置いた = 舞う粒 ---
+        EnableCellLayers(layered, table);
+        for (const RxRule& rule : table.rules) {
+            for (uint32_t k = 0; k < rule.productCount; ++k)
+                layered.cellLayers.grain[rule.products[k]] = 1;
+        }
+
+        int mismatchedTicks = 0;
+        int misfitTicks = 0;
+        uint64_t risenFloating = 0;
+        uint64_t grownLayers = 0;
+        std::vector<std::vector<LayerEntry>> floating = RootFloatingGrain(layered);
+        std::vector<std::vector<LayerEntry>> layers = RootLayers(layered);
+        const auto sameCell = [](const RxCell& a, const RxCell& b) {
+            return RxSameCell(a, b);
+        };
+        for (uint64_t tick = 0; tick < test::MULTIRES_END_TICK; ++tick) {
+            StepNest(plain, table, test::MULTIRES_TEST_SEED, tick);
+            StepNest(layered, table, test::MULTIRES_TEST_SEED, tick);
+            mismatchedTicks += std::ranges::equal(DenseCellImage(plain), DenseCellImage(layered), sameCell) ? 0 : 1;
+            misfitTicks += CountLayerMisfits(layered) == 0 ? 0 : 1;
+
+            const std::vector<std::vector<LayerEntry>> floatingAfter = RootFloatingGrain(layered);
+            const std::vector<std::vector<LayerEntry>> layersAfter = RootLayers(layered);
+            risenFloating += CountRisen(floating, floatingAfter);
+            grownLayers += CountRisen(layers, layersAfter);
+            floating = floatingAfter;
+            layers = layersAfter;
+        }
+
+        Expect(mismatchedTicks == 0, "反応で生まれた粒: 層を使う世界と使わない世界でセルの値が毎刻みビット一致");
+        Expect(misfitTicks == 0, "反応で生まれた粒: 毎刻み 0 ≤ 層 ≤ 量");
+        Expect(risenFloating == 0, "反応で生まれた粒: 舞う粒は増えない(増えた粒は層へ)");
+        Expect(grownLayers > 0, "反応で生まれた粒: 生まれた粒が層に積もる(試験が空でない)");
+        Expect(!nest_detail::BlockKeepsLayers(plain, test::MULTIRES_ROOT_SLOT),
+               "反応で生まれた粒: 層を使わない世界は層を持たない");
+        Log(Channel::Sim, Level::Info, "反応で生まれた粒: 層が増えた成分 {}", grownLayers);
+    }
+
+    // 層を使う世界で層を渡さずに置いた根: 粒は全部が層・ほかの物質は 0(頁の根・一様な根)。層を使わない世界は層を持たない
+    void TestPlaceSettledGrain() {
+        const BakedReactionTable table = MakeInertTable(1);
+        const uint32_t s01 = table.SpeciesId("s01");
+        const uint32_t s02 = table.SpeciesId("s02");
+        const auto cellOf = [&](uint32_t index) {
+            const std::vector<SpeciesAmount> amounts = {{.species = s01, .amount = 1000000 + (uint64_t{index} * 37)},
+                                                        {.species = s02, .amount = 2000000}};
+            return MakeReactionCell(table, amounts, ROOM_MILLIKELVIN);
+        };
+        const auto amountOf = [](const RxCell& cell, uint32_t species) {
+            for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+                if (cell.species[i] == species)
+                    return cell.amounts[i];
+            }
+
+            return uint64_t{0};
+        };
+
+        for (const bool uniform : {false, true}) {
+            const std::string_view name = uniform ? "一様な根" : "頁の根";
+            std::vector<RxCell> cells;
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
+                cells.push_back(cellOf(uniform ? 0 : index));
+
+            MultiresNest nest = MakeMultiresNest(test::MakeMultiresCapacity(table, 4, 0, 4));
+            EnableCellLayers(nest, table);
+            const uint32_t root = PlaceRootBlock(nest, 0, 0, 0, cells);
+            bool settled = true;
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                const RxCell cell = LoadNestCell(nest, root, index);
+                const MrCellLayers layers = LoadNestCellLayers(nest, root, index);
+                settled = settled && LayerOf(cell, layers, s01) == amountOf(cell, s01) && amountOf(cell, s01) != 0 &&
+                          LayerOf(cell, layers, s02) == 0;
+            }
+
+            Expect(settled, std::format("層を渡さない置き口({}): 層を使う世界では粒は全部が層", name));
+            Expect(MrIsUniform(nest.blocks[root]) == uniform,
+                   std::format("層を渡さない置き口({}): 一様か頁かは前と同じ", name));
+
+            MultiresNest off = MakeMultiresNest(test::MakeMultiresCapacity(table, 4, 0, 4));
+            const uint32_t offRoot = PlaceRootBlock(off, 0, 0, 0, cells);
+            Expect(!nest_detail::BlockKeepsLayers(off, offRoot),
+                   std::format("層を渡さない置き口({}): 層を使わない世界は層を持たない", name));
+        }
+    }
+
     // --- 層つきの根の置き口(T-1236)---
 
     struct PlacedRoot {
@@ -859,6 +983,8 @@ namespace {
         TestUniformLayers(inert, true);
         TestOverflowRebind(inert);
         TestFloatingGrainStaysAwake();
+        TestReactionBornGrainSettles(*table);
+        TestPlaceSettledGrain();
         TestUniformLayerStore();
         for (const bool wide : {false, true}) {
             TestPlaceZeroLayers(*table, wide);

@@ -501,13 +501,15 @@ namespace bicameral::sim {
                     result.wakeTick = std::min(result.wakeTick, step.wakeTick);
                     tally = MrAddLimits(tally, step.limits);
                     wideChanged = !RxSameCell(wide, step.cell);
-                    StoreWidePageCell(nest, block.page, index, step.cell);
+                    if (!nest_detail::StoreGrownGrainCell(nest, block.page, index, step.cell))
+                        StoreWidePageCell(nest, block.page, index, step.cell);
                     cell = LoadCellAt(nest, slot, index);
                 } else if (react) {
                     const RxWaitStep step = MrStepCellWait(view, cell, worldSeed, tick, block, index);
                     result.wakeTick = std::min(result.wakeTick, step.wakeTick);
                     cell = step.cell;
-                    StoreCellAt(nest, slot, index, cell);
+                    if (!nest_detail::StoreGrownGrainCell(nest, block.page, index, RxWidenCell(cell)))
+                        StoreCellAt(nest, slot, index, cell);
                     tally = MrAddLimits(tally, step.limits);
                 }
 
