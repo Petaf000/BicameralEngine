@@ -9,6 +9,8 @@
 //   5. 陰の伝導の系(T-1230 段 2 ②): 混ざったセルの無い世界は欄の有無でビット単位で同じ(根だけ・細かくした木)/ 混ざったセルは系の節 2 つ
 //      (熱容量と温度が部分の値)・面が部分の組ごと(PlPartSideOf・PlPairOverlapsOf で手で数えた係数)・層の上の面 / 1 刻みの変化が、系の流れ
 //      (SolveImplicitFlows)を節ごとに足した値とビット単位で同じ / 保存量・部分の熱・層が先に寄る(120 刻み。根だけ・細かくした木 = 違うレベルの面と境のセル)
+//   6. 陰の系の安全網(T-1230 段 2 ③・★8): 部分の組の面・層の上の面は、陽に戻す流れとして陽の部分の道の値(TxPartPairFlow・TxPartInnerFlow =
+//      上限を重なりで縮めた値)を持つ。掃き出し 0 回の解き方で安全網を起こし、陽に戻った面の流れがその値とビット単位で同じ
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -16,6 +18,7 @@
 #include <vector>
 
 #include "common/implicit_conduction.hlsli"
+#include "common/transport_conduction_parts.hlsli"
 #include "multires_test_scene.h"
 #include "phase_layer_scene.h"
 #include "sim/implicit_conduction.h"
@@ -329,14 +332,26 @@ namespace {
         return ImWideShiftLeft(ImWide(conductance * HC_LIMIT_PER_CONDUCTANCE), 0);
     }
 
-    bool HasFace(const ImplicitGrid& grid, uint32_t a, uint32_t b, const fx::FxU128& coefficient) {
+    const ImplicitFace* FindFace(const ImplicitGrid& grid, uint32_t a, uint32_t b, const fx::FxU128& coefficient) {
         for (const ImplicitFace& face : grid.faces) {
             const bool ends = (face.fine == a && face.coarse == b) || (face.fine == b && face.coarse == a);
             if (ends && face.gap == 0 && face.coefficient.hi == coefficient.hi && face.coefficient.lo == coefficient.lo)
-                return true;
+                return &face;
         }
 
-        return false;
+        return nullptr;
+    }
+
+    bool HasFace(const ImplicitGrid& grid, uint32_t a, uint32_t b, const fx::FxU128& coefficient) {
+        return FindFace(grid, a, b, coefficient) != nullptr;
+    }
+
+    // 面 face の陽に戻す流れが、a → b の流れ flowAToB(陽の部分の道の値)と同じか(面の向きが b → a なら符号を返す)
+    bool SameExplicitFlow(const ImplicitFace* face, uint32_t a, int64_t flowAToB) {
+        if (face == nullptr || !face->explicitFlowGiven)
+            return false;
+
+        return face->explicitFlow == (face->fine == a ? flowAToB : -flowAToB);
     }
 
     // 根のセル index の節(混ざったセルは層・気体の 2 つ)と面を、部分の面の式で手で数えた値と比べる。数えた面の数を返す
@@ -393,8 +408,15 @@ namespace {
                 if (conductance == 0)
                     return;
 
-                EXPECT(
-                    HasFace(grid, nodeOf(nodes, slotA.part), nodeOf(otherNodes, slotB.part), Coefficient(conductance)));
+                const uint32_t nodeA = nodeOf(nodes, slotA.part);
+                const ImplicitFace* found = FindFace(grid, nodeA, nodeOf(otherNodes, slotB.part),
+                                                     Coefficient(conductance));
+                EXPECT(found != nullptr);
+                if (!mixed && otherNodes.size() == 1)
+                    EXPECT(found != nullptr && !found->explicitFlowGiven);
+                else
+                    EXPECT(SameExplicitFlow(found, nodeA, TxPartPairFlow(slotA, slotB, overlap, 0, 0, 0)));
+
                 ++count;
             };
             pair(a.lower, b.lower, overlaps.lowerLower);
@@ -407,7 +429,9 @@ namespace {
         if (mixed) {
             const PlParts parts = PlPartsOf(table.View(), self, selfEc);
             const uint32_t series = PlClampU32(PlInnerConductance(parts, PlLayerOf(table.View(), self)));
-            EXPECT(HasFace(grid, nodes[0], nodes[1], Coefficient(series)));
+            const ImplicitFace* found = FindFace(grid, nodes[0], nodes[1], Coefficient(series));
+            EXPECT(found != nullptr);
+            EXPECT(SameExplicitFlow(found, nodes[0], TxPartInnerFlow(lateral.lower, lateral.upper, series, 0)));
             ++count;
         }
 
@@ -442,6 +466,45 @@ namespace {
         return expected;
     }
 
+    // 6 安全網: 根のレベル 0(0.5 m)の系は陽でも安定な所なので、写しの面の係数だけを 2^20 倍にし、掃き出し 0 回の赤黒(近似解 = 刻みの初めの温度・
+    // 流れ = 係数 × 初めの温度差)で範囲の外に出して安全網を起こす。範囲を広げて安全網を起こさない同じ解き方と比べ、流れが違う面(陽に戻った面)は、
+    // 部分の組の面なら面に渡した陽の流れそのもの(陽に戻す時に読むのが渡した値だけか)
+    void TestImplicitSafetyNet(const ImplicitGrid& original) {
+        ImplicitGrid grid = original;
+        for (ImplicitFace& face : grid.faces)
+            face.coefficient = ImWideShiftLeft(face.coefficient, 20);
+
+        ImplicitOptions solve;
+        solve.method = ImplicitMethod::RedBlack;
+        solve.sweeps = 0;
+        std::vector<int64_t> flows;
+        std::vector<int64_t> edgeFlows;
+        const ImplicitCost cost = SolveImplicitFlows(grid, solve, flows, edgeFlows);
+
+        ImplicitOptions open = solve;
+        open.limitSlackMillikelvin = 1000000000;
+        std::vector<int64_t> openFlows;
+        std::vector<int64_t> openEdgeFlows;
+        const ImplicitCost openCost = SolveImplicitFlows(grid, open, openFlows, openEdgeFlows);
+        EXPECT(cost.limitedCells != 0);
+        EXPECT(openCost.limitedCells == 0);
+
+        size_t givenBack = 0;
+        for (size_t f = 0; f < grid.faces.size(); ++f) {
+            const ImplicitFace& face = grid.faces[f];
+            if (flows[f] == openFlows[f] || !face.explicitFlowGiven)
+                continue;
+
+            EXPECT(flows[f] == face.explicitFlow);
+            ++givenBack;
+        }
+
+        EXPECT(givenBack != 0);
+        std::printf("  安全網: 印のセル %u(広げた範囲で %u)・超えた最大 %lld mK・陽に戻った部分の組の面 %zu\n",
+                    cost.limitedCells, openCost.limitedCells, static_cast<long long>(cost.worstExcessMillikelvin),
+                    givenBack);
+    }
+
     void TestImplicitSystem(const BakedReactionTable& table) {
         World world = MakeWorld(table, true, 2);
         const World before = world;
@@ -472,6 +535,7 @@ namespace {
         }
 
         EXPECT(Ec(world, world.root, even) != Ec(before, before.root, even));
+        TestImplicitSafetyNet(grid);
     }
 
     void TestImplicitRun(const BakedReactionTable& table, bool refine) {

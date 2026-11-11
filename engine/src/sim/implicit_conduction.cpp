@@ -489,11 +489,17 @@ namespace bicameral::sim {
             return ImAddClamped(a, b);
         }
 
-        // 陽解法の面の係数(細かい側の単位)= min(係数, 細かい側の C/8, 粗い側の C/8 × 2^d)(ADR-0017)
+        // 陽解法の面の係数(細かい側の単位)= min(係数, 細かい側の C/8, 粗い側の C/8 × 2^d)(ADR-0017)。
+        // 呼ぶ側が面の陽の流れを渡した面(explicitFlowGiven。部分の組の面)はその値(T-1230 段 2 ③)
         std::vector<int64_t> ExplicitFlows(const ImplicitGrid& grid, const std::vector<int64_t>& start) {
             std::vector<int64_t> flows(grid.faces.size());
             for (size_t f = 0; f < grid.faces.size(); ++f) {
                 const ImplicitFace& face = grid.faces[f];
+                if (face.explicitFlowGiven) {
+                    flows[f] = face.explicitFlow;
+                    continue;
+                }
+
                 const FxU128 coefficient = ImExplicitCoefficient(face.coefficient, grid.cells[face.fine].heatCapacity,
                                                                  grid.cells[face.coarse].heatCapacity, face.gap);
                 flows[f] = FaceFlow(coefficient, start[face.fine] - start[face.coarse]);

@@ -34,6 +34,7 @@
 //     係数 = min(PlSlotConductance) × HC_LIMIT_PER_CONDUCTANCE × 4^kf = 陽の TxPartFaceFlow と同じ値・頭打ちなし)。違うレベルの面は粗い側の
 //     層の高さを細かい面の段へ写す(TxPartSideOnRow)。層の上の面(層 ⇄ 気体)は未知数の混ざったセルだけ(境のセルの層の上の面は陽の段が流す)。
 //     流れの和はセルのエネルギーへ(今の当てる段)、層の節の分は AddCondensedDelta で Ec へ(粗い側は送った分の整数部だけ。陽と同じ)。
+//     安全網で陽に戻す流れは、部分の組の面・層の上の面とも陽の部分の道の値を面に渡す(ImplicitFace::explicitFlow。上限を重なりで縮める。T-1230 段 2 ③)。
 //     多重格子の段(BuildImplicitGrid)は変えない: 同じ座標の 2 節は最も細かい段の縮約で同じ親へ(熱容量の和)。相の層の欄が無い世界・混ざらないセルは今の 1 節のまま(ビット単位で同じ)
 // 浮動小数点は使わない(engine/src/sim は検査の対象)。
 #include <algorithm>
@@ -244,11 +245,15 @@ namespace bicameral::sim {
                 if (conductance == 0)
                     return;
 
+                // 安全網で戻す流れ = 陽の部分の道の組の値(上限を重なりで縮める。開いた世界の端 AddPartEdges と同じ置き方)
                 const auto value = static_cast<uint32_t>(conductance);
-                system.faces.push_back({.fine = NodeForPart(system, id, selfSlot.part),
-                                        .coarse = NodeForPart(system, other, otherSlot.part),
-                                        .gap = gap,
-                                        .coefficient = FaceCoefficient(value, value, block.level)});
+                system.faces.push_back(
+                    {.fine = NodeForPart(system, id, selfSlot.part),
+                     .coarse = NodeForPart(system, other, otherSlot.part),
+                     .gap = gap,
+                     .coefficient = FaceCoefficient(value, value, block.level),
+                     .explicitFlow = TxPartPairFlow(selfSlot, otherSlot, overlap, block.level, gap, 0),
+                     .explicitFlowGiven = true});
             };
             pair(self.lower, neighbor.lower, overlaps.lowerLower);
             pair(self.upper, neighbor.upper, overlaps.upperUpper);
@@ -327,10 +332,15 @@ namespace bicameral::sim {
                 if (series == 0)
                     continue;
 
-                system.faces.push_back({.fine = id,
-                                        .coarse = id + 1,
-                                        .gap = 0,
-                                        .coefficient = FaceCoefficient(series, series, system.cells[id].level)});
+                const int32_t level = system.cells[id].level;
+                system.faces.push_back(
+                    {.fine = id,
+                     .coarse = id + 1,
+                     .gap = 0,
+                     .coefficient = FaceCoefficient(series, series, level),
+                     .explicitFlow = TxPartInnerFlow(cellParts.lateral.lower, cellParts.lateral.upper,
+                                                     cellParts.seriesConductance, level),
+                     .explicitFlowGiven = true});
             }
 
             return system;

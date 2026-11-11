@@ -299,7 +299,7 @@ uint2 ScanGroupSums(uint32_t count) {
 
 // 面の一覧の 1 つ(面の番号 × 2 + 粗い側なら 1)から、隣のセルと自分の単位の係数
 void ListEntry(uint32_t value, out uint32_t neighbor, out FxU128 coefficient) {
-    const ImGpuFace face = g_system.Load<ImGpuFace>(g_facesByte + (value >> 1) * 32);
+    const ImGpuFace face = g_system.Load<ImGpuFace>(g_facesByte + (value >> 1) * IM_GPU_FACE_BYTES);
     const FxU128 fineCoefficient = {face.coefficientHigh, face.coefficientLow};
     const bool coarseSide = (value & 1u) != 0;
     neighbor = coarseSide ? face.fine : face.coarse;

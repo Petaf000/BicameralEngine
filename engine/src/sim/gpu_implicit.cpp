@@ -454,10 +454,11 @@ namespace bicameral::sim {
             const ImplicitFace& face = grid.faces[f];
             faces[f] = {.coefficientHigh = face.coefficient.hi,
                         .coefficientLow = face.coefficient.lo,
+                        .explicitFlow = face.explicitFlowGiven ? face.explicitFlow : 0,
                         .fine = face.fine,
                         .coarse = face.coarse,
                         .gap = face.gap,
-                        .coarseFraction = grid.cells[face.coarse].coarseFraction ? 1u : 0u};
+                        .flags = ImFaceFlags(grid.cells[face.coarse].coarseFraction, face.explicitFlowGiven)};
         }
 
         images[BufferCells] = ToBytes(MakeCellImage(grid, faceStarts));

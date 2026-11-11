@@ -1,6 +1,6 @@
 # T-1230 層のエネルギー Ec の欄を世界の木へ・伝導の面を部分ごとに(T-1211 から分けた)
 
-- Status: Doing(2026-11-05 wt6 4 回目: 段 2 ② 木の陰の系で混ざったセルを 2 節に が CPU で入った〔ブランチ t-1230-implicit-parts〕。① は ready の印〔t-1230-part-faces〕。③ GPU は続き。2026-11-05 wt6 3 回目: 段 2 ① 陽の世界の当てる段へのつなぎが CPU で入った〔ブランチ t-1230-part-faces〕。木の陰の系〔②〕と GPU〔③〕は続き。2026-11-05 wt6 2 回目: 段 2 ② の系の形と費用の測りが入った〔ブランチ t-1230-implicit-two-node〕。打ち切り条件に当たらない。世界の当てる段〔①〕と木の陰の系へのつなぎは続き。2026-11-05 wt6: 段 2 の 1 回目 = 面の式〔部分つきの片側・重なりで組む面の式〕と陰の領域の測りが入った〔ブランチ t-1230-conduction-face〕。世界の当てる段へのつなぎと陰の系は続き。2026-10-30 wt6: 段 1 = 欄 + T-1231 の CPU の配りが入った。伝導の面は段 2。前: 2026-10-29 wt4 が T-1211 から分けた。**ADR-0500 改訂〔2026-10-29 本体 16 回目〕で形が決まった: T-1252 段 1 の後**)
+- Status: Doing(2026-11-12 wt6: ★8 安全網の陽の流れを面ごとに渡す形が CPU・GPU の構造体に入った〔ブランチ t-1230-implicit-gpu〕。③ GPU の系の 2 節と陽の部分の道は続き。② は ready の印〔t-1230-implicit-parts〕。2026-11-05 wt6 4 回目: 段 2 ② 木の陰の系で混ざったセルを 2 節に が CPU で入った〔ブランチ t-1230-implicit-parts〕。① は ready の印〔t-1230-part-faces〕。③ GPU は続き。2026-11-05 wt6 3 回目: 段 2 ① 陽の世界の当てる段へのつなぎが CPU で入った〔ブランチ t-1230-part-faces〕。木の陰の系〔②〕と GPU〔③〕は続き。2026-11-05 wt6 2 回目: 段 2 ② の系の形と費用の測りが入った〔ブランチ t-1230-implicit-two-node〕。打ち切り条件に当たらない。世界の当てる段〔①〕と木の陰の系へのつなぎは続き。2026-11-05 wt6: 段 2 の 1 回目 = 面の式〔部分つきの片側・重なりで組む面の式〕と陰の領域の測りが入った〔ブランチ t-1230-conduction-face〕。世界の当てる段へのつなぎと陰の系は続き。2026-10-30 wt6: 段 1 = 欄 + T-1231 の CPU の配りが入った。伝導の面は段 2。前: 2026-10-29 wt4 が T-1211 から分けた。**ADR-0500 改訂〔2026-10-29 本体 16 回目〕で形が決まった: T-1252 段 1 の後**)
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 2 回分
@@ -53,6 +53,8 @@
 - 2026-11-05 wt6(3 回目。ブランチ t-1230-part-faces。司令塔が世界の口 2 つを一旦の決定に): ① 陽の世界の当てる段へつないだ(CPU)。
   伝導の種類だけの当てる段 TxFlowConductionCell(shaders/common/transport_conduction_parts.hlsli)・見立ての部分 CV_VIEW_PHASE_LAYER(CellViews::Parts)・層の部分の変化 AddCondensed(nest.phaseLayer.conductionDeltas → Ec の欄)。
   違うレベルの面の層の高さの写しは clamp(h × 2^d − j, 0, 1)(仮)。21 §3 との照らしは ADR-0512 の「段 2 ① 世界の当てる段の口」。試験 phase_layer_world。
+- 2026-11-05 wt6(4 回目。ブランチ t-1230-implicit-parts): ② 木の陰の系で混ざったセルを 2 節に(CPU)。
+- 2026-11-12 wt6(5 回目): ② を rebase main(94b20ace)・time_step_tree と time_step_choose_dump 系 7/7 合格 → ready の印。★8 安全網の陽の流れを面ごとに渡す形(ImplicitFace・ImGpuFace。ブランチ t-1230-implicit-gpu)。③ は続き。
 
 ## 引き継ぎメモ(2026-10-30 wt6。ブランチ t-1230-ec-field。司令塔の会話の入れ物の再起動で区切った)
 - **入った(段 1 = 欄 + T-1231 の CPU)**: 配り手の表に SF_OWNER_PHASE_LAYER(一般の形 = 子は親と同じ数・粗く = 和 ÷ 8 の床)。EnablePhaseLayerEnergy で欄「phase_layer_energy」(セル・I64・真実・ハッシュ・保存量でない)と物質の表。
@@ -174,3 +176,20 @@
 - **未実行**: time_step_tree(25 分前後)・time_step_choose_dump 系(② は欄の無い世界の道を変えていないので同じはずだが未確認)。② の ready の印は書いていない(rebase main と上の 2 つの後)。
 - **multires_implicit_tree の 158 秒の結論**: ほかのジョブとの重なり。単独で 21.4 秒(① の後)・20.6 秒(② の後)。main でも 20.6 / 232.6 秒の回がある(11/04)。不具合ではない。
 - **次の一手**: t-1230-implicit-parts を rebase(① がマージされた main へ)→ time_step_tree → ready の印 → ③ GPU(上の節の「③ GPU(次)」。① の陽の部分の道の GPU も未)。安全網の面ごとの陽の流れの口は司令塔の判断待ち(上の「土台に足りないもの」)。
+
+## ★8 安全網の陽の流れを面ごとに渡す(2026-11-12 wt6 5 回目。ブランチ t-1230-implicit-gpu。ユーザーの答え = (a) 直す)
+- **土台の共通部分の変更(司令塔が docs/design/21 §3 と照らす)**: 陰の系の面 `ImplicitFace` に `explicitFlow`・`explicitFlowGiven`(ImplicitEdge::explicitFlow と同じ形)・
+  GPU の `ImGpuFace` を 32 → 40 バイト(`int64_t explicitFlow` を足し `coarseFraction` を印の語 `flags` へ: IM_FACE_COARSE_FRACTION・IM_FACE_EXPLICIT_FLOW・IM_GPU_FACE_BYTES・ImFaceFlags)。
+  CPU の ExplicitFlows・GPU の ImFlows は印のある面だけ渡された値を使う。**印の無い面(圧力・支え・case_b・物の箱・混ざらない伝導)は今の道のまま**。21 §3 の照らしは ADR-0512 の新しい節。
+- 使い手: multires_implicit_conduction.cpp の部分の組の面 = `TxPartPairFlow(自分, 相手, 重なり, kf, d, 0)`・層の上の面 = `TxPartInnerFlow`(陽の部分の道の値 = 上限を重なりで縮める)。
+- 試験: phase_layer_world に 6(系の面の陽の流れが手で数えた TxPartPairFlow・TxPartInnerFlow とビット単位で同じ / 写しの面の係数だけ 2^20 倍・掃き出し 0 回の赤黒で安全網を起こし、
+  範囲を広げた同じ解き方と流れが違う面〔陽に戻った面〕のうち部分の組の面は渡した値そのもの)。運転: 根のレベル 0 の系は陽でも安定な所で、直しを強くした V サイクル(× 8〜512)・掃き出し 0 回だけでは安全網が起きなかった(印 0・超えた最大 0 mK)。
+- 通した試験(release 警告 0): CPU = phase_layer・phase_layer_implicit・phase_layer_world・gas_projection・gas_projection_plates・equilibrium(861 秒)・equilibrium_block・case_b_r2・multires_implicit・multires_implicit_tree・float_check 系 5・dxil_alloca_check /
+  GPU = gpu_multires_implicit・gpu_multires_implicit_tree・gpu_multires_implicit_build・gpu_multires_implicit_build_warp・gpu_multires_implicit_conduction・gpu_equilibrium_block・gpu_gas_projection(7/7)。archmap --check OK。
+- GPU の木の系を作る段(implicit_build.hlsl)はまだ混ざったセルを作らない(印を付けない・explicitFlow = 0)= ③ で付ける。費用: 系のバッファの面の欄 1.25 倍。
+
+## 引き継ぎメモ(2026-11-12 wt6 5 回目。2 時間の区切り)
+- **③ GPU の残り(この順)**: 1 陽の部分の道の GPU(shaders/sim/multires_conduct.hlsli の GpuConductionWorld に Parts・AddCondensed の 2 つの口・見立ての部分 CV_VIEW_PHASE_LAYER の写し・Ec の変化の列 → 欄へ集めて書く段)/
+  2 陰の系の GPU(implicit_build.hlsl: 未知数の番号を節の数の接頭和に・面の候補を「u × 6 + 面」から組 4 つと層の上の面へ〔CPU の面の順と同じ〕・部分の組の面に IM_FACE_EXPLICIT_FLOW と TxPartPairFlow の値・
+  BuildScanBlocks の予算の和で混ざったセルを 2 と数える・BuildApply が層の節の分を Ec の変化の列へ)/ 3 試験: gpu_multires_implicit_build に混ざったセルの場面(CPU の系とビット一致)・gpu_multires_implicit_conduction に相の層の欄の世界(HW/WARP)。
+- 量の見込み: チャット 2〜3 回(未確認)。① の陽の道の GPU が先(陰の境のセルの層の上の面は陽が流すため)。

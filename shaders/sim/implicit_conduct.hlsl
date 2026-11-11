@@ -700,7 +700,7 @@ bool SkipChecked(uint32_t cell) {
 
 // --- 面の流れと安全網 ---
 
-// 近似解からの流れと、刻みの初めの温度からの陽解法の流れ(安全網が使う)
+// 近似解からの流れと、刻みの初めの温度からの陽解法の流れ(安全網が使う。呼ぶ側が渡した面はその値 = CPU の ExplicitFlows)
 [numthreads(IM_THREADS, 1, 1)] void ImFlows(uint32_t index : SV_DispatchThreadID) {
     if (index >= FaceCount())
         return;
@@ -708,6 +708,10 @@ bool SkipChecked(uint32_t cell) {
     const ImGpuFace face = g_faces[index];
     const FxU128 coefficient = FaceCoefficient(face);
     g_work[Flow(index)] = ImFaceFlow(coefficient, g_work[ValueA(face.fine)] - g_work[ValueA(face.coarse)]);
+    if ((face.flags & IM_FACE_EXPLICIT_FLOW) != 0) {
+        g_work[ExplicitFlow(index)] = face.explicitFlow;
+        return;
+    }
 
     const FxU128 limited = ImExplicitCoefficient(coefficient, g_cells[face.fine].heatCapacity,
                                                  g_cells[face.coarse].heatCapacity, face.gap);
@@ -798,7 +802,7 @@ int64_t EnergyAfter(uint32_t cell) {
             continue;
         }
 
-        const MrCrossTransfer transfer = MrSplitCrossFlow(flow, gap, face.coarseFraction != 0);
+        const MrCrossTransfer transfer = MrSplitCrossFlow(flow, gap, (face.flags & IM_FACE_COARSE_FRACTION) != 0);
         if (coarseSide)
             sum = MrAddEnergyDelta(sum, transfer.coarseDelta);
         else
