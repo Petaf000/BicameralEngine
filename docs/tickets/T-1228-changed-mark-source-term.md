@@ -21,7 +21,7 @@
       **確かめ**: 印を全部「変わった」にした時と刻みごとのハッシュがビット一致(gpu_radiation_cost に場面)。費用を perf.md に(Grid 83 + Sources 固定 72 µs がどれだけ減るか)
   - [x] RadiationGrid(2026-11-05 wt4・ブランチ t-1228-skip-grid): 前の刻みの写しの後で変わった印のブロックだけ写す。CPU の約束 `sim::ProbeRadiationBlockStale`・
         CPU の確かめ `ProbeReference::CheckCascadeGridMarks`(probe_radiation の 8)・GPU は `ProbeSimOptions::radiationCopyAll` と比べる(gpu_radiation_cost)
-  - [ ] RcSources の放つセルの一覧(下の「段 1 の残り」)
+  - [x] RcSources の放つセルの一覧(2026-11-12 wt4・ブランチ t-1228-rc-sources。下の「RcSources の一覧の作り」。費用は perf.md 2026-11-12)
 - [x] **受けのあった葉を印の相手として数える(2026-10-29 wt4・T-1227 と同じブランチ)**: `sim::CascadeTouchedSlots`(吸った・放ったが 0 でない升目の葉の枠。昇順・落とさない)。
       cascade_tree_grid の 6 で升目から数え直した枠と一致(0.5 m・1 m の根・混ざった木)。印(busyTick)を書くのは T-1252 の 1 つの関数なので、ここは数えるだけ
 - [ ] **段 2(T-1252 段 2 の後・T-1155 の残りと一緒)**: 多重解像度の世界で源の項を当てる段へ(4-1)。受けのあった葉が起きる・CPU と GPU のビット一致・保存の検査
@@ -120,3 +120,5 @@
   **未実行**: gpu_probe_sim_tables・gpu_world_copy・gpu_play_metric・gpu_cascade_light・gpu_cascade_tree_grid・archmap --check・費用の測り(未測定)。
   **次の一手**: rebase main(t-1228-skip-grid は main 01e261d0 に入った)→ release → 上の残りの試験 → `run -Preset release -Exe gpu_radiation_cost_test -- --measure --ticks 240`
   (同じ回の「RcSources は全部のセル」と比べる。Sources 72〜81 µs/側・Apply の 0 戻しの増え・全部写す刻みの Grid が 76〜78 から重くならないか)を main と交互に → perf.md → 印 runner/ready/。
+- 2026-11-12(wt4 8 本目): t-1228-rc-sources(rebase main 94b20ace 済み・先頭 68460131 + この記録)。release 警告 0・cascade_light・cascade_tree_grid・gpu_cascade_light(_warp)・gpu_cascade_tree_grid(_warp)・gpu_probe_sim_tables・gpu_world_copy・gpu_play_metric・archmap --check 合格(前の回の probe_radiation・gpu_probe_sim・gpu_probe_rewind・gpu_radiation_cost に足して)。
+  測り(perf.md 2026-11-12。同じ回の全部のセル・main と交互に): 2 側の世界の +Sources 41〜88 → 12〜15 µs/刻み・Apply は増えない・1 刻み 10〜60 µs 軽い。全部写す刻みの Grid は main 73〜76 → 76〜85 µs(+2〜6。写しの段が一覧の bit も直す分と見る。0 K の空〔一覧なし〕も揺れで 74〜80)。**残り(段 1 の続きにしてよい)**: 全部写す刻みの +2〜6 µs を削る案 = 全部写す刻みでは bit を増減で直さず語ごとに作り直す(32 セルの判定を波で集めて 1 語を 1 回 Store)。結果は変わらない(一覧の有無のハッシュの比べで確かめる)。段 2 は T-1252 段 2 の後のまま。
