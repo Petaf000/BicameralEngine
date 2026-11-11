@@ -522,6 +522,12 @@ namespace bicameral::sim {
         }
     }
 
+    void SupportLaw3D::SetBlockValues(const std::vector<int64_t>& values) {
+        FX_ASSERT(values.size() == m_cells.size() * SUPPORT3_COMPONENTS);
+        m_blockState.conjugateDiscard = true;
+        m_blockState.values = values;
+    }
+
     // 掘る・割れる前の答え before からこのセルの値(大きさが変わったセルは剛体の動きで配る・平均でまとめる。2 次元の CarriedValue の 3 次元)
     int64_t SupportLaw3D::CarriedValue(const SupportLaw3D& before, uint32_t cell, uint32_t component) const {
         const auto [x, up, z] = m_cells[cell];
@@ -617,9 +623,13 @@ namespace bicameral::sim {
         if (low == NO_CELL || high == NO_CELL || low == high)
             return {};
 
-        // 違う大きさの面(粗いセルの面の 4 つの組)の切り口の力は未着手(T-1295 の作業ログ)
-        if ((m_cellFine[low] != 0) != (m_cellFine[high] != 0))
-            return {};
+        // 違う大きさの面(粗いセルの面の 4 つの組)は細かい側の切り口(T-1325)
+        if ((m_cellFine[low] != 0) != (m_cellFine[high] != 0)) {
+            const uint32_t fine = m_cellFine[low] != 0 ? low : high;
+            const uint32_t face = m_mixedFaceAt[(size_t)fine * SUPPORT3_AXES + axis];
+
+            return face == NO_CELL ? SupportFaceForces3D{} : MixedForces(fine, m_mixedFaces[face]);
+        }
 
         const uint32_t bond = m_bondAt[(size_t)low * SUPPORT3_AXES + axis];
 
@@ -669,7 +679,13 @@ namespace bicameral::sim {
             opening[1 - i] = Epsilon(normal, turn, across[1 - i]) * Flow(axial.coefficient, difference);
         }
 
-        // --- 縁と角(面の中の直線の分布)---
+        FillEdges(forces, opening);
+
+        return forces;
+    }
+
+    // 縁と角(面の中の直線の分布)
+    void SupportLaw3D::FillEdges(SupportFaceForces3D& forces, const std::array<int64_t, 2>& opening) {
         for (uint32_t j = 0; j < 2; ++j) {
             forces.edgeMn[j][0] = forces.axialMn - opening[j];
             forces.edgeMn[j][1] = forces.axialMn + opening[j];
@@ -680,8 +696,6 @@ namespace bicameral::sim {
             const int64_t second = (corner & 2) != 0 ? opening[1] : -opening[1];
             forces.cornerMn[corner] = forces.axialMn + first + second;
         }
-
-        return forces;
     }
 
     // 中心(セルの半分の単位。混ざる場面は細かいセルの半分の単位)
