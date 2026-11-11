@@ -62,9 +62,9 @@ namespace {
     constexpr uint32_t ROOT_CONSTANT_COUNT = 11;
     constexpr uint32_t APPLY_THREADS = 64;  // object_shell_flow.hlsl の OH_SHELL_APPLY_THREADS
     constexpr uint32_t SWEEP_STATS = 4;     // g_stats の後ろ: 解いた回数・赤黒の和・一番多い・上限で止まった(T-1201)
-    // u0〜u14 / b0 / デバッグのリング / t0〜t8(15 × 2 + 11 + 2 + 9 × 2 = 61 語。物の熱の 63 語とは別の署名)
+    // u0〜u15 / b0 / デバッグのリング / t0〜t8(16 × 2 + 11 + 2 + 9 × 2 = 63 語。物の熱の 63 語とは別の署名)
     constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
-        .uavCount = 15, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = 9};
+        .uavCount = 16, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = 9};
 
     // 段の印(object_shell_flow.hlsl の OH_STAGE_*。1 つずつだけ回して費用を分ける。T-1223)
     constexpr uint32_t ALL_STAGES = 0xFFFFFFFFu;
@@ -143,6 +143,7 @@ namespace {
         UavCellViews,  // 物ごとの囲むセルの見立て(T-1332)
         UavExchanges,  // 物ごとのセルへ渡す粗い量の和(T-1332)
         UavPressure,   // 詰めた圧力の欄(T-1320 段 1)
+        UavFaceFlows,  // 面ごとの流れ(T-1320 段 1)
         UAV_COUNT,
     };
     constexpr uint32_t SRV_COUNT = 9;
@@ -388,6 +389,7 @@ namespace {
         const std::vector<ShellVoxelWork> voxelWork(world.voxels.size(), ShellVoxelWork{});
         const std::vector<rx::OhVoxelGas> gasWork(world.voxels.size(), rx::OhVoxelGas{});
         const std::vector<ShellFaceWork> faceWork(result.faceCount, ShellFaceWork{});
+        const std::vector<rx::OhFlow> faceFlows(result.faceCount, rx::OhZeroFlow());
         const std::vector<ShellMultigridWork> multigridWork(multigridCount, ShellMultigridWork{});
         const std::vector<rx::RxCell> cellViews(world.objects.size(), rx::RxCell{});
         const std::vector<rx::OhFlow> exchanges(world.objects.size(), rx::OhZeroFlow());
@@ -405,7 +407,8 @@ namespace {
                                                                            BytesOf(multigridWork),
                                                                            BytesOf(cellViews),
                                                                            BytesOf(exchanges),
-                                                                           BytesOf(pressureWork)};
+                                                                           BytesOf(pressureWork),
+                                                                           BytesOf(faceFlows)};
         for (size_t i = 0; i < initial.size(); ++i) {
             result.uavs[i] = gpu::CreateBuffer(device, initial[i].size(), gpu::BufferKind::UnorderedAccess);
             result.uploads[i] = gpu::CreateFilledUpload(device, initial[i]);

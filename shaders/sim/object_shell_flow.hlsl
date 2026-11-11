@@ -99,6 +99,8 @@ RWStructuredBuffer<RxCell> g_cellViews : register(u12);
 RWStructuredBuffer<OhFlow> g_exchanges : register(u13);
 // 詰めた圧力の欄(作業。T-1320 段 1)
 RWStructuredBuffer<OhShellPressure> g_pressure : register(u14);
+// 面ごとの流れ(− 側 → + 側の向きが正。速さが 0 の面は書かない・読まない。作業。T-1320 段 1)
+RWStructuredBuffer<OhFlow> g_faceFlows : register(u15);
 StructuredBuffer<RxSpecies> g_species : register(t0);
 StructuredBuffer<OhSpecies> g_objectSpecies : register(t1);
 StructuredBuffer<uint32_t> g_molarMasses : register(t2);
@@ -1170,11 +1172,49 @@ void SumOutShares(ShellBox box, uint32_t thread) {
     }
 }
 
-// ⑧ 運ぶ: ボクセルごとに自分の 6 つの面の出入りを集めて当てる。箱の外に面する面はセルへ(グループの和)
-void MoveGas(GpuShellTable table, GpuShellGases gases, ShellBox box, uint32_t thread) {
-    const uint32_t count = box.size.x * box.size.y * box.size.z;
+// ⑧ の 1: 面ごとに流れを 1 回だけ作る(風上のボクセルか箱の外から。− 側 → + 側が正)。箱の外に面する面はセルへ(グループの和)。
+// 面の両側のボクセルが同じ流れをそれぞれ作り直さない(T-1320 段 1。整数の足し算なので当てる順によらずビット単位で同じ)
+void FaceFlows(GpuShellTable table, GpuShellGases gases, ShellBox box, uint32_t thread) {
     const FxRecip64 billion = FxMakeRecipU64(1000000000);
+    const uint32_t faces = AllFaces(box);
     OhFlow toCell = OhZeroFlow();
+    for (uint32_t f = thread; f < faces; f += OH_SHELL_THREADS) {
+        uint32_t axis;
+        uint3 c;
+        FaceOf(box, f, axis, c);
+        const uint32_t global = FaceAt(box, axis, c);
+        const int64_t q = g_faceWork[global].speed;
+        if (q == 0)
+            continue;
+
+        const uint32_t minus = MinusSide(box, axis, c);
+        const uint32_t plus = PlusSide(box, axis, c);
+        const OhFlow moved = MovedThrough(table, gases, box, q, q > 0 ? minus : plus, billion);
+        const OhFlow flow = q > 0 ? moved : SubtractFlow(OhZeroFlow(), moved);
+        g_faceFlows[global] = flow;
+        // + 側が箱の外ならセルへ入る・− 側が箱の外ならセルから出る
+        if (plus == OH_SHELL_OUTSIDE)
+            toCell = OhAddFlow(toCell, flow);
+        else if (minus == OH_SHELL_OUTSIDE)
+            toCell = SubtractFlow(toCell, flow);
+    }
+
+    // セルへの和(整数の足し算なので順によらない)
+    const int64_t energy = WaveActiveSum(toCell.energy);
+    if (WaveIsFirstLane() && energy != 0)
+        InterlockedAdd(gs_toCell[0], energy);
+
+    FX_UNROLL
+    for (uint32_t g = 0; g < OH_MAX_GASES; ++g) {
+        const int64_t amount = WaveActiveSum(toCell.amounts[g]);
+        if (WaveIsFirstLane() && amount != 0)
+            InterlockedAdd(gs_toCell[1 + g], amount);
+    }
+}
+
+// ⑧ の 2: ボクセルごとに自分の 6 つの面の流れを集めて当てる(− 側の面から入り、+ 側の面へ出る)
+void ApplyFaceFlows(GpuShellGases gases, ShellBox box, uint32_t thread) {
+    const uint32_t count = box.size.x * box.size.y * box.size.z;
     for (uint32_t v = thread; v < count; v += OH_SHELL_THREADS) {
         const uint3 c = VoxelCoord(box, v);
         OhFlow delta = OhZeroFlow();
@@ -1182,25 +1222,12 @@ void MoveGas(GpuShellTable table, GpuShellGases gases, ShellBox box, uint32_t th
         for (uint32_t side = 0; side < 6; ++side) {
             const uint32_t axis = side >> 1;
             const bool plusFace = (side & 1u) != 0;  // 自分の + 側の面(自分は面の − 側)
-            const uint3 faceCoord = plusFace ? c + Unit(axis) : c;
-            const int64_t q = g_faceWork[FaceAt(box, axis, faceCoord)].speed;
-            if (q == 0)
+            const uint32_t global = FaceAt(box, axis, plusFace ? c + Unit(axis) : c);
+            if (g_faceWork[global].speed == 0)
                 continue;
 
-            const uint32_t other = plusFace ? PlusSide(box, axis, faceCoord) : MinusSide(box, axis, faceCoord);
-            const bool selfUpwind = plusFace ? q > 0 : q < 0;
-            const uint32_t upwind = selfUpwind ? v : other;
-            const OhFlow moved = MovedThrough(table, gases, box, q, upwind, billion);
-            // 風上なら出る・風下なら入る。箱の外に面する面は、その逆をセルへ
-            if (selfUpwind) {
-                delta = SubtractFlow(delta, moved);
-                if (other == OH_SHELL_OUTSIDE)
-                    toCell = OhAddFlow(toCell, moved);
-            } else {
-                delta = OhAddFlow(delta, moved);
-                if (other == OH_SHELL_OUTSIDE)
-                    toCell = SubtractFlow(toCell, moved);
-            }
+            const OhFlow flow = g_faceFlows[global];
+            delta = plusFace ? SubtractFlow(delta, flow) : OhAddFlow(delta, flow);
         }
 
         if (OhFlowIsZero(delta))
@@ -1221,18 +1248,13 @@ void MoveGas(GpuShellTable table, GpuShellGases gases, ShellBox box, uint32_t th
         if (ok == 0)
             gs_failed = 1;
     }
+}
 
-    // セルへの和(整数の足し算なので順によらない)
-    const int64_t energy = WaveActiveSum(toCell.energy);
-    if (WaveIsFirstLane() && energy != 0)
-        InterlockedAdd(gs_toCell[0], energy);
-
-    FX_UNROLL
-    for (uint32_t g = 0; g < OH_MAX_GASES; ++g) {
-        const int64_t amount = WaveActiveSum(toCell.amounts[g]);
-        if (WaveIsFirstLane() && amount != 0)
-            InterlockedAdd(gs_toCell[1 + g], amount);
-    }
+// ⑧ 運ぶ(グループの全スレッドで呼ぶ。面の流れを作る段と当てる段の間に同期)
+void MoveGas(GpuShellTable table, GpuShellGases gases, ShellBox box, uint32_t thread) {
+    FaceFlows(table, gases, box, thread);
+    AllMemoryBarrierWithGroupSync();
+    ApplyFaceFlows(gases, box, thread);
 }
 
 // ⑨ 箱の外へ出た・入った分を対の端数を通して、この物のセルの見立てへ当て、セルへ渡す粗い量に足す(1 スレッド。帳簿「物との受け渡し」)。
