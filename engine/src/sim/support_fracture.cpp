@@ -33,6 +33,43 @@ namespace bicameral::sim {
             return (uint32_t)std::min<int64_t>(value, INDEX_CAP);
         }
 
+        // 強さの比(Q16。冒頭の式)。引きの力 pull・押しの力 push(どちらも応力 × 面積)・軸の力・ずれの力と面積 area(mm²)から。
+        // 2 次元の IndexFromArea と 3 次元の口(SupportStrengthIndex3D)が同じ式を使う
+        uint32_t StrengthIndex(uint64_t tensile, uint64_t compressive, uint64_t rootStrength, int64_t pull,
+                               int64_t push, int64_t axial, int64_t shear, uint64_t area) {
+            int64_t index = 0;
+            if (pull > 0)
+                index = std::max(index, FxMulDivS64(pull, ONE, tensile * area));
+
+            if (push > 0)
+                index = std::max(index, FxMulDivS64(push, ONE, compressive * area));
+
+            // ずれ: 2 |τ| √(σc σt) ÷ (σc σt + σn (σc − σt))(力で: 面積を分母と分子に掛けた形)
+            const int64_t pressing = -axial;
+            const int64_t denominator = (int64_t)(compressive * tensile * area) +
+                                        pressing * (int64_t)(compressive - tensile);
+            if (denominator > 0) {
+                const int64_t slide = (int64_t)FxAbsU64(shear);
+                index = std::max(index, FxMulDivS64(slide, 2 * rootStrength * ONE, (uint64_t)denominator));
+            }
+
+            return CapIndex(index);
+        }
+
+        // ベクトルの大きさ √(a² + b²)(2^31 を超える値は下の桁を落として測る)
+        int64_t Magnitude(int64_t a, int64_t b) {
+            uint64_t first = FxAbsU64(a);
+            uint64_t second = FxAbsU64(b);
+            uint32_t shift = 0;
+            while ((std::max(first, second) >> shift) >= (uint64_t{1} << 31))
+                ++shift;
+
+            first >>= shift;
+            second >>= shift;
+
+            return (int64_t)((uint64_t)FxSqrtU64(first * first + second * second) << shift);
+        }
+
     }  // namespace
 
     // 面の中の直線の分布(縁の力 a・b)の正の部分の平均(力。両方正なら平均・両方負なら 0・混ざれば三角形)
@@ -180,26 +217,8 @@ namespace bicameral::sim {
     // 同じ。面積 areaMm2 の面(細かい格子の面・区間の和。T-1067)
     uint32_t SupportFracture::IndexFromArea(int64_t pull, int64_t push, int64_t axial, int64_t shear,
                                             uint64_t areaMm2) const {
-        const uint64_t area = areaMm2;
-        const uint64_t tensile = m_strength.tensileKpa;
-        const uint64_t compressive = m_strength.compressiveKpa;
-        int64_t index = 0;
-        if (pull > 0)
-            index = std::max(index, FxMulDivS64(pull, ONE, tensile * area));
-
-        if (push > 0)
-            index = std::max(index, FxMulDivS64(push, ONE, compressive * area));
-
-        // ずれ: 2 |τ| √(σc σt) ÷ (σc σt + σn (σc − σt))(力で: 面積を分母と分子に掛けた形)
-        const int64_t pressing = -axial;
-        const int64_t denominator = (int64_t)(compressive * tensile * area) +
-                                    pressing * (int64_t)(compressive - tensile);
-        if (denominator > 0) {
-            const int64_t slide = (int64_t)FxAbsU64(shear);
-            index = std::max(index, FxMulDivS64(slide, 2 * m_rootStrength * ONE, (uint64_t)denominator));
-        }
-
-        return CapIndex(index);
+        return StrengthIndex(m_strength.tensileKpa, m_strength.compressiveKpa, m_rootStrength, pull, push, axial, shear,
+                             areaMm2);
     }
 
     uint32_t SupportFracture::FailureIndex(uint32_t x, uint32_t up, uint32_t axis) const {
@@ -646,6 +665,27 @@ namespace bicameral::sim {
         }
 
         return hash;
+    }
+
+    // --- 3 次元の口(T-1295)---
+    uint32_t SupportStrengthIndex3D(const SupportStrength& strength, const SupportFaceForces3D& forces,
+                                    uint64_t areaMm2) {
+        // 書かなかった方の強さはもう片方と同じ(SupportFracture の作りと同じ)
+        const uint64_t tensile = strength.tensileKpa != 0 ? strength.tensileKpa : strength.compressiveKpa;
+        const uint64_t compressive = strength.compressiveKpa != 0 ? strength.compressiveKpa : tensile;
+        if (forces.intact == 0 || tensile == 0)
+            return 0;
+
+        const auto restore = [&](int64_t force) {
+            return FxMulDivS64(force, ONE, forces.intact);
+        };
+        const int64_t highest = restore(*rng::max_element(forces.cornerMn));
+        const int64_t lowest = restore(*rng::min_element(forces.cornerMn));
+        const int64_t torsionEdge = FxMulDivS64((int64_t)FxAbsU64(forces.torsionMn), 12, 5);
+        const int64_t shear = Magnitude(restore(forces.shearMn[0]), restore(forces.shearMn[1])) + restore(torsionEdge);
+
+        return StrengthIndex(tensile, compressive, FxSqrtU64(compressive * tensile), highest, -lowest,
+                             restore(forces.axialMn), shear, areaMm2);
     }
 
 }  // namespace bicameral::sim

@@ -14,6 +14,9 @@
 //   角の斜めの棒(T-1293。c → c + (s_x, 1, s_z) が、間の 6 セルのうち 2 つだけを通る 3 歩の階段でつながる所): ½ q_c (s · Δu)²
 //     (q_c = (b_x + b_上 + b_奥行) × 2 × 分子 ÷ (3 × 分母)。軸の硬さ 3 q_c は辺の斜めの棒 2 q と同じ ka/12)
 // 違う大きさのセル(T-1294)の面と段の棒の式は support_law_3d_mixed.cpp の冒頭。
+// 面の力(T-1295): 項ごとの力 c (g · x)。縁の力は 2 次元と同じ N ± Flow(6b, Δφ_k)(6b = 3 × 曲げの係数 2b。M = 2b Δφ_k × dx/2 なので
+//   6M/dx = 6b Δφ_k)。t の +側の縁を開くのは k(≠ n, t)の回りで、向きは ε(n, k, t)(回り × 中心から縁までの n の成分)。
+// 温めた始まりの運び(T-1295): 分けたセルから粗いセルへは 8 つの平均(回りは ÷ 4)・粗いセルから細かいセルへは剛体の動き(Rigid3DProlongation と同じ)。
 // 剛体の動き(並進 3・回り 3)では全部の項が 0(回り ω' = 角 × dx/2 で u = ω' × p・φ = ω'。p = 中心のセルの半分の単位の座標)。
 // 一様な歪み(対称 6 つ)では面ごとの力が同じ(つぎはぎの検査。support_3d_test)。延ばし方は 3 次元の剛体の動き(Rigid3DProlongation)。
 #include "sim/support_law_3d.h"
@@ -69,6 +72,11 @@ namespace bicameral::sim {
 
         int64_t Flow(uint64_t coefficient, int64_t difference) {
             return ImFaceFlow(ImWide(coefficient), difference);
+        }
+
+        // ½ × 力 × 伸び(mN × 2^-16 nm → pJ。support_law.cpp の SpringWork と同じ)
+        int64_t SpringWork(int64_t forceMn, int64_t difference) {
+            return (int64_t)FxShiftRightU128(FxMulU64Full(FxAbsU64(forceMn), FxAbsU64(difference)), 17);
         }
 
         // 3 次元の剛体の動きの延ばし方(子の八分割 = x・上・奥行の bit 0・1・2。Q16): 子の変位 = 親の変位 + ω × r。
@@ -139,6 +147,7 @@ namespace bicameral::sim {
         }
 
         BuildCells();
+        m_bondAt.assign(m_cells.size() * SUPPORT3_AXES, NO_CELL);
         BuildTerms();
         BuildBlocks();
     }
@@ -202,7 +211,7 @@ namespace bicameral::sim {
                 const uint32_t neighbor = Index(next[0], next[1], next[2]);
                 const uint32_t intact = Intact(cell, axis);
                 if (neighbor < SPLIT_CELL && intact != 0)
-                    AddBond(cell, neighbor, axis, Scaled(AxisUnit(axis), intact));
+                    AddBond(cell, neighbor, axis, Scaled(AxisUnit(axis), intact), intact);
             }
 
             const uint8_t clamps = m_scene.clamps[x + (size_t)m_scene.width * (up + (size_t)m_scene.height * z)];
@@ -222,7 +231,10 @@ namespace bicameral::sim {
     }
 
     // 面の 6 つの項(伸び・ずれ 2・曲げ 2・ねじれ)。b は残りの硬さを掛けた後(細かいセルどうしは細かいセルの b)
-    void SupportLaw3D::AddBond(uint32_t low, uint32_t high, uint32_t axis, uint64_t b) {
+    void SupportLaw3D::AddBond(uint32_t low, uint32_t high, uint32_t axis, uint64_t b, uint32_t intact) {
+        m_bondAt[(size_t)low * SUPPORT3_AXES + axis] = (uint32_t)m_bonds.size();
+        m_bonds.push_back({.firstTerm = (uint32_t)m_terms.size(), .axis = axis, .intact = intact});
+
         Term axial{.low = low, .high = high, .coefficient = 6 * b};
         axial.gradientLow[axis] = -1;
         axial.gradientHigh[axis] = 1;
@@ -500,6 +512,52 @@ namespace bicameral::sim {
         m_lastNodeUpdates = result.nodeUpdates;
     }
 
+    // --- 温めた始まりの運び(T-1295)---
+    void SupportLaw3D::CarryFrom(const SupportLaw3D& before) {
+        m_blockState.conjugateDiscard = true;  // 形・荷が変わった刻みは共役勾配の向きを捨てる(D-649)
+        m_blockState.values.assign(m_cells.size() * SUPPORT3_COMPONENTS, 0);
+        for (uint32_t cell = 0; cell < m_cells.size(); ++cell) {
+            for (uint32_t c = 0; c < SUPPORT3_COMPONENTS; ++c)
+                m_blockState.values[(size_t)cell * SUPPORT3_COMPONENTS + c] = CarriedValue(before, cell, c);
+        }
+    }
+
+    // 掘る・割れる前の答え before からこのセルの値(大きさが変わったセルは剛体の動きで配る・平均でまとめる。2 次元の CarriedValue の 3 次元)
+    int64_t SupportLaw3D::CarriedValue(const SupportLaw3D& before, uint32_t cell, uint32_t component) const {
+        const auto [x, up, z] = m_cells[cell];
+        const bool fine = m_mixed && m_cellFine[cell] != 0;
+        if (!fine) {
+            if (!before.IsFine(2 * x, 2 * up, 2 * z))
+                return before.Value(x, up, z, component);
+
+            // 細かい 8 つの平均(回りは単位が 2 倍: φ_粗 = 角 × s = 2 φ_細)
+            int64_t sum = 0;
+            for (uint32_t part = 0; part < 8; ++part)
+                sum += before.FineValue(2 * x + (part & 1), 2 * up + (part >> 1 & 1), 2 * z + (part >> 2 & 1),
+                                        component);
+
+            return component >= SUPPORT3_TURN ? sum / 4 : sum / 8;
+        }
+
+        if (before.IsFine(x, up, z))
+            return before.FineValue(x, up, z, component);
+
+        // 粗いセルから剛体の動きで(Rigid3DProlongation と同じ: u_i + ½ Σ ε(i, j, m) φ_j s_m・回り φ ÷ 2)
+        const int64_t value = before.Value(x / 2, up / 2, z / 2, component);
+        if (component >= SUPPORT3_TURN)
+            return value / 2;
+
+        const std::array<uint32_t, SUPPORT3_AXES> at = {x, up, z};
+        int64_t turned = 0;
+        for (uint32_t j = 0; j < SUPPORT3_AXES; ++j) {
+            const int64_t turn = before.Value(x / 2, up / 2, z / 2, SUPPORT3_TURN + j);
+            for (uint32_t m = 0; m < SUPPORT3_AXES; ++m)
+                turned += Epsilon(component, j, m) * turn * ((at[m] & 1) != 0 ? 1 : -1);
+        }
+
+        return value + turned / 2;
+    }
+
     // --- 読む ---
     int64_t SupportLaw3D::CellValue(uint32_t cell, uint32_t component) const {
         const size_t at = (size_t)cell * SUPPORT3_COMPONENTS + component;
@@ -520,6 +578,110 @@ namespace bicameral::sim {
         const uint32_t cell = Occupant({fx, fup, fz}, true);
 
         return cell == NO_CELL || component >= SUPPORT3_COMPONENTS ? 0 : CellValue(cell, component);
+    }
+
+    bool SupportLaw3D::IsFine(uint32_t fx, uint32_t fup, uint32_t fz) const {
+        if (!m_mixed || fx >= 2 * m_scene.width || fup >= 2 * m_scene.height || fz >= 2 * m_scene.depth)
+            return false;
+
+        const size_t at = fx + (size_t)2 * m_scene.width * (fup + (size_t)2 * m_scene.height * fz);
+
+        return m_fineIndex[at] != NO_CELL;
+    }
+
+    // --- 面の力(T-1295)---
+    SupportFaceForces3D SupportLaw3D::FaceForces(uint32_t x, uint32_t up, uint32_t z, uint32_t axis) const {
+        if (axis >= SUPPORT3_AXES)
+            return {};
+
+        std::array<int64_t, SUPPORT3_AXES> next = {x, up, z};
+        ++next[axis];
+        const uint32_t cell = Index(x, up, z);
+        if (cell >= SPLIT_CELL || Index(next[0], next[1], next[2]) >= SPLIT_CELL)
+            return {};  // 面が無い・分けたセルが絡む(FineFaceForces)
+
+        const uint32_t bond = m_bondAt[(size_t)cell * SUPPORT3_AXES + axis];
+
+        return bond == NO_CELL ? SupportFaceForces3D{} : BondForces(m_bonds[bond]);
+    }
+
+    SupportFaceForces3D SupportLaw3D::FineFaceForces(uint32_t fx, uint32_t fup, uint32_t fz, uint32_t axis) const {
+        if (!m_mixed || axis >= SUPPORT3_AXES)
+            return {};
+
+        const std::array<int64_t, SUPPORT3_AXES> at = {fx, fup, fz};
+        std::array<int64_t, SUPPORT3_AXES> next = at;
+        ++next[axis];
+        const uint32_t low = Occupant(at, true);
+        const uint32_t high = Occupant(next, true);
+        if (low == NO_CELL || high == NO_CELL || low == high)
+            return {};
+
+        // 違う大きさの面(粗いセルの面の 4 つの組)の切り口の力は未着手(T-1295 の作業ログ)
+        if ((m_cellFine[low] != 0) != (m_cellFine[high] != 0))
+            return {};
+
+        const uint32_t bond = m_bondAt[(size_t)low * SUPPORT3_AXES + axis];
+
+        return bond == NO_CELL ? SupportFaceForces3D{} : BondForces(m_bonds[bond]);
+    }
+
+    int64_t SupportLaw3D::TermProjection(const Term& term) const {
+        int64_t projection = 0;
+        for (uint32_t c = 0; c < SUPPORT3_COMPONENTS; ++c)
+            projection += term.gradientLow[c] * CellValue(term.low, c) + term.gradientHigh[c] * CellValue(term.high, c);
+
+        return projection;
+    }
+
+    // 同じ大きさのセルどうしの面の力(冒頭の式の 6 つの項。縁の力は 2 次元の BondForces と同じ形 N ± Flow(6b, Δφ))
+    SupportFaceForces3D SupportLaw3D::BondForces(const Bond& bond) const {
+        const uint32_t normal = bond.axis;
+        const std::array<uint32_t, 2> across = {normal == 0 ? 1u : 0u, normal == 2 ? 1u : 2u};
+        SupportFaceForces3D forces{.axis = normal, .intact = bond.intact};
+
+        // --- 伸びとずれ ---
+        const Term& axial = m_terms[bond.firstTerm];
+        const int64_t stretch = TermProjection(axial);
+        forces.axialMn = Flow(axial.coefficient, stretch);
+        forces.energyPj = SpringWork(forces.axialMn, stretch);
+        for (uint32_t i = 0; i < 2; ++i) {
+            const Term& shear = m_terms[bond.firstTerm + 1 + i];
+            const int64_t slide = TermProjection(shear);
+            forces.shearMn[i] = Flow(shear.coefficient, slide);
+            forces.energyPj += SpringWork(forces.shearMn[i], slide);
+        }
+
+        // --- 回り: t_i の回りの曲げは t_j の縁を開く(+側の縁の力 − N = ε(n, t_i, t_j) Flow(6b, Δφ_{t_i}))---
+        std::array<int64_t, 2> opening{};
+        for (uint32_t turn = 0; turn < SUPPORT3_AXES; ++turn) {
+            const Term& term = m_terms[bond.firstTerm + 3 + turn];
+            const int64_t difference = TermProjection(term);
+            const int64_t force = Flow(term.coefficient, difference);
+            forces.energyPj += SpringWork(force, difference);
+            if (turn == normal) {
+                forces.torsionMn = force;
+                continue;
+            }
+
+            const uint32_t i = turn == across[0] ? 0 : 1;
+            forces.bendMn[i] = force;
+            opening[1 - i] = Epsilon(normal, turn, across[1 - i]) * Flow(axial.coefficient, difference);
+        }
+
+        // --- 縁と角(面の中の直線の分布)---
+        for (uint32_t j = 0; j < 2; ++j) {
+            forces.edgeMn[j][0] = forces.axialMn - opening[j];
+            forces.edgeMn[j][1] = forces.axialMn + opening[j];
+        }
+
+        for (uint32_t corner = 0; corner < 4; ++corner) {
+            const int64_t first = (corner & 1) != 0 ? opening[0] : -opening[0];
+            const int64_t second = (corner & 2) != 0 ? opening[1] : -opening[1];
+            forces.cornerMn[corner] = forces.axialMn + first + second;
+        }
+
+        return forces;
     }
 
     // 中心(セルの半分の単位。混ざる場面は細かいセルの半分の単位)

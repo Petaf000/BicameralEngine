@@ -172,7 +172,7 @@ namespace bicameral::sim {
 
             const uint32_t intact = FaceIntactAt(at, axis, true);
             if (intact != 0)
-                AddBond(cell, neighbor, axis, Scaled(unitOf(axis), intact));
+                AddBond(cell, neighbor, axis, Scaled(unitOf(axis), intact), intact);
         }
 
         const uint8_t

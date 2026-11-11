@@ -23,6 +23,8 @@
 // 戻す(状態だけで決まる = N1)
 // データの流れ: SupportScene + SupportStrength → SupportLaw(釣り合い)→ 面の力・エネルギー(FaceForces)→ 割れの進み → scene の intactX / intactUp
 //   → 次の刻みの SupportLaw(前の答えから温めて始める)。帳簿: 解放されたエネルギー = 割れ面のエネルギー + 熱(pJ。整数で厳密)
+// 3 次元の口(T-1295): SupportStrengthIndex3D が 3 次元の格子の梁(sim/support_law_3d)の面の力から同じ式の強さの比を出す
+//   (面の残りの硬さ 3 軸は SupportScene3D::intact。3 次元の割れの進み・区間・細かくする道はまだ無い)
 #pragma once
 
 #include <array>
@@ -31,6 +33,7 @@
 #include <vector>
 
 #include "sim/support_law.h"
+#include "sim/support_law_3d.h"
 
 namespace bicameral::sim {
 
@@ -284,5 +287,12 @@ namespace bicameral::sim {
         std::vector<uint32_t> m_nextFineUp;
         std::vector<uint16_t> m_calmTicks;  // 分けたセルの、比が coarsenIndex 未満の刻みが続いた数([x + width × up])
     };
+
+    // 3 次元の面の強さの比(Q16。T-1295 の割れの法則の口)。2 次元の IndexOf と同じ式(冒頭)を、割れていない硬さに戻した力
+    // (÷ intact)で: 引き = 角の力の最大・押し = 角の力の最小の逆(面の中の直線の分布の最大・最小は角)・軸の力 = N・
+    // ずれ = √(V_0² + V_1²) + ねじれの縁のずれ 12/5 × ねじれの力(正方形の断面の τ_max = T ÷ (5/24 a³)・T = ねじれの力 × a/2 を
+    // 力に直した値。ずれの向きとねじれの向きは足し合わせの上限〔仮〕)。areaMm2 = 面の面積(一辺 dx なら dx²)
+    uint32_t SupportStrengthIndex3D(const SupportStrength& strength, const SupportFaceForces3D& forces,
+                                    uint64_t areaMm2);
 
 }  // namespace bicameral::sim
