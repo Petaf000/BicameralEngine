@@ -5,6 +5,9 @@
 //   → ① 運動量を移した質量に比例して同じ軸の隣の面へ(D-663。箱の外の面の向こう = 囲むセル = 止まった空気)
 //   → ② 縦の面に浮力 → ③ 圧力の射影(箱の外 = 囲むセルの圧力。膨らみたい体積をこの小刻みで出す)
 //   → ④ 風上の気体を体積の割合で移す(1 小刻みに出るのは半分まで)。箱の外へ出る・入る分は対の端数を通してセルへ(帳簿「物との受け渡し」)。
+// セルへの受け渡し(T-1332・ADR-0500 の集めて書く段): 物ごとの刻みは「刻みの初めのセル + この物の分」の見立て(OhShellFlow::cellView)だけを見て、
+//   セルへ渡す粗い量を物ごとに貯める(toCellCoarse)。セルそのものは刻みの終わりに ApplyShellFlowToCells が、セルごとに物の順(登録の順 = ranges)で
+//   足して 1 回だけ当てる。1 つのセルに物が何個あっても、物どうしは同じ刻みの中で互いの出し入れを見ない(GPU の物ごとのグループと同じ足し方)。
 // 骨格のボクセル: 既定は壁(骨格に面する面は運動量を持たず、骨格の気体の膨らみ・縮みだけが圧力の射影で出入りする = 吹き出す多孔の壁)。
 // skeletonWalls = false なら骨格の中も気体として流れる(気体の割合 = 凝縮相の体積を除いた分。比べ)。
 // 真実: 面の運動量(OhShellFlow::momentum。層を作った時に 0 = 止まった空気、返す時に捨てる)。運動のエネルギーは数えない(音より遅い極限)。
@@ -20,6 +23,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <ostream>
+#include <span>
 #include <vector>
 
 #include "object_shell_cpu.h"
@@ -59,6 +63,10 @@ namespace bicameral::test {
         // 調べるだけ(T-1202): pressureDumpEvery 回に 1 回、圧力の問題(箱・面の重み・残り)と止まった答え・回数を書き出す(多重格子の研究用)
         std::ostream* pressureDump = nullptr;
         uint32_t pressureDumpEvery = 0;
+
+        // --- 1 刻みの受け渡し(作業。真実ではない。T-1332)---
+        reaction::RxCell cellView{};      // 囲むセルの見立て = 刻みの初めのセル + この物の小刻みごとの粗い量
+        reaction::OhFlow toCellCoarse{};  // この刻みにセルへ渡す粗い量の和(セルの単位。ApplyShellFlowToCells が足す)
     };
 
     // 箱の面の並び(軸 a の面は、その軸だけ 1 つ多い)
@@ -430,6 +438,19 @@ namespace bicameral::test {
         out.flush();
     }
 
+    // ⑨ 箱の外へ出た・入った分(ボクセル → セルが正)を対の端数を通して、この物のセルの見立てへ当て、セルへ渡す粗い量に足す
+    // (セルそのものは ApplyShellFlowToCells。object_shell_flow.hlsl の ExchangeWithCell と同じ。T-1332)
+    inline bool ExchangeWithCellView(const OhGasList& gases, OhWorld& world, uint32_t o, OhShellFlow& flow,
+                                     const reaction::OhFlow& toCell) {
+        const reaction::OhCarryStep step = reaction::OhSplitCarry(world.objects[o], toCell, world.carries[o]);
+        world.carries[o] = step.carry;
+        const reaction::OhAmountChange change = reaction::OhApplyToCell(gases, flow.cellView, step.coarse);
+        flow.cellView = change.cell;
+        flow.toCellCoarse = reaction::OhAddFlow(flow.toCellCoarse, step.coarse);
+
+        return change.ok != 0;
+    }
+
     // 1 つの流れの小刻み。戻り値 = 量が負・枠があふれなかった
     inline bool StepShellFlowSubstep(const OhCpuTable& table, const OhGasList& gases, OhWorld& world, uint32_t o,
                                      OhShellFlow& flow, std::vector<uint8_t>& changed) {
@@ -437,7 +458,7 @@ namespace bicameral::test {
         const rx::OhObject object = world.objects[o];
         const OhFlowBox box = FlowBoxOf(object);
         const size_t count = object.voxelCount;
-        const rx::RxCell air = world.cells[object.cell];
+        const rx::RxCell air = flow.cellView;
         const rx::OhFlowCell cellFlow = rx::OhFlowCellOf(table, air);
         const rx::OhVoxelGas cellGas = rx::OhPrepareGas(gases, air);
 
@@ -769,17 +790,21 @@ namespace bicameral::test {
         }
 
         if (!rx::OhFlowIsZero(toCell))
-            ok = ExchangeThroughCarry(gases, world, o, toCell) && ok;
+            ok = ExchangeWithCellView(gases, world, o, flow, toCell) && ok;
 
         return ok;
     }
 
-    // 1 刻みの流れ(層のある物だけ。刻み tick の反応の後 = 次の刻みの受け渡し)。変わったボクセルの待ちとブロックを起こす
+    // 物 o の 1 刻みの流れ(層のある物だけ。刻み tick の反応の後 = 次の刻みの受け渡し)。変わったボクセルの待ちとブロックを起こす。
+    // セルへは当てない(flow.toCellCoarse に貯める。セルへは StepShellFlows・ApplyShellFlowToCells)
     inline bool StepShellFlow(const OhCpuTable& table, const OhGasList& gases, OhWorld& world, uint32_t o,
                               OhShellFlow& flow, uint64_t tick) {
         namespace rx = bicameral::reaction;
+        flow.toCellCoarse = rx::OhZeroFlow();
         if (world.objects[o].shellLayers == 0)
             return true;
+
+        flow.cellView = world.cells[world.objects[o].cell];
 
         std::vector<uint8_t> changed(world.objects[o].voxelCount, 0);
         bool ok = true;
@@ -813,6 +838,41 @@ namespace bicameral::test {
         }
 
         return ok;
+    }
+
+    // 集めて書く段(ADR-0500 の 3・T-1332): セルごとに、物の順(ranges の並び = 登録の順)で物の粗い量を足して 1 回だけ当てる。
+    // 変わったセルは刻みの最後の段の番号(GPU の OhShellApplyCells と同じ)。flows は物の順(flows[o] = 物 o)
+    inline bool ApplyShellFlowToCells(const OhGasList& gases, OhWorld& world, std::span<const OhShellFlow> flows) {
+        namespace rx = bicameral::reaction;
+        bool ok = true;
+        for (const rx::OhCellRange& range : world.ranges) {
+            rx::OhFlow sum = rx::OhZeroFlow();
+            for (uint32_t k = 0; k < range.objectCount; ++k) {
+                const uint32_t o = range.objectBegin + k;
+                if (o < flows.size())
+                    sum = rx::OhAddFlow(sum, flows[o].toCellCoarse);
+            }
+
+            if (rx::OhFlowIsZero(sum))
+                continue;
+
+            const rx::OhAmountChange change = rx::OhApplyToCell(gases, world.cells[range.cell], sum);
+            world.cells[range.cell] = change.cell;
+            world.cellChangedPasses[range.cell] = world.pass;  // 次の段で外に面するブロックを起こす
+            ok = ok && change.ok != 0;
+        }
+
+        return ok;
+    }
+
+    // 1 刻みの流れを物の順に回し(物ごとに刻みの初めのセルを見る)、セルへ集めて当てる。flows[o] = 物 o(物の数まで)
+    inline bool StepShellFlows(const OhCpuTable& table, const OhGasList& gases, OhWorld& world,
+                               std::span<OhShellFlow> flows, uint64_t tick) {
+        bool ok = true;
+        for (uint32_t o = 0; o < flows.size(); ++o)
+            ok = StepShellFlow(table, gases, world, o, flows[o], tick) && ok;
+
+        return ApplyShellFlowToCells(gases, world, flows) && ok;
     }
 
 }  // namespace bicameral::test

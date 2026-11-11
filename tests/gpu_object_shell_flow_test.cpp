@@ -15,7 +15,9 @@
 //   --scale(T-1320 の段 0。比べを飛ばす): 紙 24 列の層 2・4 段を燃える物 1・10・100・1000 個で、散らばり(物ごとに別のセル)と
 //         密な山(8 個で 1 つのセルを分ける)に置いて 1 刻みの時間を出し、物 1 つあたり・ボクセル 1 つあたりと、
 //         山の並べ方での層の箱の和の体積と重なりを除いた体積(燃えている空気の体積)を出す。
-//         密な山は今の形では同じセルへの受け渡し(⑨)が物どうしで重なる(決定的でない)ので、時間だけを見る(測るだけ)。
+//   1 つのセルに物が 2・3・8 個(T-1332): セルへの受け渡しは物ごとに粗い量を貯め、刻みの終わりに OhShellApplyCells がセルごとに物の順で足して
+//         1 回だけ当てる(ADR-0500 の集めて書く段)。比べに、熱い層の温度を物ごとに変えた 2・3・8 個 × 2 セル + 1 個の場面を足し、
+//         GPU を 2 回回して状態のハッシュが同じか(回ごとに変わらないか)も見る。
 // 引数は gpu_test_options.h と --measure / --measure-only / --profile / --scale / --threads N / --sweeps N / --rule N。
 #include <cstdlib>
 #include <cstring>
@@ -57,11 +59,12 @@ namespace {
 
     // --- GPU の並び(object_shell_flow.hlsl と同じ)---
     constexpr uint32_t SHARED_VOXELS = 7168;
-    constexpr uint32_t ROOT_CONSTANT_COUNT = 10;
-    constexpr uint32_t SWEEP_STATS = 4;  // g_stats の後ろ: 解いた回数・赤黒の和・一番多い・上限で止まった(T-1201)
-    // u0〜u11 / b0 / デバッグのリング / t0〜t7(12 × 2 + 10 + 2 + 8 × 2 = 52 語。物の熱の 63 語とは別の署名)
+    constexpr uint32_t ROOT_CONSTANT_COUNT = 11;
+    constexpr uint32_t APPLY_THREADS = 64;  // object_shell_flow.hlsl の OH_SHELL_APPLY_THREADS
+    constexpr uint32_t SWEEP_STATS = 4;     // g_stats の後ろ: 解いた回数・赤黒の和・一番多い・上限で止まった(T-1201)
+    // u0〜u13 / b0 / デバッグのリング / t0〜t8(14 × 2 + 11 + 2 + 9 × 2 = 59 語。物の熱の 63 語とは別の署名)
     constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
-        .uavCount = 12, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = 8};
+        .uavCount = 14, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = 9};
 
     // 段の印(object_shell_flow.hlsl の OH_STAGE_*。1 つずつだけ回して費用を分ける。T-1223)
     constexpr uint32_t ALL_STAGES = 0xFFFFFFFFu;
@@ -126,9 +129,11 @@ namespace {
         UavGasWork,
         UavFaceWork,
         UavMultigrid,
+        UavCellViews,  // 物ごとの囲むセルの見立て(T-1332)
+        UavExchanges,  // 物ごとのセルへ渡す粗い量の和(T-1332)
         UAV_COUNT,
     };
-    constexpr uint32_t SRV_COUNT = 8;
+    constexpr uint32_t SRV_COUNT = 9;
 
     // --- 場面 ---
 
@@ -148,7 +153,8 @@ namespace {
     }
 
     // 端の 1/4 の骨格を 900 K、そこに面する層(骨格から 1 ボクセル)を 1,500 K に
-    void Heat(const sim::BakedReactionTable& table, test::OhWorld& world, const Shape& shape) {
+    void Heat(const sim::BakedReactionTable& table, test::OhWorld& world, const Shape& shape,
+              int32_t shellMilliKelvin) {
         const rx::OhObject object = world.objects[0];
         const uint32_t sizeZ = object.voxelCount / (object.sizeX * object.sizeY);
         const uint32_t hotEnd = shape.layers + (shape.columns / 4);
@@ -162,14 +168,15 @@ namespace {
                     if (skeleton)
                         world.voxels[v] = Reheated(table, world.voxels[v], HOT_SKELETON_MK);
                     else if (nearY && nearZ && x + 1 >= shape.layers)
-                        world.voxels[v] = Reheated(table, world.voxels[v], HOT_SHELL_MK);
+                        world.voxels[v] = Reheated(table, world.voxels[v], shellMilliKelvin);
                 }
             }
         }
     }
 
     std::optional<test::OhWorld> MakePaper(const sim::BakedReactionTable& table, const test::OhCpuTable& shared,
-                                           const test::OhGasList& gases, const Shape& shape) {
+                                           const test::OhGasList& gases, const Shape& shape,
+                                           int32_t shellMilliKelvin = HOT_SHELL_MK) {
         test::OhWorld world;
         const uint32_t count = shape.columns * shape.sizeZ;
         world.objects.push_back({.voxelBegin = 0,
@@ -206,17 +213,19 @@ namespace {
         if (!test::AddObjectShell(shared, gases, world, 0, 1, shape.layers))
             return std::nullopt;
 
-        Heat(table, world, shape);
+        Heat(table, world, shape, shellMilliKelvin);
 
         return world;
     }
 
-    // 物 1 つの世界を copies 個に(objectsPerCell 個ごとに 1 つのセル。1 = 物ごとに別のセル)
-    test::OhWorld Replicate(const test::OhWorld& one, uint32_t copies, uint32_t objectsPerCell = 1) {
+    // 物 1 つの世界(同じ形で状態だけ違うもの)を copies 個に(物 k は variants[k % 数]。objectsPerCell 個ごとに 1 つのセル。1 = 物ごとに別のセル)
+    test::OhWorld Replicate(std::span<const test::OhWorld> variants, uint32_t copies, uint32_t objectsPerCell = 1) {
         test::OhWorld world;
-        const auto voxels = static_cast<uint32_t>(one.voxels.size());
-        const auto blocks = static_cast<uint32_t>(one.blocks.size());
+        const test::OhWorld& first = variants[0];
+        const auto voxels = static_cast<uint32_t>(first.voxels.size());
+        const auto blocks = static_cast<uint32_t>(first.blocks.size());
         for (uint32_t k = 0; k < copies; ++k) {
+            const test::OhWorld& one = variants[k % variants.size()];
             rx::OhObject object = one.objects[0];
             object.voxelBegin = k * voxels;
             object.cell = k / objectsPerCell;
@@ -246,9 +255,13 @@ namespace {
             world.blockStates.insert(world.blockStates.end(), one.blockStates.begin(), one.blockStates.end());
         }
 
-        world.pass = one.pass;
+        world.pass = first.pass;
 
         return world;
+    }
+
+    test::OhWorld Replicate(const test::OhWorld& one, uint32_t copies, uint32_t objectsPerCell = 1) {
+        return Replicate(std::span(&one, 1), copies, objectsPerCell);
     }
 
     // 物ごとの面の並びの始まり(軸 0・1・2 の順)と面の数
@@ -291,6 +304,7 @@ namespace {
     struct Gpu {
         ComPtr<ID3D12RootSignature> rootSignature;
         ComPtr<ID3D12PipelineState> pipeline;
+        ComPtr<ID3D12PipelineState> applyPipeline;  // 集めて書く段 OhShellApplyCells(T-1332)
         std::array<ComPtr<ID3D12Resource>, UAV_COUNT> uavs;
         std::array<ComPtr<ID3D12Resource>, UAV_COUNT> uploads;
         std::array<gpu::ResidentBuffer, SRV_COUNT> srvs;
@@ -298,6 +312,7 @@ namespace {
         ComPtr<ID3D12Resource> timestampReadback;
         uint32_t objectCount = 0;
         uint32_t faceCount = 0;
+        uint32_t rangeCount = 0;
         uint32_t passBase = 0;
         uint32_t sharedPotential = 0;
         uint32_t pressureSweeps = 1024;  // 圧力の赤黒の上限(CPU の OhShellFlow と同じ既定)
@@ -334,15 +349,18 @@ namespace {
                                               bool sharedPotential, std::string_view shader) {
         Gpu result;
         result.objectCount = static_cast<uint32_t>(world.objects.size());
+        result.rangeCount = static_cast<uint32_t>(world.ranges.size());
         result.passBase = world.pass;
         result.sharedPotential = sharedPotential ? 1u : 0u;
         result.rootSignature = gpu::CreateRootSignature(device, ROOT_LAYOUT);
         const auto bytecode = gpu::LoadShader(shader);
-        if (!result.rootSignature || !bytecode)
+        const auto applyBytecode = gpu::LoadShader("sim/object_shell_apply_cells.cso");
+        if (!result.rootSignature || !bytecode || !applyBytecode)
             return std::unexpected("ルート署名かシェーダーを作れない");
 
         result.pipeline = gpu::CreateComputePipeline(device, result.rootSignature.Get(), *bytecode);
-        if (!result.pipeline)
+        result.applyPipeline = gpu::CreateComputePipeline(device, result.rootSignature.Get(), *applyBytecode);
+        if (!result.pipeline || !result.applyPipeline)
             return std::unexpected("パイプラインを作れない");
 
         uint32_t multigridCount = 0;
@@ -353,6 +371,8 @@ namespace {
         const std::vector<rx::OhVoxelGas> gasWork(world.voxels.size(), rx::OhVoxelGas{});
         const std::vector<ShellFaceWork> faceWork(result.faceCount, ShellFaceWork{});
         const std::vector<ShellMultigridWork> multigridWork(multigridCount, ShellMultigridWork{});
+        const std::vector<rx::RxCell> cellViews(world.objects.size(), rx::RxCell{});
+        const std::vector<rx::OhFlow> exchanges(world.objects.size(), rx::OhZeroFlow());
         const std::array<std::span<const std::byte>, UAV_COUNT> initial = {BytesOf(world.voxels),
                                                                            BytesOf(world.cells),
                                                                            BytesOf(world.carries),
@@ -364,7 +384,9 @@ namespace {
                                                                            BytesOf(voxelWork),
                                                                            BytesOf(gasWork),
                                                                            BytesOf(faceWork),
-                                                                           BytesOf(multigridWork)};
+                                                                           BytesOf(multigridWork),
+                                                                           BytesOf(cellViews),
+                                                                           BytesOf(exchanges)};
         for (size_t i = 0; i < initial.size(); ++i) {
             result.uavs[i] = gpu::CreateBuffer(device, initial[i].size(), gpu::BufferKind::UnorderedAccess);
             result.uploads[i] = gpu::CreateFilledUpload(device, initial[i]);
@@ -376,7 +398,7 @@ namespace {
         const std::array<std::span<const std::byte>, SRV_COUNT> srvs = {
             BytesOf(table.species), BytesOf(tables.species), BytesOf(table.molarMasses),
             BytesOf(gasSpecies),    BytesOf(world.objects),  BytesOf(world.infos),
-            BytesOf(shells),        BytesOf(world.blocks)};
+            BytesOf(shells),        BytesOf(world.blocks),   BytesOf(world.ranges)};
         for (size_t i = 0; i < srvs.size(); ++i) {
             result.srvs[i] = gpu::CreateResidentBuffer(device, srvs[i]);
             if (!result.srvs[i].Valid())
@@ -437,11 +459,17 @@ namespace {
                                                                          1u,
                                                                          gpuState.sharedPotential,
                                                                          gpuState.pressureMode,
-                                                                         gpuState.stageMask};
+                                                                         gpuState.stageMask,
+                                                                         gpuState.rangeCount};
             list->SetComputeRoot32BitConstants(ROOT_LAYOUT.RootConstantIndex(), ROOT_CONSTANT_COUNT, constants.data(),
                                                0);
             list->Dispatch(gpuState.objectCount, 1, 1);
             test::object_heat_gpu::Barrier(list);
+            // 集めて書く段: セルごとに物の順で足して 1 回だけ当てる(T-1332)
+            list->SetPipelineState(gpuState.applyPipeline.Get());
+            list->Dispatch((gpuState.rangeCount + APPLY_THREADS - 1) / APPLY_THREADS, 1, 1);
+            test::object_heat_gpu::Barrier(list);
+            list->SetPipelineState(gpuState.pipeline.Get());
             gpuState.passBase += gpuState.objectCount;
         }
 
@@ -560,14 +588,53 @@ namespace {
         std::string shader;      // シェーダー(--threads で変える。T-1223)
     };
 
-    // CPU と GPU を同じ場面から回して比べる
-    std::expected<void, std::string> RunCompare(const Context& context, const Shape& shape, bool sharedPotential,
-                                                const PressureRule& rule) {
-        const auto one = MakePaper(context.table, context.shared, context.tables.gases, shape);
-        if (!one)
-            return std::unexpected("層を作れない");
+    // GPU の真実(ボクセル・セル・対の端数・面の運動量)のハッシュ(FNV-1a。回ごとに変わらないかを見る。T-1332)
+    std::expected<uint64_t, std::string> GpuDigest(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                   const Gpu& gpuState, const test::OhWorld& world) {
+        using test::object_heat_gpu::ReadUav;
+        const auto voxels = ReadUav<rx::RxCell>(device, queue, gpuState.uavs[UavVoxels].Get(), world.voxels.size());
+        const auto cells = ReadUav<rx::RxCell>(device, queue, gpuState.uavs[UavCells].Get(), world.cells.size());
+        const auto carries = ReadUav<rx::OhFlow>(device, queue, gpuState.uavs[UavCarries].Get(), world.carries.size());
+        const auto faces = ReadUav<int64_t>(device, queue, gpuState.uavs[UavMomentum].Get(), gpuState.faceCount);
+        if (!voxels || !cells || !carries || !faces)
+            return std::unexpected("読み戻せない");
 
-        test::OhWorld world = Replicate(*one, 2);
+        uint64_t digest = 14695981039346656037ull;
+        const auto mix = [&digest](std::span<const std::byte> bytes) {
+            for (const std::byte b : bytes)
+                digest = (digest ^ static_cast<uint64_t>(b)) * 1099511628211ull;
+        };
+        mix(BytesOf(*voxels));
+        mix(BytesOf(*cells));
+        mix(BytesOf(*carries));
+        mix(BytesOf(*faces));
+
+        return digest;
+    }
+
+    // 比べの場面: 物の数と、何個ごとに 1 つのセルか(1 = 物ごとに別のセル)。熱い層の温度は物ごとに variants の順で変える
+    struct CompareScene {
+        uint32_t copies = 2;
+        uint32_t objectsPerCell = 1;
+        bool vary = false;  // 物ごとに熱い層の温度を変える(1,500 K・1,200 K・1,800 K の順)
+    };
+
+    // CPU と GPU を同じ場面から回して比べる。戻り値 = 最後の GPU の真実のハッシュ
+    std::expected<uint64_t, std::string> RunCompare(const Context& context, const Shape& shape, bool sharedPotential,
+                                                    const PressureRule& rule, const CompareScene& scene = {}) {
+        std::vector<test::OhWorld> variants;
+        for (const int32_t shellMk : {HOT_SHELL_MK, 1200000, 1800000}) {
+            auto one = MakePaper(context.table, context.shared, context.tables.gases, shape, shellMk);
+            if (!one)
+                return std::unexpected("層を作れない");
+
+            variants.push_back(std::move(*one));
+            if (!scene.vary)
+                break;
+        }
+
+        const test::OhWorld* one = &variants[0];
+        test::OhWorld world = Replicate(variants, scene.copies, scene.objectsPerCell);
         std::vector<test::OhShellFlow> flows(world.objects.size());
         for (uint32_t o = 0; o < flows.size(); ++o) {
             test::ResetShellFlow(world, o, flows[o]);
@@ -590,10 +657,8 @@ namespace {
                 return std::unexpected(ran.error());
 
             for (uint32_t t = tick; t < tick + COMPARE_EVERY; ++t) {
-                for (uint32_t o = 0; o < flows.size(); ++o) {
-                    if (!test::StepShellFlow(context.shared, context.tables.gases, world, o, flows[o], t))
-                        return std::unexpected(std::format("CPU の流れが崩れた(刻み {})", t));
-                }
+                if (!test::StepShellFlows(context.shared, context.tables.gases, world, flows, t))
+                    return std::unexpected(std::format("CPU の流れが崩れた(刻み {})", t));
             }
 
             const auto different = Compare(context.device, *queue, *gpuState, world, flows);
@@ -608,14 +673,47 @@ namespace {
         for (const test::OhShellFlow& flow : flows)
             limited += flow.limitedShares;
 
+        const auto digest = GpuDigest(context.device, *queue, *gpuState, world);
+        if (!digest)
+            return std::unexpected(digest.error());
+
         Log(Channel::Gpu, Level::Info,
-            "{}・圧力の値は{}・{}: {} ボクセル × 2 枚・{} 刻みでビット一致(一番速い面 {}・出る上限で縮めた {}・"
-            "赤黒 平均 {:.1f} 一番多い {} 上限 {})",
-            shape.name, sharedPotential ? " groupshared" : "作業場", rule.name, one->voxels.size(), COMPARE_TICKS,
-            flows[0].fastestQ16, limited,
+            "{}・圧力の値は{}・{}: {} ボクセル × {} 枚({} 枚で 1 セル)・{} 刻みでビット一致(一番速い面 "
+            "{}・出る上限で縮めた {}・"
+            "赤黒 平均 {:.1f} 一番多い {} 上限 {}・ハッシュ {:016x})",
+            shape.name, sharedPotential ? " groupshared" : "作業場", rule.name, one->voxels.size(), scene.copies,
+            scene.objectsPerCell, COMPARE_TICKS, flows[0].fastestQ16, limited,
             static_cast<double>(flows[0].pressureSweepsUsed) /
                 static_cast<double>(std::max<uint64_t>(flows[0].pressureSolves, 1)),
-            flows[0].pressureMostSweeps, flows[0].pressureCapped);
+            flows[0].pressureMostSweeps, flows[0].pressureCapped, *digest);
+
+        return *digest;
+    }
+
+    // 1 つのセルに物が 2・3・8 個(T-1332): 2 セル + 1 個(最後のセルは 1 個)・物ごとに熱い層の温度を変えて CPU とビット一致、
+    // GPU を 2 回回してハッシュが同じ(回ごとに変わらない)。圧力は既定(0 から収まるまで)・groupshared
+    std::expected<void, std::string> CompareSharedCells(const Context& context) {
+        const Shape layers2{"紙 24 列・層 2 段", 24, 3, 2};
+        const Shape layers4{"紙 24 列・層 4 段", 24, 3, 4};
+        const PressureRule rule{"0 から収まるまで", 1024, 1};
+        const std::array<std::pair<const Shape*, uint32_t>, 4> cases = {
+            std::pair{&layers2, 2u}, std::pair{&layers2, 3u}, std::pair{&layers2, 8u}, std::pair{&layers4, 3u}};
+        for (const auto& [shape, perCell] : cases) {
+            const CompareScene scene{.copies = (2 * perCell) + 1, .objectsPerCell = perCell, .vary = true};
+            const auto first = RunCompare(context, *shape, true, rule, scene);
+            if (!first)
+                return std::unexpected(std::format("{}・{} 個で 1 セル: {}", shape->name, perCell, first.error()));
+
+            const auto again = RunCompare(context, *shape, true, rule, scene);
+            if (!again)
+                return std::unexpected(
+                    std::format("{}・{} 個で 1 セル(2 回目): {}", shape->name, perCell, again.error()));
+
+            if (*first != *again)
+                return std::unexpected(
+                    std::format("{}・{} 個で 1 セル: GPU のハッシュが回ごとに違う({:016x} / {:016x})", shape->name,
+                                perCell, *first, *again));
+        }
 
         return {};
     }
@@ -861,6 +959,11 @@ namespace {
                         }
                     }
                 }
+            }
+
+            if (auto sharedCells = CompareSharedCells(context); !sharedCells) {
+                Log(Channel::Gpu, Level::Error, "gpu_object_shell_flow_test: FAILED({})", sharedCells.error());
+                return 1;
             }
         }
 

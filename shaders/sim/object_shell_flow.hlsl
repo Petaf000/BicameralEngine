@@ -7,7 +7,9 @@
 // それより大きい箱は作業場(既定のヒープ)に 64bit で置く(g_sharedPotential)。
 // 圧力の反復(T-1201。g_pressureMode): 前の小刻みの圧力の値から解き始め(作業場の potential が層の状態として刻みをまたいで残る)、
 // 1 回の赤黒で値が 1 つも変わらなければ止める(上限 g_pressureSweeps)。止まるかはグループの groupshared の印で決めるので、全スレッドが同じ回数で抜ける。
-// 1 つのセルを囲む物が 2 つ以上ある時はセルへの書き込みが競るので、この形は物ごとに別のセル(試験の場面)だけ。エンジンへ入れる形は T-1200 のチケット。
+// セルへの受け渡し(T-1332・ADR-0500 の集めて書く段): 物のグループはセルを読むだけ(刻みの初めに g_cellViews へ写し、小刻みごとの自分の分だけをそこへ当てる)、
+// セルへ渡す粗い量は物ごとの g_exchanges に貯める。刻みの終わりの OhShellApplyCells(セル 1 つ = 1 スレッド)が、セルごとに物の順(g_ranges = 登録の順)で
+// 足して 1 回だけ当てる。1 つのセルに物が何個あっても決定的で、CPU の StepShellFlows・ApplyShellFlowToCells とビット単位で同じ。
 #include "common/object_heat.hlsli"
 
 // --- 作業場(ボクセルごと・面ごと。真実ではない)---
@@ -76,6 +78,10 @@ RWStructuredBuffer<OhShellVoxel> g_voxelWork : register(u8);
 RWStructuredBuffer<OhVoxelGas> g_gasWork : register(u9);
 RWStructuredBuffer<OhShellFace> g_faceWork : register(u10);
 RWStructuredBuffer<OhShellMultigrid> g_multigrid : register(u11);
+RWStructuredBuffer<RxCell> g_cellViews
+    : register(u12);  // 物ごとの囲むセルの見立て(刻みの初めのセル + この物の分。作業。T-1332)
+RWStructuredBuffer<OhFlow> g_exchanges
+    : register(u13);  // 物ごとのこの刻みにセルへ渡す粗い量の和(セルの単位。作業。T-1332)
 StructuredBuffer<RxSpecies> g_species : register(t0);
 StructuredBuffer<OhSpecies> g_objectSpecies : register(t1);
 StructuredBuffer<uint32_t> g_molarMasses : register(t2);
@@ -84,6 +90,7 @@ StructuredBuffer<OhObject> g_objects : register(t4);
 StructuredBuffer<OhVoxelInfo> g_infos : register(t5);
 StructuredBuffer<OhShellObject> g_shellObjects : register(t6);
 StructuredBuffer<OhBlock> g_blocks : register(t7);
+StructuredBuffer<OhCellRange> g_ranges : register(t8);  // 物の入っているセルごとの物の範囲(登録の順。T-1332)
 
 cbuffer RootConstants : register(b0) {
     uint32_t g_objectCount;
@@ -97,6 +104,7 @@ cbuffer RootConstants : register(b0) {
     uint32_t g_sharedPotential;  // 1 = 圧力の値を groupshared に(32bit)
     uint32_t g_pressureMode;  // OH_PRESSURE_UNTIL_QUIET・OH_PRESSURE_WARM_START(T-1201。0 = T-1200 までの決まった回数)
     uint32_t g_stageMask;     // 回す段の印(OH_STAGE_*。既定は全部。段を外すのは費用を段ごとに分けて測る時だけ。T-1223)
+    uint32_t g_rangeCount;    // g_ranges の数(OhShellApplyCells。T-1332)
 };
 
 // グループのスレッドの数(既定 1,024。費用の比べのために 256・512 の形も作る: shaders/CMakeLists.txt。T-1223)
@@ -381,9 +389,8 @@ OhFlow SubtractFlow(OhFlow a, OhFlow b) {
 
 // --- 段 ---
 
-// ⓪ 囲むセルの見立て(1 スレッド)
-void PrepareCell(GpuShellTable table, GpuShellGases gases, uint32_t cellIndex) {
-    const RxCell air = g_cells[cellIndex];
+// ⓪ 囲むセルの見立て(1 スレッド。air = この物のセルの見立て g_cellViews)
+void PrepareCell(GpuShellTable table, GpuShellGases gases, RxCell air) {
     const OhFlowCell flow = OhFlowCellOf(table, air);
     const OhVoxelGas gas = OhPrepareGas(gases, air);
     gs_cellMass = flow.mass;
@@ -1152,8 +1159,9 @@ void MoveGas(GpuShellTable table, GpuShellGases gases, ShellBox box, uint32_t th
     }
 }
 
-// ⑨ 箱の外へ出た・入った分を対の端数を通してセルへ(1 スレッド。帳簿「物との受け渡し」)
-void ExchangeWithCell(GpuShellGases gases, OhObject object, uint32_t objectIndex, uint32_t pass) {
+// ⑨ 箱の外へ出た・入った分を対の端数を通して、この物のセルの見立てへ当て、セルへ渡す粗い量に足す(1 スレッド。帳簿「物との受け渡し」)。
+// セルそのものへは OhShellApplyCells が物の順に足して当てる(T-1332。CPU の ExchangeWithCellView と同じ)
+void ExchangeWithCell(GpuShellGases gases, OhObject object, uint32_t objectIndex) {
     OhFlow toCell;
     toCell.energy = gs_toCell[0];
     FX_UNROLL
@@ -1165,9 +1173,9 @@ void ExchangeWithCell(GpuShellGases gases, OhObject object, uint32_t objectIndex
 
     const OhCarryStep step = OhSplitCarry(object, toCell, g_carries[objectIndex]);
     g_carries[objectIndex] = step.carry;
-    const OhAmountChange change = OhApplyToCell(gases, g_cells[object.cell], step.coarse);
-    g_cells[object.cell] = change.cell;
-    g_cellChanged[object.cell] = pass;
+    const OhAmountChange change = OhApplyToCell(gases, g_cellViews[objectIndex], step.coarse);
+    g_cellViews[objectIndex] = change.cell;
+    g_exchanges[objectIndex] = OhAddFlow(g_exchanges[objectIndex], step.coarse);
     if (change.ok == 0)
         gs_failed = 1;
 }
@@ -1211,6 +1219,12 @@ void WakeChanged(OhObject object, ShellBox box, uint32_t thread, uint64_t tick, 
         return;
 
     const OhObject object = g_objects[objectIndex];
+    // セルへ渡す粗い量は層の無い物も 0 にする(OhShellApplyCells が物の順に足す)。セルの見立ては刻みの初めのセル
+    if (thread == 0) {
+        g_exchanges[objectIndex] = OhZeroFlow();
+        g_cellViews[objectIndex] = g_cells[object.cell];
+    }
+
     if (object.shellLayers == 0)
         return;
 
@@ -1250,7 +1264,7 @@ void WakeChanged(OhObject object, ShellBox box, uint32_t thread, uint64_t tick, 
     uint32_t capped = 0;
     for (uint32_t substep = 0; substep < g_substeps; ++substep) {
         if (thread == 0) {
-            PrepareCell(table, gases, object.cell);
+            PrepareCell(table, gases, g_cellViews[objectIndex]);
             gs_pressureMoved[0] = 0;
         }
 
@@ -1327,7 +1341,7 @@ void WakeChanged(OhObject object, ShellBox box, uint32_t thread, uint64_t tick, 
 
         AllMemoryBarrierWithGroupSync();
         if (thread == 0 && (g_stageMask & OH_STAGE_EXCHANGE) != 0)
-            ExchangeWithCell(gases, object, objectIndex, pass);
+            ExchangeWithCell(gases, object, objectIndex);
 
         AllMemoryBarrierWithGroupSync();
     }
@@ -1357,4 +1371,31 @@ void WakeChanged(OhObject object, ShellBox box, uint32_t thread, uint64_t tick, 
 
     if (gs_overflow != 0)
         InterlockedAdd(g_stats[1], 1u);
+}
+
+// --- 集めて書く段(ADR-0500 の 3・T-1332): セル 1 つ = 1 スレッド。OhShellFlowTick の後(バリアを挟む)---
+// セルごとに物の順(g_ranges の並び = 登録の順)で物の粗い量を足して 1 回だけ当てる。変わったセルは刻みの最後の段の番号
+// (物 o の段 = g_passBase + o + 1 の最後。CPU の ApplyShellFlowToCells の world.pass と同じ)。量が負・枠があふれたら g_stats[0]
+FX_CONST uint32_t OH_SHELL_APPLY_THREADS = 64;
+
+[numthreads(OH_SHELL_APPLY_THREADS, 1, 1)] void OhShellApplyCells(uint3 dispatchThreadId : SV_DispatchThreadID) {
+    const uint32_t index = dispatchThreadId.x;
+    if (index >= g_rangeCount)
+        return;
+
+    const OhCellRange range = g_ranges[index];
+    OhFlow sum = OhZeroFlow();
+    for (uint32_t k = 0; k < range.objectCount; ++k)
+        sum = OhAddFlow(sum, g_exchanges[range.objectBegin + k]);
+
+    if (OhFlowIsZero(sum))
+        return;
+
+    GpuShellGases gases;
+    gases.unused = 0;
+    const OhAmountChange change = OhApplyToCell(gases, g_cells[range.cell], sum);
+    g_cells[range.cell] = change.cell;
+    g_cellChanged[range.cell] = g_passBase + g_objectCount;
+    if (change.ok == 0)
+        InterlockedAdd(g_stats[0], 1u);
 }
