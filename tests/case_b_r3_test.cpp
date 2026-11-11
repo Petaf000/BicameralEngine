@@ -1597,6 +1597,12 @@ namespace {
         EXPECT(tree_slope::RefineSlope(*materials, RefineMode::Neighbors, RefineOrder::Front).hash ==
                neighborsFront.hash);
         EXPECT(tree_slope::RefineSlope(*materials, RefineMode::Isolated, RefineOrder::AtOnce).hash == isolated.hash);
+
+        // 前線の順 = 一度に(T-1314): 子に覆われた隣のセルを子の和から読むので、隣が先に細かくなっても子の粒は同じ
+        EXPECT(neighborsFront.grain == neighbors.grain);
+        std::printf("  前線の順 = 一度に: 隣を読む %s・読まない %s\n",
+                    neighborsFront.grain == neighbors.grain ? "同じ" : "違う",
+                    isolatedFront.grain == isolated.grain ? "同じ" : "違う");
         std::printf("  木で細かくした八分の一 %u(一様でないもの。残りは空気だけの一様な根)\n",
                     neighbors.refinedOctants);
         std::printf(

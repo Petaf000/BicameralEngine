@@ -10,6 +10,7 @@
 //     舞う粒だけのセルは沈めない
 //   - 隣のブロックの列(T-1189): 親のブロックの端の列は隣のブロック(索引で同じレベル)から傾きと下の詰まりを読み、隣が無い世界と変わる。
 //     同じ刻みに隣のブロックを細かくする要求があっても(どちらの順でも)、読むのは刻みの前の写し = 1 つずつ処理した時と同じ
+//   - 前線の順(T-1314): 隣(ブロックの外・中)を先の刻みに細かくしても、子に覆われたセルを子の和から読むので、A の子は一度にと同じ
 // 物質の表は試験の表(MakeSpeciesChangedTestTable)の 2 つの物質を、粒(ばらける固体)と液体に書き換えて使う(相の印とモル体積だけを読む)。
 #include <algorithm>
 #include <array>
@@ -345,6 +346,29 @@ namespace {
                "端の場面: 2 回走らせて状態の要約が同じ");
     }
 
+    // --- 6. 前線の順(T-1314): 隣を先の刻みに細かくしても、A の子は隣が粗いままの刻み(一度に)と同じ ---
+    // 細かくしたばかりの子の和は親 × 8 ちょうどなので、覆われたセルを子の和から読めば、細かくする前の親を読んだのとビット単位で同じ。
+    void TestFrontOrder(const Materials& materials, LayerMode mode) {
+        const MrRequest a = EdgeRequestA();
+        const MrRequest b = EdgeRequestB();
+        const MrRequest inside = EdgeRequestInside();
+        const std::array<MrRequest, 2> bothFirst = {b, inside};
+        const World alone = MakeEdgeWorld(materials, true, std::span(&a, 1), mode);
+        const World afterB = MakeEdgeFrontWorld(materials, std::span(&b, 1), std::span(&a, 1), mode);
+        const World afterInside = MakeEdgeFrontWorld(materials, std::span(&inside, 1), std::span(&a, 1), mode);
+        const World afterBoth = MakeEdgeFrontWorld(materials, bothFirst, std::span(&a, 1), mode);
+
+        const uint64_t aloneA = BlockCellsHash(alone.nest, 1, 8);
+        Expect(aloneA != 0 && afterB.child != MR_NO_BLOCK && afterBoth.child != MR_NO_BLOCK, "前線の順: A の子がある");
+        Expect(BlockCellsHash(afterB.nest, 1, 8) == aloneA, "前線の順: 隣のブロック B を先に細かくしても A の子は同じ");
+        Expect(BlockCellsHash(afterInside.nest, 1, 8) == aloneA,
+               "前線の順: ブロックの中の隣(A の八分の一 0)を先に細かくしても A の子は同じ");
+        Expect(BlockCellsHash(afterBoth.nest, 1, 8) == aloneA, "前線の順: 両方を先に細かくしても A の子は同じ");
+        Expect(HashWholeNest(afterBoth.nest) ==
+                   HashWholeNest(MakeEdgeFrontWorld(materials, bothFirst, std::span(&a, 1), mode).nest),
+               "前線の順: 2 回走らせて状態の要約が同じ");
+    }
+
     int Run() {
         const auto baked = BakeReactionTable(MakeSpeciesChangedTestTable());
         if (!baked) {
@@ -363,6 +387,9 @@ namespace {
         TestShape(materials, placed);
         TestLayers(materials, placed);
         TestEdge(materials);
+        TestFrontOrder(materials, LayerMode::None);
+        TestFrontOrder(materials, LayerMode::Layers);
+        TestFrontOrder(materials, LayerMode::Floating);
         Expect(HashWholeNest(placed.nest) == HashWholeNest(MakeWorld(materials, true).nest),
                "2 回走らせて状態の要約が同じ");
         Expect(HashWholeNest(placed.nest) != HashWholeNest(same.nest), "置かれ方の世界は SAME の世界と違う");
