@@ -1,8 +1,23 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-11-05 午後(本体の作業役 22 回目・この巡目〔claude/47 の再開〕の締め。入れ物の再起動で司令塔が巡目を止めた。前は 21 回目)
+最終更新: 2026-11-12(本体の作業役 23 回目・claude/48 の再開の巡目。前は 22 回目)
 
-## この仕事でしたこと(2026-11-05 午後・本体の作業役・22 回目: この巡目〔claude/47 の再開〕の印 3 本のマージ。入れ物の再起動で司令塔が巡目を止めた)
+## この仕事でしたこと(2026-11-12・本体の作業役・23 回目: part-faces の確かめと push・★ 2026-11-12 ユーザーの答えの反映・t-1294 のマージ・T-1274)
+- **part-faces(94b20ace。前の巡目に main のローカルへ入れて未 push だったもの)**: release ビルド警告 0 → CPU 35 本(phase_layer 系 6・field_owner・tree_refine_placement・multires 系 17・time_step 系 10)全部合格(time_step_tree 1846 秒・multires_gas 489 秒)→ push。印は done/ へ。
+- **★ 2026-11-12 の反映(469bf6f9・push 済み)**: DECISIONS **D-684〜D-693**(Q181 → 案 (c)・Q182 → 形 A・Q180 → 掃き出し 2 回・Q175 → (B)・Q183 → 研究・7 つを仮のまま確定・2 次元の支えの法則は測ってから・陰の伝導の安全網の直し・Q93 ②/Q105 仮のまま・Q174 → スケールに強い形)/
+  QUESTIONS: Q174〜Q186・Q105 を閉じ、答え済みの Q153・Q161 の節を消した・新 **Q187**(2 次元の支えの法則を 3 次元で置き換えるか。測ってから)・Q93 ②・Q157・Q148 に注 /
+  ADR-0489(3 を (B))・0491・0501・0504・0505・0507・0509 を Accepted / チケット T-1273・T-1274・T-1320・T-1321・T-1337・T-1338 を作った / ROADMAP に 6 行・T-1295 の完了条件(3 次元の費用の測り)・T-1223 に「続きは T-1320」/ 設計 20 §12.5 に燃える物が多い時の道 / COMMANDER に今巡の配り。
+- **t-1294-support-3d-mixed(wt3 ad00673b)を main へ(955fc0c0。ROADMAP の T-1294 Done は d9eed9db・push 済み)**: 衝突なし。release 警告 0・CPU support_law・support_3d・support_3d_mixed・support_mixed・support_mixed_neighbor_strain・support_fracture_refine・support_cost・equilibrium_block・warm_start_save・float_check 系 6・dxil_alloca_check(15 本)+ gpu_equilibrium_block HW・WARP(3 次元の混ざる場面も CPU とビット一致)合格。
+- **T-1274(D-685)**: ブランチ t-1274-neighbor-strain-default 13e5f0c1 = support_law.h の既定 None → NeighborStrain(3 次元も同じ欄)・ctest support_mixed_neighbor_strain(--pair 3)を前の既定の比べ support_mixed_pair_none(--pair 0)に置き換え。記録したハッシュを持つ試験は無かった。release 警告 0・CPU warm_start_save・equilibrium_block・support_law・support_3d・support_3d_mixed・support_mixed(171 秒)・support_mixed_pair_none(578 秒)・support_fracture_refine・support_cost(9 本)+ gpu_equilibrium_block HW・WARP 合格 → main へ --no-ff・push。ADR-0509 の追記の材料はチケットに
+- **入れていない印(runner/ready・来た順)**: t-1305-layer-request-cost(wt2)→ t-1230-implicit-parts(wt6)→ t-1228-rc-sources(wt4)→ t-1314-halo-covered(wt5)→ t-1320-shell-scale(wt5・試験の --scale だけ)→ t-1338-grain-layers-default(wt2)→ t-1295-face-forces-3d(wt3)→ t-1337-coarse-sweeps-2(wt4)。
+  2 時間の目安を超えたので次の本体へ。気を付けること: t-1305 と t-1314 は multires_refine_place.hlsli・gpu_tree_refine_placement_test.cpp を両方触る(行は重ならない見込み)・docs/perf.md の末尾の 1 行ずつ(t-1228・t-1337・t-1320・t-1305 = 両方残す)・
+  t-1338・t-1337 のチケットは本体の版と add/add で衝突した所を作業役が解いた(本体の版の頭に足した形)・t-1338 は「土台の印 2 つ」をチケットに(司令塔へ)・ROADMAP に T-1295 Done・T-1325 を足すのは本体。
+  既定の切り替え(T-1338・T-1337・T-1274)は 1 本ずつ入れて、それぞれの後に関係する試験を流す(ハッシュの取り直しが重ならないように)。
+- **運転メモ**: gpu_equilibrium_block_test を run で流す時の引数は `-- --warp --queue compute --no-gbv`(ctest の登録の `gpu` は付けない。付けると使い方で EXIT 2)。GPU の順番待ちで 891 秒待った(wt4 の CPU と GPU の混ざった組がミューテックスを長く持つ)。
+  device_bash の入れ物が途中で起動し直り、nohup で投げた git add が投入されなかった → 投げた後は runner/logs に載ったかを確かめる。
+- 次の番号は **D-694・ADR-0479・Q188**(本体)。司令塔の次は T-1339・ADR-0528。
+
+## 前の仕事でしたこと(2026-11-05 午後・本体の作業役・22 回目: この巡目〔claude/47 の再開〕の印 3 本のマージ。入れ物の再起動で司令塔が巡目を止めた)
 - **マージ(--no-ff・入れた順)**: wt2 t-1240-place-layers 90cf008d(f1a4e17a。T-1240 の 7 の 4 後半 = 置かれ方の世界の層・層を使う世界の舞う粒・層を使う世界を layerPages = 0 の GPU に写す時は断る)/
   wt4 t-1228-skip-grid 8d7483ca(01e261d0。T-1228 段 1 の RadiationGrid = 変わった印のブロックだけ写す。docs/perf.md の末尾が衝突 → 両方残した)/ wt5 t-1257-slope-air 660b5d61(6412677f。T-1257 Done・T-1314 のチケット)。印は runner/ready/done/ へ。
 - **入れていない**: wt6 runner/ready/t-1230-part-faces.txt(司令塔の指示で次のチャットが入れる)。
