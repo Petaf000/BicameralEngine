@@ -576,7 +576,7 @@ namespace {
             if (auto compared = CompareTick(cpu, read, tick); !compared)
                 return std::unexpected(std::format("GPU で粗くする: {}", compared.error()));
 
-            // 段の終わりのタイムスタンプ: 解決・確定・割り当て・塊・(Work Graph + 解放)・索引 × 2
+            // 段の終わりのタイムスタンプ: 解決・確定・割り当て・塊・Work Graph の細かくする・粗くする・解放・索引 × 2
             const std::vector<uint64_t> stamps = gpu->ReadTimestamps(gpu->StageTimestampCount());
             for (uint32_t i = 1; tick == 0 && i < stamps.size(); ++i)
                 stages += std::format("{}{:.3f}", i == 1 ? "" : "/", ToMilliseconds(stamps, i - 1, i, frequency));

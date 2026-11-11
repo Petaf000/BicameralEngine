@@ -1267,6 +1267,7 @@ namespace bicameral::sim {
             BindRoot(list, debugRing);
             list->Dispatch(MR_MAX_REQUESTS, 1, 1);
             UavBarrier(list);
+            StampStage(list);
         }
 
         if (m_wideCells) {
@@ -1287,8 +1288,10 @@ namespace bicameral::sim {
         BindRoot(list, debugRing);
         gpu::WorkGraph::DispatchFromGpu(list, graphInput->GetGPUVirtualAddress() + GRAPH_INPUT_REFINE_HEADER);
         UavBarrier(list);
+        StampStage(list);
         gpu::WorkGraph::DispatchFromGpu(list, graphInput->GetGPUVirtualAddress() + GRAPH_INPUT_COARSEN_HEADER);
         UavBarrier(list);
+        StampStage(list);
         const D3D12_RESOURCE_BARRIER toUav = gpu::Transition(graphInput, D3D12_RESOURCE_STATE_NON_PIXEL_SHADER_RESOURCE,
                                                              D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
         list->ResourceBarrier(1, &toUav);

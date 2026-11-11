@@ -134,6 +134,24 @@ T-1221 の 1 段目は、層の頁を GPU に置き、刻みの段の後に層�
 - 試験: gpu_tree_refine_placement に層の場面(層・1 段・2 段の鎖・舞う粒・層なしで舞う粒・端で隣の層)。gpu_multires_layers に一様な親の影の鎖・
   一様な親へ層の違う一様な子を粗くする(親を頁に広げる)。
 
+## 7 の 5 の詰め(2026-11-05 wt2 作業役 5。t-1240-wide-layers。コードはまだ)
+- 芯: GPU の層の組は**物質で結ぶ**(セルの成分の並びの位置ではない)ので、溢れのあるセル(成分 9 種以上)でも、0 でない層を持つ物質が 8 種まで
+  なら今の置き場(1 セル 8 組・一様の枠 8 組)のまま入る。溢れの塊の並びが毎回変わっても層は崩れない。§5 の「溢れの成分の層の別の置き場」は要らない(案を退ける)。
+- 層を持つ物質が 9 種以上になる道は GPU では**粗くする(子 8 つの層の和 = 物質の和集合)だけ**(刻みは層 = min(層, 量) で減るだけ・
+  細かくする / 広げるは親の組を写すだけ・置かれ方は溢れの世界では使わない〔RecordUpload の place = !wideCells〕)。
+  **【エンジン】仮(おすすめ): 和集合が 8 種を超える粗くする要求は断って数える**(層の頁が尽きた時と同じ MR_STATUS_NO_SPACE・MrLayerShortageAddress)。
+  (溢れを使わない世界は粗くした親が 8 種に入らなければもう断っているので、層の物質 ⊆ 親の成分 ≤ 8 で起きない。)
+  作り手から見た違い: 溢れを使う世界で、層を持つ物質が 9 種以上混ざる所は粗くならない(細かいまま。量・層は変わらない = CPU と同じ値のまま、木だけが違う)。
+  写す時に 9 種以上の層を持つセル・一様の枠があれば RecordUpload が断る。もう 1 つの案(1 セルの組の数を世界ごとに選べる形: 組 × 12 B × 512 が層の頁 1 つに効く)は
+  CPU と必ず一致するが VRAM が組の数に比例。溢れを使う世界で層を持つ物質が 8 種を超える場面が要る現象の一覧に無ければ、おすすめの方。
+- やること(段ごと): ① MakeGpuLayerImage の wideCells の断りを外し、溢れの成分の層(MultiresOverflowArea::layers)も物質で組に詰める(9 種以上なら断る)・
+  ReadLayers も溢れのセルの層を戻す(CPU の WritePageCellWide の layers は成分の位置なので、物質で引き直す)。
+  ② MrLayerAfterWrite が溢れの成分の量を読めるように(溢れの世界の変種は multires_wide_access.hlsli で物質の量を引く。層を合わせる段 multires_layers.hlsl に
+  MR_WIDE_CELLS の変種を足す = shaders/CMakeLists.txt に 1 行。層を合わせる段は RecordStep / RecordStepActive の最後 = WideDeferred・WideRetry・WideBig の後なので順はそのまま)。
+  ③ 木の溢れの変種(multires_graph_wide・multires_tree_wide_fold_check・wide_expand・wide_resolve)の BoundLayerOf を溢れまで読む形に・粗くするの 8 種の上限。
+  ④ 試験: gpu_multires_layers に溢れの世界(層 + 溢れのセル・粗くするで 9 種になって断る場面)〔HW・WARP〕・multires_layers(CPU の往復)。dxil_alloca_check(溢れの変種は 6・graph_wide の数を見る)。
+- 注意: 溢れの量を物質で引く時に 64bit の引き算と比べを並べない(T-1078)。溢れの変種の alloca は覆われたかを 1 回だけ読む形で戻した(上)。
+
 ## 引き継ぎメモ(2026-11-05 wt2 作業役 5。t-1240-place-layers・7 の 4 済み)
 - rebase main(bdeefa1a)→ release 警告 0。司令塔の一旦の決定で、層を使う世界(EnableCellLayers)を layerPages = 0 の GPU に写す時は RecordUpload が断る(D-428)。
 - dxil_alloca_check: 溢れの変種 multires_tree_wide_fold_check が 6 → 7 に増えていた(FoldLayerFlags が MrIsCoveredCell を 2 か所で読む = 枠の子の並びを動的な添字で 2 回)。1 回だけ読む形にして 6 に戻した。
@@ -141,7 +159,7 @@ T-1221 の 1 段目は、層の頁を GPU に置き、刻みの段の後に層�
 - 合格(release・RTX 3070 Ti): dxil_alloca_check・multires_layers・tree_refine_placement・placement_refine・multires・multires_activity・multires_uniform・field_owner・
   gpu_tree_refine_placement〔HW・WARP〕・gpu_multires_layers〔HW・WARP〕・gpu_multires・gpu_lab_box。HW の Work Graph は止まらなかった(層の配りを Compute に出す退く道は要らなかった)。archmap --check OK。
 - **費用(D-468 の印)**: 層のある置かれ方の場面の要求の処理が層なしの 4〜9 倍(1.2 → 11 ms。docs/perf.md)。どの段が重いか(置かれ方の物質の口が成分を毎回数え直す・層の頁の取り方・層を合わせる段)は未確認。別チケットで測るのがおすすめ。
-- 次: 7 の 5(溢れの世界の層)。
+- 次: 7 の 5(溢れの世界の層)。上の「7 の 5 の詰め」の ①〜④。ブランチ t-1240-wide-layers(t-1240-place-layers の上・印を書いた後)。
 
 ## 引き継ぎメモ(2026-11-05 wt2 作業役 4 の 2 回目。t-1240-place-layers・途中)
 - どこまで: 上の「7 の 4 の後半」のコードと試験の場面を書いた。release ビルドは通った(2026-11-05 の runner ジョブ 220302、警告 0)。
