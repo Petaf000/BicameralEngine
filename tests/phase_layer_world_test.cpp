@@ -10,7 +10,7 @@
 //      (熱容量と温度が部分の値)・面が部分の組ごと(PlPartSideOf・PlPairOverlapsOf で手で数えた係数)・層の上の面 / 1 刻みの変化が、系の流れ
 //      (SolveImplicitFlows)を節ごとに足した値とビット単位で同じ / 保存量・部分の熱・層が先に寄る(120 刻み。根だけ・細かくした木 = 違うレベルの面と境のセル)
 //   6. 陰の系の安全網(T-1230 段 2 ③・★8): 部分の組の面・層の上の面は、陽に戻す流れとして陽の部分の道の値(TxPartPairFlow・TxPartInnerFlow =
-//      上限を重なりで縮めた値)を持つ。直しを強くして安全網を起こした解き方で、陽に戻った面の流れがその値とビット単位で同じ
+//      上限を重なりで縮めた値)を持つ。掃き出し 0 回の解き方で安全網を起こし、陽に戻った面の流れがその値とビット単位で同じ
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
@@ -466,23 +466,28 @@ namespace {
         return expected;
     }
 
-    // 6 安全網: 親の直しを強く(Q8 で 16 倍)して V サイクル 1 回で範囲の外に出し、安全網を起こす。範囲を広げて安全網を起こさない解き方と比べ、
-    // 流れが違う面(陽に戻った面)は、部分の組の面なら面に渡した陽の流れそのもの
-    void TestImplicitSafetyNet(const ImplicitGrid& grid, ImplicitOptions solve) {
-        solve.cycles = 1;
-        solve.toleranceMillikelvin = 0;
-        solve.correctionScale = 256 * 16;
+    // 6 安全網: 根のレベル 0(0.5 m)の系は陽でも安定な所なので、写しの面の係数だけを 2^20 倍にし、掃き出し 0 回の赤黒(近似解 = 刻みの初めの温度・
+    // 流れ = 係数 × 初めの温度差)で範囲の外に出して安全網を起こす。範囲を広げて安全網を起こさない同じ解き方と比べ、流れが違う面(陽に戻った面)は、
+    // 部分の組の面なら面に渡した陽の流れそのもの(陽に戻す時に読むのが渡した値だけか)
+    void TestImplicitSafetyNet(const ImplicitGrid& original) {
+        ImplicitGrid grid = original;
+        for (ImplicitFace& face : grid.faces)
+            face.coefficient = ImWideShiftLeft(face.coefficient, 20);
+
+        ImplicitOptions solve;
+        solve.method = ImplicitMethod::RedBlack;
+        solve.sweeps = 0;
         std::vector<int64_t> flows;
         std::vector<int64_t> edgeFlows;
         const ImplicitCost cost = SolveImplicitFlows(grid, solve, flows, edgeFlows);
 
         ImplicitOptions open = solve;
-        open.limitSlackMillikelvin = 1000000;
+        open.limitSlackMillikelvin = 1000000000;
         std::vector<int64_t> openFlows;
         std::vector<int64_t> openEdgeFlows;
         const ImplicitCost openCost = SolveImplicitFlows(grid, open, openFlows, openEdgeFlows);
-        EXPECT(openCost.limitedCells == 0);
         EXPECT(cost.limitedCells != 0);
+        EXPECT(openCost.limitedCells == 0);
 
         size_t givenBack = 0;
         for (size_t f = 0; f < grid.faces.size(); ++f) {
@@ -495,7 +500,9 @@ namespace {
         }
 
         EXPECT(givenBack != 0);
-        std::printf("  安全網: 印のセル %u・陽に戻った部分の組の面 %zu\n", cost.limitedCells, givenBack);
+        std::printf("  安全網: 印のセル %u(広げた範囲で %u)・超えた最大 %lld mK・陽に戻った部分の組の面 %zu\n",
+                    cost.limitedCells, openCost.limitedCells, static_cast<long long>(cost.worstExcessMillikelvin),
+                    givenBack);
     }
 
     void TestImplicitSystem(const BakedReactionTable& table) {
@@ -528,7 +535,7 @@ namespace {
         }
 
         EXPECT(Ec(world, world.root, even) != Ec(before, before.root, even));
-        TestImplicitSafetyNet(grid, solve);
+        TestImplicitSafetyNet(grid);
     }
 
     void TestImplicitRun(const BakedReactionTable& table, bool refine) {
