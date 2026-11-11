@@ -68,7 +68,7 @@ namespace bicameral::sim {
     // (粗いセルが剛体で表せない歪み)を、対の負の項で全部外す(None = 今まで)のではなく、粗いセルの材料がその伸びに持つ硬さ K_C との
     // 直列の分だけ残す: 負の項の係数 = K − K K_C ÷ (K + K_C)。K_C = E × 断面 ÷ 対の中心の間(対の並ぶ向きの硬さの単位 b で)
     enum class MixedPairMaterial : uint8_t {
-        None,         // 今まで(T-1191・ADR-0485。ビット一致)
+        None,         // T-1274 の前の既定(T-1191・ADR-0485。比べ用。ビット一致)
         Section,      // 形 A: 粗いセルの断面全部(2s)÷ s = 12 b
         HalfSection,  // 形 B: 面の側の半分(s)÷ s = 6 b(細かい面の伸びの硬さと同じ)
         // T-1278 の研究(負の項はそのまま全部外し、粗いセル C が表せる一様な歪みからのずれにだけ C の材料の硬さを残す):
@@ -152,7 +152,8 @@ namespace bicameral::sim {
 
         // 違う大きさのセルの間の梁(T-1120)
         MixedBeam mixedBeam = MixedBeam::FacePair;
-        MixedPairMaterial mixedPairMaterial = MixedPairMaterial::None;  // 対の負の項に残す粗いセルの硬さ(T-1261)
+        // 対の負の項に残す粗いセルの硬さ(T-1261)。既定は形 A(D-685・T-1274。前の既定は None)
+        MixedPairMaterial mixedPairMaterial = MixedPairMaterial::NeighborStrain;
 
         // 変位と回り(温めた始まり)を C-1 の温めた始まりの欄に置く(T-0922。値の数 ≥ 成分の数。節 = セル (x, 上, 0)・レベル 0)。
         // Coupled は blocks.warmStart、Lagged は成分 c を値 component + c に。既定は置かない(法則の控えだけ)

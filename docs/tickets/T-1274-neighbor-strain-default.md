@@ -24,3 +24,6 @@
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-11-12 本体: ★(claude/48)の反映でチケットを作った。
+- 2026-11-12 本体: support_law.h の SupportOptions::mixedPairMaterial の既定を NeighborStrain に(2 次元・3 次元〔support_law_3d_mixed〕とも同じ欄を読む)。
+  ctest support_mixed_neighbor_strain(--pair 3)は既定と同じになったので、前の既定の比べ support_mixed_pair_none(--pair 0。根の線の 2 場面は 6 % の線)に置き換えた。
+  記録したハッシュを持つ試験は無かった(support 系・warm_start_save・gpu_equilibrium_block は既定に付いてくる形・gpu_equilibrium_block は None と形 A を両方流す)。

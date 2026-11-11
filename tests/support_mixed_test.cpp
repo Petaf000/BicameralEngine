@@ -11,7 +11,7 @@
 // 角の間のセルだけを 0.25 m に分け、違う大きさのセルが絡む段の棒の形 3 つ(① 中心〔既定〕・② 角の場所・置かない)を ④ で比べる
 // (落ちるのは ① のたわみ ±5 %・帳簿・決定性。縁の力は記録だけ = BraceCase)。
 // 引数: [--ticks n](既定 240)[--case n](n 番目の場面だけ。0 から。測り用)[--study](T-1260 の切り分けの場面。記録だけ)
-//   [--pair n](対の負の項に残す粗いセルの硬さ sim::MixedPairMaterial の番号。既定は SupportOptions の既定〔今は 0 = 無し〕。1・2 = T-1261・3・4 = T-1278 の研究。
+//   [--pair n](対の負の項に残す粗いセルの硬さ sim::MixedPairMaterial の番号。既定は SupportOptions の既定〔今は 3 = NeighborStrain。D-685〕・0 = 前の既定〔無し〕。1・2 = T-1261・3・4 = T-1278 の研究。
 //   3 = NeighborStrain では周りなしの根の線の 2 場面も ±5 % の線〔T-1278〕)
 #include <algorithm>
 #include <cmath>
