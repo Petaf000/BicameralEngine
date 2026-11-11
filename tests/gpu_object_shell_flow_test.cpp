@@ -333,7 +333,7 @@ namespace {
         uint32_t sharedPotential = 0;
         uint32_t pressureSweeps = 1024;  // 圧力の赤黒の上限(CPU の OhShellFlow と同じ既定)
         uint32_t pressureMode =
-            1;  // 1 = 収まったら止める・2 = 温めた始まり・4 = 多重格子(shaders の OH_PRESSURE_*。T-1201・T-1222)
+            1;  // 1 = 収まったら止める・2 = 温めた始まり・4 = 多重格子・8 = 試験だけ 64bit の欄の道(shaders の OH_PRESSURE_*。T-1201・T-1222)
         uint32_t stageMask = ALL_STAGES;  // 回す段(測るだけ。T-1223)
     };
 
@@ -976,6 +976,20 @@ namespace {
                                 shape.name, rule.name, compared.error());
                             return 1;
                         }
+                    }
+                }
+            }
+
+            // 重みが 32bit に入らないボクセルの道(64bit の欄)も CPU と比べる(試験の印 8 = x が 3 の倍数のボクセルをその道へ。T-1320 段 1)
+            const std::array<PressureRule, 2> wideRules = {
+                PressureRule{"0 から収まるまで・64bit の欄の道も", 1024, 1 | 8},
+                PressureRule{"多重格子 + 収まるまで・64bit の欄の道も", 1024, 5 | 8}};
+            for (const PressureRule& rule : wideRules) {
+                for (const bool sharedPotential : {true, false}) {
+                    if (auto compared = RunCompare(context, shapes[0], sharedPotential, rule); !compared) {
+                        Log(Channel::Gpu, Level::Error, "gpu_object_shell_flow_test: FAILED({}・{}: {})",
+                            shapes[0].name, rule.name, compared.error());
+                        return 1;
                     }
                 }
             }
