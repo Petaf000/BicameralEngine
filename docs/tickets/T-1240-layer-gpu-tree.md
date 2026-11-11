@@ -167,7 +167,9 @@ T-1221 の 1 段目は、層の頁を GPU に置き、刻みの段の後に層�
   溢れの量で結ぶ・粗くする時に層の物質の和集合が 8 種を超えたら要求を断る(MR_STATUS_NO_SPACE・MrLayerShortageAddress)。
   ④: RecordUpload の断りを外し、gpu_multires_layers に溢れの世界の毎刻み・粗くするで 9 種になって断る場面〔HW・WARP〕。dxil_alloca_check。
 - このブランチは t-1305-layer-request-cost の上(T-1305 を先に入れる)。
-- **未実行(2026-11-05 入れ物の再起動で止めた)**: この ① のコードは release ビルドも試験もまだ(gpu_multires_layers〔HW・WARP〕の TestWideImage・multires_layers・release 警告 0)。
+- **2026-11-12 wt2(2 本目)**: 新しい t-1305-layer-request-cost(e7a1de9a)の上へ rebase(--onto。衝突なし)→ release ビルド警告 0 → 合格: gpu_multires_layers〔HW・WARP。RTX 3070 Ti〕・
+  multires_layers・dxil_alloca_check。archmap --check OK。次は ②(下の「次 ②」)。印はまだ(① だけで RecordUpload は溢れの世界の層を断ったまま = 入れても害は無いが、② ③ ④ と一緒に入れる)。
+- **未実行(2026-11-05 入れ物の再起動で止めた。→ 2026-11-12 に済んだ)**: この ① のコードは release ビルドも試験もまだ(gpu_multires_layers〔HW・WARP〕の TestWideImage・multires_layers・release 警告 0)。
   次の一手: rebase main(t-1240-place-layers は main f1a4e17a に入った)→ release ビルド → gpu_multires_layers〔HW・WARP〕→ ② へ。
 
 ## 引き継ぎメモ(2026-11-05 wt2 作業役 5。t-1240-place-layers・7 の 4 済み)
