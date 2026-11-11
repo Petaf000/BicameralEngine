@@ -1,6 +1,6 @@
 # T-1332 層の流れのセルへの受け渡しを 1 つのセルに物が何個あっても決定的に(集めて書く段)
 
-- Status: Doing
+- Status: Done(2026-11-12 wt5。マージ待ち)
 - 種類: 工学(不具合)
 - PC: 必須
 - 見積もり: チャット 1 回分
@@ -12,10 +12,10 @@
 司令塔の照らし(docs/design/21 §3・ADR-0500)の通り、新しい口を足さず「書き手の作業 → 集めて書く段」の形で直し、CPU とビット一致にする。
 
 ## 完了条件(チェックできる形で)
-- [ ] 1 つのセルに物 2・3・8 個(2 セル + 1 個・物ごとに熱い層の温度を変える)で CPU と GPU HW / WARP がビット一致
-- [ ] GPU を 2 回回して状態のハッシュが同じ(回ごとに変わらない)
-- [ ] 今の比べ(物ごとに別のセル 2 枚 × 圧力の規則 4 × 置き場 2)がビット一致のまま・object_shell(CPU)が通る
-- [ ] release ビルド警告 0・float_check・dxil_alloca_check・archmap --check
+- [x] 1 つのセルに物 2・3・8 個(2 セル + 1 個・物ごとに熱い層の温度を変える)で CPU と GPU HW / WARP がビット一致
+- [x] GPU を 2 回回して状態のハッシュが同じ(回ごとに変わらない)
+- [x] 今の比べ(物ごとに別のセル 2 枚 × 圧力の規則 4 × 置き場 2)がビット一致のまま・object_shell(CPU)が通る
+- [x] release ビルド警告 0・float_check・dxil_alloca_check・archmap --check
 
 ## 形(作り手から見た違い)
 - **物の刻み**(OhShellFlowTick・CPU の StepShellFlow): 囲むセルを読むだけ。刻みの初めにセルを物ごとの見立て(g_cellViews・OhShellFlow::cellView)へ写し、
@@ -35,3 +35,5 @@
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-11-12(wt5): 司令塔の照らしで作った。GPU は物の刻みをセルの読みだけにし、物ごとの粗い量 → OhShellApplyCells(物の順に足して 1 回)。CPU も同じ足し方(StepShellFlows)に。
   gpu_object_shell_flow_test に 1 セルに 2・3・8 個の比べと 2 回のハッシュの比べを足した。
+- 2026-11-12(wt5): release 警告 0・object_shell(CPU --quick 523 秒)・float_check 5 本・dxil_alloca_check・gpu_object_shell_flow(HW 163 秒)・_warp(978 秒。上限 1800 の半分を超えた。
+  1 セルに 8 個 × 2 + 1 = 17 個の比べが WARP で重い)・archmap --check が通った。物ごとに別のセルの今の比べ 16 通りもビット一致のまま(物 1 つのセルで見る値は前と同じ)。
