@@ -466,7 +466,7 @@ namespace {
         for (uint32_t r = 0; r < splits; ++r) {
             test::StepObjectHeatReactions(table, world, WORLD_SEED, objectTick + r);
             if (withFlow)
-                ok = test::StepShellFlow(table, gases, world, 0, flow, objectTick + r) && ok;
+                ok = test::StepShellFlows(table, gases, world, std::span(&flow, 1), objectTick + r) && ok;
         }
 
         flow.substeps = substeps;
@@ -547,7 +547,7 @@ namespace {
             if (splits == 1) {
                 test::StepObjectHeat(shared, gases, world, lensOn, WORLD_SEED, tick);
                 if (mode == ShellMode::Flow)
-                    burn.failed = burn.failed || !test::StepShellFlow(shared, gases, world, 0, flow, tick);
+                    burn.failed = burn.failed || !test::StepShellFlows(shared, gases, world, std::span(&flow, 1), tick);
             } else {
                 burn.failed = burn.failed || !StepSplit(objectShared, gases, world, flow, mode == ShellMode::Flow,
                                                         lensOn, objectTick, splits);

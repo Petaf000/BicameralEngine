@@ -236,6 +236,8 @@ bicameral_add_shader(sim/object_heat.hlsl PROFILE cs_6_8 ENTRY OhListPlace NAME 
 bicameral_add_shader(sim/object_heat.hlsl PROFILE cs_6_8 ENTRY OhFinishObjects NAME object_heat_finish_objects)
 # 物のまわりの空気の層の流れ(物 1 つ = 1 グループで 1 刻みを中で回す研究の形。T-1200。比べと費用は tests/gpu_object_shell_flow_test.cpp)
 bicameral_add_shader(sim/object_shell_flow.hlsl PROFILE cs_6_8 ENTRY OhShellFlowTick NAME object_shell_flow)
+# 集めて書く段(セルごとに物の順で物の粗い量を足して 1 回だけ当てる。ADR-0500 の 3・T-1332)
+bicameral_add_shader(sim/object_shell_flow.hlsl PROFILE cs_6_8 ENTRY OhShellApplyCells NAME object_shell_apply_cells)
 # 同じ形のグループのスレッドの数を変えたもの(費用の比べだけ。--threads。T-1223)
 bicameral_add_shader(sim/object_shell_flow.hlsl PROFILE cs_6_8 ENTRY OhShellFlowTick NAME object_shell_flow_t256 DEFINES OH_SHELL_GROUP_THREADS=256)
 bicameral_add_shader(sim/object_shell_flow.hlsl PROFILE cs_6_8 ENTRY OhShellFlowTick NAME object_shell_flow_t512 DEFINES OH_SHELL_GROUP_THREADS=512)
