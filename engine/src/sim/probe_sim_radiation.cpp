@@ -47,7 +47,9 @@ namespace bicameral::sim {
         grid.size = {PROBE_GRID_SIZE, PROBE_GRID_SIZE, PROBE_GRID_SIZE};
         grid.lights.resize(PROBE_CELL_COUNT);
         grid.temperatureMk.resize(PROBE_CELL_COUNT);
-        auto cascade = GpuCascadeLight::CreateStandalone(device, grid, params, RADIATION_CAPACITY);
+        // 放つセルの一覧(T-1228 段 1)は参照の温度の形だけ(写しの段が放つかを側ごとに求めて一覧を直す。1 側の形は求めない)
+        const bool emitterList = params.referenceMk != 0 && !m_options.radiationSourcesAll;
+        auto cascade = GpuCascadeLight::CreateStandalone(device, grid, params, RADIATION_CAPACITY, emitterList);
         if (!cascade)
             return std::unexpected("熱の放射の段を作れない: " + cascade.error());
 
@@ -56,7 +58,8 @@ namespace bicameral::sim {
         if (params.referenceMk != 0) {
             CascadeParams negativeParams = params;
             negativeParams.negativePart = true;
-            auto negative = GpuCascadeLight::CreateStandalone(device, grid, negativeParams, RADIATION_CAPACITY);
+            auto negative = GpuCascadeLight::CreateStandalone(device, grid, negativeParams, RADIATION_CAPACITY,
+                                                              emitterList);
             if (!negative)
                 return std::unexpected("熱の放射の段の負の側を作れない: " + negative.error());
 
@@ -66,7 +69,8 @@ namespace bicameral::sim {
             if (positiveLayout.stateEmitted != negativeLayout.stateEmitted ||
                 positiveLayout.stateAbsorbed != negativeLayout.stateAbsorbed ||
                 positiveLayout.workLights != negativeLayout.workLights ||
-                positiveLayout.workTemperatures != negativeLayout.workTemperatures)
+                positiveLayout.workTemperatures != negativeLayout.workTemperatures ||
+                positiveLayout.workEmitBits != negativeLayout.workEmitBits)
                 return std::unexpected("熱の放射の段: 正の側と負の側の作業・状態の並びが違う");
 
             m_cascadeNegative.emplace(std::move(*negative));

@@ -336,6 +336,9 @@ namespace bicameral::sim {
         // 放射の写しの段(RadiationGrid)が毎刻み全部のセルを写す(T-1228 段 1。比べる試験だけ。既定は前の刻みの写しの後で変わった印の
         // ブロックだけ写す = 結果は同じ。ProbeRadiationBlockStale)
         bool radiationCopyAll = false;
+        // 放射の段の RcSources が毎刻み全部のセルを回す(T-1228 段 1。比べる試験だけ。既定は参照の温度の形で、写しの段が持つ
+        // 放つセルの一覧のセルだけ回す = 結果は同じ。1 側の形〔0 K の空〕はいつも全部)
+        bool radiationSourcesAll = false;
     };
 
     // --- GPU で走らせる ---

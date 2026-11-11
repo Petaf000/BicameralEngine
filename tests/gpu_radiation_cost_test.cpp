@@ -10,6 +10,8 @@
 //   どの場面でも入っていて、CPU リファレンスとの一致は gpu_play_metric・gpu_probe_sim が見る。
 //   写しの段が変わった印のブロックだけ写しても(T-1228 段 1)、毎刻み全部写す時と刻みごとのハッシュと飛ばした刻みの数が全部同じ
 //   (火の場面と飛ばす段の場面。飛ばした刻みの数が同じ = 側ごとの放つセルの数が写すブロックを減らしても合う)。
+//   RcSources が放つセルの一覧のセルだけ回しても(T-1228 段 1)、毎刻み全部のセルを回す時と刻みごとのハッシュが全部同じ(火の場面)。
+//   飛ばす段の場面は印も一覧も使わない時(写しは毎刻み全部・全部のセルを回す)とハッシュと飛ばした刻みの数を比べる。
 // 引数: gpu_test_options.h(--warp・--no-gbv)と --ticks n(既定 48)・--measure(全部の場面を測ってログに。既定は火の場面だけ)
 #include <algorithm>
 #include <array>
@@ -168,13 +170,14 @@ namespace {
 
     std::optional<Run> RunScene(ID3D12Device5* device, gpu::Queue& queue, const BakedReactionTable& table,
                                 const Scene& scene, uint64_t ticks, bool timing, bool skipIdle = true,
-                                bool indirect = false, bool copyAll = false) {
+                                bool indirect = false, bool copyAll = false, bool sourcesAll = false) {
         auto created = ProbeSim::Create(device, D3D12_COMMAND_LIST_TYPE_COMPUTE, table,
                                         {.cascadeRadiation = scene.cascade,
                                          .radiationStageTiming = timing,
                                          .radiationSkipIdle = skipIdle,
                                          .radiationIndirectLevels = indirect,
-                                         .radiationCopyAll = copyAll});
+                                         .radiationCopyAll = copyAll,
+                                         .radiationSourcesAll = sourcesAll});
         if (!created) {
             Log(Channel::Sim, Level::Error, "{}", created.error());
             return std::nullopt;
@@ -302,23 +305,33 @@ namespace {
         failures.Check(plain && copyingAll && copyingAll->ok && copyingAll->hashes == plain->hashes,
                        "変わったブロックだけ写しても全部写す時と刻みごとの世界のハッシュが全部同じ(火の場面)");
 
+        // --- RcSources を放つセルの一覧のセルだけにしても結果が同じ(T-1228 段 1。毎刻み全部のセルを回す時と)---
+        const std::optional<Run> sourcingAll = RunScene(device, *queue, table, scenes.front(), ticks, false, true,
+                                                        false, false, true);
+        failures.Check(
+            plain && sourcingAll && sourcingAll->ok && sourcingAll->hashes == plain->hashes,
+            "放つセルの一覧のセルだけ回しても全部のセルを回す時と刻みごとの世界のハッシュが全部同じ(火の場面)");
+
         // --- 側が空の刻みを飛ばしても結果が同じ(T-1229・T-1235。飛ばさない時と刻みごとのハッシュが全部一致)---
         for (const Scene& scene : SkipScenes()) {
             const std::optional<Run> skipping = RunScene(device, *queue, table, scene, ticks, false, true);
             const std::optional<Run> running = RunScene(device, *queue, table, scene, ticks, false, false);
             const std::optional<Run> indirect = RunScene(device, *queue, table, scene, ticks, false, true, true);
-            const std::optional<Run> copying = RunScene(device, *queue, table, scene, ticks, false, true, false, true);
+            // 印も一覧も使わない(写しは毎刻み全部・RcSources は全部のセル。T-1228 段 1)
+            const std::optional<Run> copying = RunScene(device, *queue, table, scene, ticks, false, true, false, true,
+                                                        true);
             failures.Check(skipping && skipping->ok && running && running->ok && indirect && indirect->ok && copying &&
                                copying->ok,
                            std::format("流せた: {}", scene.name));
             if (!skipping || !running || !indirect || !copying)
                 continue;
 
-            // 写しを変わったブロックだけにしても(T-1228 段 1)、全部写す時とハッシュも飛ばした刻みの数も同じ
-            failures.Check(
-                skipping->hashes == copying->hashes && skipping->skippedPositive == copying->skippedPositive &&
-                    skipping->skippedNegative == copying->skippedNegative,
-                std::format("変わったブロックだけ写しても全部写す時とハッシュ・飛ばした刻みが同じ: {}", scene.name));
+            // 写しを変わったブロックだけ・RcSources を一覧のセルだけにしても(T-1228 段 1)、印も一覧も使わない時とハッシュも
+            // 飛ばした刻みの数も同じ
+            failures.Check(skipping->hashes == copying->hashes &&
+                               skipping->skippedPositive == copying->skippedPositive &&
+                               skipping->skippedNegative == copying->skippedNegative,
+                           std::format("印と一覧を使っても使わない時とハッシュ・飛ばした刻みが同じ: {}", scene.name));
 
             // 段 1 からの間接の起動(T-1235。既定は切る・ADR-0495)を入れても同じ
             failures.Check(skipping->hashes == indirect->hashes,
@@ -346,14 +359,17 @@ namespace {
             LogRun(scene, *run, ticks, frequency);
             // 測りの時は同じ場面を別の形でも(段 1 からを間接の起動・側を飛ばさない。T-1235 の前後を同じ回の中で比べる)
             // (T-1228: 写しを毎刻み全部にした時も)
-            for (const auto& [skipIdle, indirect, copyAll, label] :
-                 {std::tuple{true, true, false, "間接の起動"}, std::tuple{false, false, false, "飛ばさない・直の起動"},
-                  std::tuple{true, false, true, "写しは毎刻み全部"}}) {
+            // (T-1228 段 1: RcSources が毎刻み全部のセルを回す時も)
+            for (const auto& [skipIdle, indirect, copyAll, sourcesAll, label] :
+                 {std::tuple{true, true, false, false, "間接の起動"},
+                  std::tuple{false, false, false, false, "飛ばさない・直の起動"},
+                  std::tuple{true, false, true, false, "写しは毎刻み全部"},
+                  std::tuple{true, false, false, true, "RcSources は全部のセル"}}) {
                 if (!measureAll || !scene.cascade.enabled)
                     break;
 
                 const std::optional<Run> before = RunScene(device, *queue, table, scene, ticks, true, skipIdle,
-                                                           indirect, copyAll);
+                                                           indirect, copyAll, sourcesAll);
                 const std::string name = std::format("{}・{}", scene.name, label);
                 Scene labeled = scene;
                 labeled.name = name;

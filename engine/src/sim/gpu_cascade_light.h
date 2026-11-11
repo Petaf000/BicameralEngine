@@ -62,10 +62,13 @@ namespace bicameral::sim {
             ID3D12Device5* device, const GpuMultires& nest, const MultiresNest& shape, const BakedReactionTable& table,
             const CascadeParams& params, const GpuCascadeCapacity& capacity);
 
-        // 仮の世界用(T-1154): 自分のルート署名で動く。grid の光の値と温度は初めの値(毎刻み呼ぶ側が作業のバッファへ書き直す)
+        // 仮の世界用(T-1154): 自分のルート署名で動く。grid の光の値と温度は初めの値(毎刻み呼ぶ側が作業のバッファへ書き直す)。
+        // emitterList なら作業に放つセルの一覧(1 セル 1 bit。RcGpuParams の workEmitBits。初めは空)を置き、RcSources は一覧のセルだけ回す
+        // (T-1228 段 1)。一覧を「作業の今の中身で放つセル」に保つのと、放った・吸ったの欄を読んだ後に 0 に戻すのは呼ぶ側の段
+        // (仮の世界の参照の温度の形: shaders/sim/probe_radiation.hlsl)。grid の温度は 0 でなければならない(一覧が空と合う)
         [[nodiscard]] static std::expected<GpuCascadeLight, std::string> CreateStandalone(
             ID3D12Device5* device, const CascadeGrid& grid, const CascadeParams& params,
-            const GpuCascadeCapacity& capacity);
+            const GpuCascadeCapacity& capacity, bool emitterList = false);
 
         // 作業(段の形・光の値・温度・初めの持ち越し)を写し、状態を 0 にする。1 本のリストに 1 回
         [[nodiscard]] bool RecordUpload(ID3D12GraphicsCommandList10* list, GpuMultires& nest,
@@ -143,10 +146,11 @@ namespace bicameral::sim {
         void RecordTickWith(ID3D12GraphicsCommandList10* list, GpuMultires* nest, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                             uint64_t tick, uint32_t in, gpu::StageStamps* stamps = nullptr, uint8_t firstStage = 0);
         // treeLights は木を読む形の物質の光の値(作業のバッファの温度の後ろへ。空なら置かない)
+        // emitterList は CreateStandalone と同じ
         static std::expected<GpuCascadeLight, std::string> CreateWith(
             ID3D12Device5* device, ID3D12RootSignature* rootSignature, const CascadeGrid& grid,
             const CascadeParams& params, const GpuCascadeCapacity& capacity,
-            std::span<const reaction::LtSpeciesLight> treeLights = {});
+            std::span<const reaction::LtSpeciesLight> treeLights = {}, bool emitterList = false);
 
         ComPtr<ID3D12RootSignature> m_ownRoot;  // CreateStandalone の時だけ
         std::vector<ComPtr<ID3D12PipelineState>> m_pipelines;
