@@ -1433,11 +1433,7 @@ namespace bicameral::sim {
                                   .levelsLeft = levelCount,
                                   .kind = MR_BLOCK_SHADOW,
                                   .depth = 0};
-        if (m_fieldCount >
-            0)  // 影の鎖は欄の区画を読まない(T-1252 の残り)。載せる欄のある世界では配り手の欄が CPU と変わる
-            Log(Channel::Gpu, Level::Error, "影の鎖は配り手の欄をまだ配らない(T-1252 段 2 の残り)");
-
-        const ExternalBinding saved = BindLayers();  // 影の子の頁へ層を写す(T-1240)
+        const ExternalBinding saved = BindLayers();  // 影の子の頁へ層・載せた欄を写す(T-1240・T-1252)
         DispatchGraph(list, debugRing, EntryRefine, &record, sizeof(record));
         RestoreExternal(saved);
     }
@@ -1451,7 +1447,9 @@ namespace bicameral::sim {
     void GpuMultires::RecordPullBack(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
                                      uint32_t firstShadowSlot, uint32_t levelCount) {
         const ChainRecord record{.slot = firstShadowSlot, .levelsLeft = levelCount};
+        const ExternalBinding saved = BindLayers();  // 載せた欄を引き戻す(T-1252)
         DispatchGraph(list, debugRing, EntryPullBack, &record, sizeof(record));
+        RestoreExternal(saved);
         RecordLayerReconcile(list, debugRing);  // 影のセルを書き直した後(CPU の StoreCellAt の付け替え。T-1240)
     }
 

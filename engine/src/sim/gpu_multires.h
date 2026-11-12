@@ -84,8 +84,9 @@ namespace bicameral::sim {
         // 置き場は層の置き場の後ろ(u4 の同じバッファ。並びは common/multires_field_pages.hlsli の「欄の区画」)。RecordUpload が写し、Read が戻す。
         // 木の段の要求の処理(割り当て・細かくする鎖・粗くする・解放。TreeSettle の一様のままの判定)は区画を読み書きし、CPU と
         // 頁の番号までビット一致(T-1252 段 2 の 4 本目。試験 gpu_field_region)。欄の頁が尽きたら細かく/粗くする要求を断る(GPU だけ。数える)。
-        // まだの所(T-1252 の段 2 の残り): 影の鎖(RecordRefineShadow・引き戻し)・畳む(RecordFoldPages)・広げる(TreeExpand)・集めて書く段は
-        // 区画を読まない = 載せる欄のある世界でそれらを通すと配り手の欄が CPU と変わる(使い手が無い間の途中の形)。
+        // 影の鎖(RecordRefineShadow・RecordPullBack)・畳む(RecordFoldPages)・広げる(刻みの TreeExpand)も区画を読み書きする(5 本目)。
+        // 影・広げる段で欄の頁が尽きたら頁なしで数える(断れない。CPU とずれる = fieldPages を足りる数に)。
+        // まだの所(T-1252 の段 2 の残り): 集めて書く段は木の段に載っていない(使い手が無い間の途中の形)。
         // 保存量の配り手の欄(粗くする余りの帳簿)・相の層の配り手の欄(セルを読む。T-1231)は写さない(RecordUpload が false)
         uint32_t fieldPages = 0;
         uint32_t fieldValues = 0;  // 載せる欄の値の数の和の上限(0 = state_field の SF_MAX_COMPONENTS)
