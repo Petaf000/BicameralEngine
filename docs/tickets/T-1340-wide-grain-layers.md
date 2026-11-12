@@ -5,7 +5,7 @@
 - PC: 必須(GPU)
 - 見積もり: チャット 1〜2 回分
 - マイルストーン: 土台の変更要求の束(T-1240 の残り)
-- 設計: ADR-0489 の 3 (B)・docs/design/20 §10.5 / 決定: D-687 / 前: T-1323(溢れを使わない世界)・T-1240 の 7 の 5(溢れの成分の層)
+- 設計: ADR-0489 の 3 (B)・ADR-0533(写し方)・docs/design/20 §10.5 / 決定: D-687 / 前: T-1323(溢れを使わない世界)・T-1240 の 7 の 5(溢れの成分の層)
 
 ## 目的(1〜2 行)
 層を使う世界で反応が粒を生む表(T-1322 の CPU の規則 `nest_detail::GrowGrainLayers`)を、溢れを使う世界(wideCells)の GPU でも CPU とビット一致させる。
@@ -73,3 +73,5 @@
   ② SnapshotGrainCells の溢れの変種 ③ ReconcileGrownLayers の溢れの変種 ④ 断りを外して RunGrainBornScenes を溢れの世界で。
 - 2026-11-13 wt2: 実装(上)。release 警告 0・dxil_alloca_check(新しい 2 つは 0)・float_check 系・archmap --check OK。
   gpu_multires_layers の結果は下の行。既定の答え・ハッシュは変えていない(溢れを使わない変種は同じ式。溢れの世界で粒を生まない表は段を通らない)。
+  合格(release・RTX 3070 Ti): gpu_multires_layers〔HW 55 s。10 の 4 場面を含む〕・multires 系 17 本(CPU)。
+  gpu_multires_layers_warp・gpu_multires_wide_overflow・gpu_multires_wide_uniform は返す時に GPU の順番待ち(20261112-160409-test の続き。司令塔が結果を見る)。
