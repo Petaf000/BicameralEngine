@@ -72,3 +72,5 @@ GPU の多重格子(3.65 ms)が同じ回の決まった 24 回(3.31〜3.35 ms)�
   仕上げを「動かない点」でなく別の決まった答え(例: 多重格子の答えを四捨五入したものをそのまま使い、保存は面の流れで守る)にする設計の変更 = D-677 に触れるので【エンジン】の問い(司令塔へ。この票では入れない)。
   入れたもの(既定は今の規則のまま・答えとハッシュは不変): CPU の pressureMultigridSmooth・pressureMultigridCycles(tests/object_flow_cpu.h)・object_shell_test --case の 13 番目・
   GPU の g_pressureMode の 8〜11 bit(object_shell_flow.hlsl の MgSolveStart)・gpu_object_shell_flow_test --mg-extra N。調べる口として残す(要らなければマージの時に外してよい)。
+  main 1aca8e6f(t-1320-shell-trim 入り)へ rebase(object_shell_flow.hlsl の定数の並びと perf.md の末尾が衝突 → 両方残した。OH_PRESSURE_TEST_WIDE = 8 は bit 3、重ねる V 字の数は bit 8〜11 で重ならない)。
+  rebase 後: release 警告 0・object_shell・float_check 5 本・dxil_alloca_check 合格・archmap --check OK・clang-format OK。GPU(HW)も合格: ctest gpu_object_shell_flow(既定)・--mg-extra 1 の比べ(runner/t1321/cmp2.ps1。64bit の欄の道も含めて CPU とビット一致)。WARP は流していない。印 runner/ready/t-1321-shell-mg-rules.txt。
