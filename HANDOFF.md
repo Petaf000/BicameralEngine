@@ -3,9 +3,10 @@
 最終更新: 2026-11-12(本体の作業役 28 回目・claude/50 の再開の巡目の締め。前は 27 回目)
 
 ## この仕事でしたこと(2026-11-12・本体の作業役・28 回目〔この巡目の最後〕: runner/ready の印のマージ・試験・push)
-- **入れた(--no-ff・来た順・既定の切り替えではない・衝突なし)**: wt2 t-1240-wide-layers-2 4e72390c(4af1dc44。T-1240 Done = 7 の 5 の ②③④・溢れを使う世界の層を GPU で)/ wt4 t-1346-bench-energy 80910285(0bba3f1f。測りの道具 2 本とチケットだけ・シミュのコードは不変)/ wt3 t-1343-shell-finish-answer 5415dc26(89f256ab。T-1343 研究 Done・捨てる試作の口だけ・既定 0 = 答えとハッシュ不変)/ wt6 t-1252-tree-gpu-4 a8b3c4a5(d54c4d09。T-1252 段 2 の 5 本目 = 影の鎖・引き戻し・畳む・TreeExpand が欄の区画を読み書き・ADR-0532 の 7)。
+- **入れた(--no-ff・来た順・既定の切り替えではない・衝突なし)**: wt2 t-1240-wide-layers-2 4e72390c(4af1dc44。T-1240 Done = 7 の 5 の ②③④・溢れを使う世界の層を GPU で)/ wt4 t-1346-bench-energy 80910285(0bba3f1f。測りの道具 2 本とチケットだけ・シミュのコードは不変)/ wt3 t-1343-shell-finish-answer 5415dc26(89f256ab。T-1343 研究 Done・捨てる試作の口だけ・既定 0 = 答えとハッシュ不変)/ wt6 t-1252-tree-gpu-4 a8b3c4a5(d54c4d09。T-1252 段 2 の 5 本目 = 影の鎖・引き戻し・畳む・TreeExpand が欄の区画を読み書き・ADR-0532 の 7)/ wt5 t-1350-shell-dispatch-split 4ec13ad9(c4145f1c。T-1350 Done・t-1331-shared-air-grid と t-1349 を含む。docs/perf.md の末尾と tests/object_flow_cpu.h〔T-1343 の仕上げの口と T-1349 の見張り〕が文字で衝突 → 両方残した。object_shell_flow.hlsl は自動で合わさった = t-1321 の調べる口は g_pressureMode の 8〜11 bit、分ける段は別のルート定数 g_split なので重ならない)。
 - **試験(release・警告 0・RTX 3070 Ti)**: t-1240 の後 = CPU 13 本(multires・multires_layers・multires_wide・multires_state・field_owner・field_storage・tree_refine_placement・float_check 系 5・dxil_alloca_check〔multires_graph_wide の上限 55 の表で main でも合格〕)+ GPU 5 本(gpu_multires・gpu_multires_layers〔HW・WARP〕・gpu_field_region・gpu_tree_refine_placement)合格・archmap --check OK /
   t-1343 の後 = release ビルド警告 0・object_shell・float_check 系 5・dxil_alloca_check・gpu_object_shell_flow(HW 76 秒)合格 /
+  t-1350 の後 = release ビルド警告 0・archmap --check OK・object_shell(421 秒)・float_check 系 5・dxil_alloca_check + GPU gpu_object_shell_flow(HW 93 秒)・gpu_object_shell_flow_warp(672 秒)・gpu_object_shell_flow_large(HW 75 秒)合格 /
   t-1252-tree-gpu-4 の後 = release ビルド警告 0・CPU 12 本(field_owner・multires・multires_sparse・multires_layers・multires_wide・tree_refine_placement・float_check 系 5・dxil_alloca_check)+ GPU 8 本(gpu_multires・gpu_multires_layers〔HW・WARP〕・gpu_multires_uniform・gpu_lab_box・gpu_field_region〔HW・WARP〕・gpu_tree_refine_placement)合格・archmap --check OK /
   t-1346 の後 = release ビルド警告 0(ctest に無い道具なので試験の取り直しなし)+ GPU gpu_multires_wide_* 6 組と gpu_multires_wide_warp(t-1240 の rebase 後に流していなかった分): 7 本とも合格(wide_warp 353 秒)
 - **記録**: ROADMAP(T-1240 Done・T-1341〔不具合・決定性・次の巡目の最優先〕と T-1340 の行を足した・T-1346 / T-1347 Done〔仮〕・T-1156 の行を足した〔次の巡目で T-1341 の次・司令塔の仮〕・T-1343 Done)・QUESTIONS(Q188【エンジン】)・NEXT。印は done/ へ。
@@ -14,7 +15,8 @@
 - **wt2 から**: T-1341 = 溢れを使う世界で 9 段の鎖(test::MultiresScenario::Real を 1 つの要求で)を回すと、層なしでも刻み 10 で CPU と GPU が食い違う(段 9 のブロックのセル 0 の量・T-1240 の前から・今までの溢れの試験は 2 段の鎖まで。疑い = TreeWideReserve の RefineTailEntries の深さか細かい段の刻み。詳しくは docs/tickets/T-1240-layer-gpu-tree.md の 7 の 5)。T-1340 = 溢れを使う世界で粒を生む表の層(RecordUpload が断る)。どちらもチケットのファイルは着手する時に作る。
 - **wt3 から**: T-1343 = 案 (i) 線 7(多重格子を残差が Ψ の半分以下まで回して丸める・赤黒の仕上げなし)が費用は今の約半分・V 字 2.4〜2.8 回で箱と層の数で増えない・上限に当たらない・保存 0・速さは閉じた 1 セルで 0.1〜0.4 %・世界の流れで +1 %。(ii) は打ち切り。→ **Q188【エンジン】を QUESTIONS に足した**(仮のおすすめ = 案 A・答えまで既定は変えない)。案 A なら新しいチケットで GPU 化・ビット一致・時間・ハッシュの取り直しを 1 本で(T-1350 の後)。
 - **wt6 から(司令塔の印)**: T-1252 段 2 の 5 本目の仮 = 影の鎖と広げる段で欄の頁が尽きたら頁なしで数える(断れないので CPU とずれる・層の頁と同じ・fieldPages を足りる数にする約束)。容量の約束を破ると CPU と GPU がずれるのは D-428 に近い → **次の巡目で「容量を起動時に見積もって足りない世界を写さない」形を検討する**。T-1252 の残り = 集めて書く段を木の段に(T-1227 / T-1228 と一緒)→ 保存量の配り手の欄 → 相の層の配り(T-1231)・T-1230 ③。
-- **残った印**: なし(この時点。来た印は来た順に)
+- **wt5 から**: T-1350 = 分けるのは自動(一番大きい箱 × 上限 × 小刻み 4 > 2^25 の時だけ・閾値は仮)・今の場面は 1 つの Dispatch のまま = ハッシュ不変・ルート定数 12 個(64 語ちょうど)。12 万ボクセルの箱は止まらず 1 刻み 3,583 ms(全部上限に当たる = T-1349 ① の根・予算の 360 倍 → Q188 の案 A で解ける見込み)。物 1000 個の小さい箱が全部上限に当たると 1 Dispatch が 2 s 級の見込み(未確認)。T-1349 = ② は Done・① は Q188 待ち。T-1331 のコードは Q188 待ち。
+- **残った印**: なし(今巡の印は全部入れた)
 - 次の番号は **D-696・ADR-0479・Q189**(本体。Q188 は使った)。
 
 ## この仕事でしたこと(2026-11-12・本体の作業役・27 回目: runner/ready の印 4 本のマージ・試験・push・gpu_object_shell_flow を main で)
