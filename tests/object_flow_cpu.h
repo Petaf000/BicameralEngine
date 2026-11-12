@@ -46,6 +46,10 @@ namespace bicameral::test {
         uint64_t pressureSweepsUsed = 0;
         uint32_t pressureMostSweeps = 0;
         uint64_t pressureCapped = 0;
+        // 調べるだけ(T-1349): 上限で止まった解きの、最後の赤黒で動いたボクセルの数の和・動いた幅の最大・2 回前の赤黒の後と同じ値に戻っていた解きの数(周期 2 の行き来)
+        uint64_t cappedLastMoved = 0;
+        int64_t cappedLastStep = 0;
+        uint64_t cappedCycle2 = 0;
         // 解き始めを多重格子で作る(T-1202。最後は同じ赤黒を収まるまで)・その費用の和(細かい格子の赤黒 1 回 = 1000)
         bool pressureMultigrid = false;
         // 調べるだけ(T-1201): 「収まった」とみなす 1 回の赤黒の値の変わりの上限(0 = 1 つも変わらない。GPU は 0 だけ)
@@ -632,10 +636,15 @@ namespace bicameral::test {
         };
 
         std::vector<int64_t> atGap;
+        std::array<std::vector<int64_t>, 2> lastTwo;  // T-1349: 最後の 3 回のうち前の 2 回の後の値(周期 2 の見張り)
         uint32_t used = 0;
         bool quiet = false;
+        uint64_t movedCount = 0;
+        int64_t movedStep = 0;
         for (uint32_t sweep = 0; sweep < flow.pressureSweeps; ++sweep) {
             bool moved = false;
+            movedCount = 0;
+            movedStep = 0;
             for (uint32_t colour = 0; colour < 2; ++colour) {
                 for (uint32_t z = 0; z < box.size[2]; ++z) {
                     for (uint32_t y = 0; y < box.size[1]; ++y) {
@@ -665,6 +674,11 @@ namespace bicameral::test {
 
                             const int64_t value = rx::OhMulDivToward0(sum, 1, std::max<uint64_t>(total, 1));
                             moved = moved || std::abs(value - potential[v]) > flow.pressureQuietTolerance;
+                            if (std::abs(value - potential[v]) > flow.pressureQuietTolerance) {
+                                ++movedCount;
+                                movedStep = std::max(movedStep, std::abs(value - potential[v]));
+                            }
+
                             activeEvaluations += dirty[v];
                             dirty[v] = 0;
                             if (value != potential[v])
@@ -680,6 +694,9 @@ namespace bicameral::test {
             if (flow.gapSweeps != 0 && used == flow.gapSweeps)
                 atGap = potential;
 
+            if (sweep + 3 >= flow.pressureSweeps && sweep + 1 < flow.pressureSweeps)
+                lastTwo[sweep % 2] = potential;
+
             if (flow.pressureUntilQuiet && !moved) {
                 quiet = true;
                 break;
@@ -694,6 +711,11 @@ namespace bicameral::test {
         flow.pressureActiveWork += (activeEvaluations * 1000) / count;
         flow.pressureMostSweeps = std::max(flow.pressureMostSweeps, used);
         flow.pressureCapped += flow.pressureUntilQuiet && !quiet ? 1u : 0u;
+        if (flow.pressureUntilQuiet && !quiet && flow.pressureSweeps >= 3) {
+            flow.cappedLastMoved += movedCount;
+            flow.cappedLastStep = std::max(flow.cappedLastStep, movedStep);
+            flow.cappedCycle2 += lastTwo[(flow.pressureSweeps - 1) % 2] == potential ? 1u : 0u;
+        }
         if (!atGap.empty())
             MeasurePressureGap(box, atGap, potential, flow);
 

@@ -19,7 +19,7 @@
 //         1 回だけ当てる(ADR-0500 の集めて書く段)。比べに、熱い層の温度を物ごとに変えた 2・3・8 個 × 2 セル + 1 個の場面を足し、
 //         GPU を 2 回回して状態のハッシュが同じか(回ごとに変わらないか)も見る。
 //   --grow(T-1331 の小さく試す 2。比べを飛ばす): 骨格を大きくした紙 1 枚で、箱の大きさと赤黒の回数(0 から収まるまで・多重格子)を出す。
-//         切り分け(T-1349): --grow-shape 列 高さ 層(その 1 つだけ)・--grow-sweeps N(0 から決まった N 回だけ)・--grow-ticks 暖機 測る・--grow-groupshared。
+//         切り分け(T-1349): --grow-cpu N(CPU だけで N 刻み・上限で止まった解きの中身)・--grow-shape 列 高さ 層(その 1 つだけ)・--grow-sweeps N(0 から決まった N 回だけ)・--grow-ticks 暖機 測る・--grow-groupshared。
 // 引数は gpu_test_options.h と --measure / --measure-only / --profile / --scale / --grow / --threads N / --sweeps N / --rule N。
 #include <cstdlib>
 #include <cstring>
@@ -923,7 +923,49 @@ namespace {
         std::optional<Shape> shape;  // --grow-shape 列 高さ 層(1 つだけ測る)
         uint32_t fixedSweeps = 0;    // --grow-sweeps N(0 から決まった N 回だけで測る。0 = 既定の 2 つの規則)
         bool groupshared = false;    // --grow-groupshared(箱が groupshared に載る時だけ意味がある)
+        uint32_t cpuTicks = 0;  // --grow-cpu N(GPU を使わず CPU で N 刻み回し、上限で止まった解きの中身を出す。T-1349)
     };
+
+    // CPU で回して、上限で止まった解きの最後の赤黒を見る(T-1349 の ①: ゆっくり収まっているのか、整数の行き来で収まらないのか)
+    std::expected<void, std::string> GrowCpu(const Context& context, const Shape& shape, const PressureRule& rule,
+                                             uint32_t ticks) {
+        auto one = MakePaper(context.table, context.shared, context.tables.gases, shape);
+        if (!one)
+            return std::unexpected("層を作れない");
+
+        test::OhWorld world = std::move(*one);
+        std::vector<test::OhShellFlow> flows(world.objects.size());
+        for (uint32_t o = 0; o < flows.size(); ++o) {
+            test::ResetShellFlow(world, o, flows[o]);
+            ApplyRule(rule, flows[o]);
+        }
+
+        uint64_t reportedSolves = 0;
+        uint64_t reportedCapped = 0;
+        for (uint32_t t = 2; t < 2 + ticks; ++t) {
+            if (!test::StepShellFlows(context.shared, context.tables.gases, world, flows, t))
+                return std::unexpected(std::format("CPU の流れが崩れた(刻み {})", t));
+
+            const test::OhShellFlow& flow = flows[0];
+            if (flow.pressureCapped != reportedCapped || t + 1 == 2 + ticks) {
+                Log(Channel::Gpu, Level::Info,
+                    "CPU: {}({} ボクセル)・{}: 刻み {} まで 解き {}・赤黒 平均 {:.1f}・上限で止まった {}"
+                    "(最後の赤黒で動いたボクセル 平均 {:.1f}・幅の最大 {}・2 回前と同じ値 {})",
+                    shape.name, world.voxels.size(), rule.name, t, flow.pressureSolves,
+                    static_cast<double>(flow.pressureSweepsUsed) /
+                        static_cast<double>(std::max<uint64_t>(flow.pressureSolves, 1)),
+                    flow.pressureCapped,
+                    static_cast<double>(flow.cappedLastMoved) /
+                        static_cast<double>(std::max<uint64_t>(flow.pressureCapped, 1)),
+                    flow.cappedLastStep, flow.cappedCycle2);
+                reportedCapped = flow.pressureCapped;
+            }
+
+            reportedSolves = flow.pressureSolves;
+        }
+
+        return reportedSolves != 0 ? std::expected<void, std::string>{} : std::unexpected("解きが 0 回");
+    }
 
     std::expected<void, std::string> GrowOne(const Context& context, const Shape& shape, const GrowOptions& options) {
         const std::array<PressureRule, 2> rules = {PressureRule{"0 から収まるまで(既定)", 1024, 1},
@@ -944,6 +986,17 @@ namespace {
     }
 
     std::expected<void, std::string> Grow(const Context& context, const GrowOptions& options) {
+        if (options.cpuTicks != 0) {
+            const Shape shape = options.shape.value_or(Shape{"紙 48 × 12・層 4 段", 48, 12, 4});
+            for (const PressureRule& rule :
+                 {PressureRule{"0 から収まるまで(既定)", 1024, 1}, PressureRule{"多重格子 + 収まるまで", 1024, 5}}) {
+                if (auto ran = GrowCpu(context, shape, rule, options.cpuTicks); !ran)
+                    return ran;
+            }
+
+            return {};
+        }
+
         if (options.shape)
             return GrowOne(context, *options.shape, options);
 
@@ -1005,6 +1058,8 @@ namespace {
                 growOptions.fixedSweeps = static_cast<uint32_t>(std::strtoul(arguments[++i], nullptr, 10));
             } else if (text == "--grow-groupshared") {
                 growOptions.groupshared = true;
+            } else if (text == "--grow-cpu" && i + 1 < arguments.size()) {
+                growOptions.cpuTicks = static_cast<uint32_t>(std::strtoul(arguments[++i], nullptr, 10));
             } else if (text == "--grow-ticks" && i + 2 < arguments.size()) {
                 warmTicks = static_cast<uint32_t>(std::strtoul(arguments[++i], nullptr, 10));
                 measureTicks = static_cast<uint32_t>(std::strtoul(arguments[++i], nullptr, 10));
