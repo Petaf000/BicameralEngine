@@ -1,6 +1,6 @@
 # T-1314 木を細かくする段の隣の写し: 子に覆われた隣のセルを読む(T-1257 の不具合候補)
 
-- Status: Review(2026-11-12 wt5・t-1314-halo-covered: release ビルド警告 0・CPU 6 本と GPU HW / WARP 4 本合格。前線の順 = 一度に がビット単位で同じ。runner/ready/ に印)
+- Status: Done(2026-11-12 本体が main へ。wt5・t-1314-halo-covered: release ビルド警告 0・CPU 6 本と GPU HW / WARP 4 本合格。前線の順 = 一度に がビット単位で同じ。runner/ready/ に印)
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1 回分

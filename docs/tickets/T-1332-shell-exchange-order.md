@@ -1,6 +1,6 @@
 # T-1332 層の流れのセルへの受け渡しを 1 つのセルに物が何個あっても決定的に(集めて書く段)
 
-- Status: Done(2026-11-12 wt5。マージ待ち)
+- Status: Done(2026-11-12 wt5。2026-11-12 本体が main へ)
 - 種類: 工学(不具合)
 - PC: 必須
 - 見積もり: チャット 1 回分
@@ -37,3 +37,7 @@
   gpu_object_shell_flow_test に 1 セルに 2・3・8 個の比べと 2 回のハッシュの比べを足した。
 - 2026-11-12(wt5): release 警告 0・object_shell(CPU --quick 523 秒)・float_check 5 本・dxil_alloca_check・gpu_object_shell_flow(HW 163 秒)・_warp(978 秒。上限 1800 の半分を超えた。
   1 セルに 8 個 × 2 + 1 = 17 個の比べが WARP で重い)・archmap --check が通った。物ごとに別のセルの今の比べ 16 通りもビット一致のまま(物 1 つのセルで見る値は前と同じ)。
+
+## 司令塔の受け取り(2026-11-12 司令塔・docs/design/21 §3・ADR-0500 と照らし。本体 24 回目が記録)
+- 物 ⇄ セルの受け渡しは新しい口を足さず、ADR-0500 の「集めて書く段」の形で直す(物ごとに受け渡しの量を自分の欄に書く → セルごとに物の順〔登録の順〕で足して 1 回だけ当てる)。CPU の物の順と同じ足し方でビット一致。
+- 2026-11-12 main へ(t-1332-shell-exchange-order 47490fba)。土台の共通部分は触っていない(研究の形 = 試験と object_shell_flow.hlsl・tests/object_flow_cpu.h・新しいシェーダー object_shell_apply_cells)。

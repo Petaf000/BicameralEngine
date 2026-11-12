@@ -1,8 +1,26 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-11-12(本体の作業役 23 回目・claude/48 の再開の巡目。前は 22 回目)
+最終更新: 2026-11-12(本体の作業役 24 回目・claude/48 の再開の巡目の締め。前は 23 回目)
 
-## この仕事でしたこと(2026-11-12・本体の作業役・23 回目: part-faces の確かめと push・★ 2026-11-12 ユーザーの答えの反映・t-1294 のマージ・T-1274)
+## この仕事でしたこと(2026-11-12・本体の作業役・24 回目: runner/ready の印 8 本のマージ・試験・push。入れ物の再起動の後、司令塔がこのチャットを締めた)
+- **マージ(--no-ff・来た順・既定を変えないものだけをまとめて 1 回のビルドと試験)**: wt2 t-1305-layer-request-cost e7a1de9a / wt6 t-1230-implicit-parts 72f39825 → t-1230-implicit-gpu bdfc31d5(★8)/
+  wt4 t-1228-rc-sources 5d88e46c / wt5 t-1314-halo-covered b13ef882(multires_refine_place.hlsli は t-1305 と自動で合わさった)/ wt5 t-1320-shell-scale 49adda6d → t-1332-shell-exchange-order 47490fba / wt3 t-1295-face-forces-3d 01751a24。
+  衝突は docs/perf.md の末尾だけ(4 回・両方残した)。
+- **試験(release・警告 0・RTX 3070 Ti・2026-11-12。マージ 8 本の後の main f1137335 で 1 回)**: CPU 37 本全部合格(object_shell・cascade_light・cascade_tree_grid・probe_radiation・phase_layer 系 6・world_layout・gas_projection・_plates・equilibrium・equilibrium_block・
+  support_law・support_3d・support_3d_mixed・support_mixed・support_fracture_refine・support_cost・case_b_r2・case_b_r3_tree_slope・multires・field_owner・placement_refine・tree_refine_placement・time_step_lab・multires_layers・multires_implicit・_tree・float_check 系 5・dxil_alloca_check)/
+  GPU 22 本全部合格(gpu_multires_implicit・_tree・_build・_build_warp・_conduction・gpu_equilibrium_block・gpu_gas_projection / gpu_multires・gpu_multires_layers〔HW・WARP〕・gpu_lab_box・gpu_placement_refine〔HW・WARP〕・gpu_tree_refine_placement〔HW・WARP〕/
+  gpu_cascade_light・gpu_cascade_tree_grid・gpu_object_shell_flow・gpu_probe_sim・_tables・gpu_world_copy・gpu_play_metric)。archmap --check OK(229 個)。
+  流していない: time_step_tree・time_step_choose_dump 系(1581 秒。wt6 が 94b20ace の上で合格)・gpu_object_shell_flow_warp(978 秒。wt5 で合格)・support_fracture_* 6 本(巡目の約束)。
+- **記録**: ROADMAP(T-1305・T-1314・T-1295・T-1332 Done・T-1228 段 1 済み・T-1230 段 2 ② と ★8・T-1320 段 0・新しい行 T-1325・T-1331・T-1332・T-1328)・QUESTIONS Q187 に測りの表の場所(docs/perf.md と T-1295)・
+  ADR-0512 に「司令塔の受け取り」(★8 の土台の共通部分の変更・条件 = GPU の面の欄 1.25 倍を広い世界の圧力の系で確かめる)・T-1332 のチケットに土台の形の受け取り(ADR-0500 の集めて書く段)・COMMANDER に今巡の番号。
+- **入れていない印(来た順・次の本体へ)**: t-1338-grain-layers-default(wt2 cd65ffa5)→ t-1337-coarse-sweeps-2(wt4 6c6bf0d4)→ t-1322-grain-layers-born(wt2 c707f3a7。t-1338 を rebase したものを含む = t-1338 の代わりにこれ 1 本を入れてよい)。
+  どれも既定の切り替え(T-1338 = Q175・T-1337 = Q180)なので 1 本ずつ入れて、その都度印に書かれた試験。この後に t-1273(wt4)・t-1325(wt3)などが来る見込み。
+  **T-1322 の土台の形の受け取り(司令塔 2026-11-12・まだ main に無いので入れる時に T-1322 のチケットへ書く)**: Q175 (B)「層を使う世界では置いた粒は全部を層・舞う粒は崩れ・吹き上げの出来事からだけ」に合わせ、
+  ① 反応で生まれた粒は層に足す・② 層を使う世界では層を渡さない置き口でも粒は全部が層、を新しい問いにせずおすすめどおり直した(CPU と GPU 共通の規則。層を使わない世界のビット一致を試験で)。GPU の同じ規則は T-1323。
+- **運転メモ**: main の release のビルドは 431 秒(644 段・警告 0)。object_shell(--quick)431 秒・cascade_light 約 5 分。本体は Linux 側で git を打たない(この回 1 度 `git diff --stat` を打った。読むだけで害は無かった)。
+- 次の番号は **D-694・ADR-0479・Q188**(本体)。司令塔の次は T-1339・ADR-0528。
+
+## 前の仕事でしたこと(2026-11-12・本体の作業役・23 回目: part-faces の確かめと push・★ 2026-11-12 ユーザーの答えの反映・t-1294 のマージ・T-1274)
 - **part-faces(94b20ace。前の巡目に main のローカルへ入れて未 push だったもの)**: release ビルド警告 0 → CPU 35 本(phase_layer 系 6・field_owner・tree_refine_placement・multires 系 17・time_step 系 10)全部合格(time_step_tree 1846 秒・multires_gas 489 秒)→ push。印は done/ へ。
 - **★ 2026-11-12 の反映(469bf6f9・push 済み)**: DECISIONS **D-684〜D-693**(Q181 → 案 (c)・Q182 → 形 A・Q180 → 掃き出し 2 回・Q175 → (B)・Q183 → 研究・7 つを仮のまま確定・2 次元の支えの法則は測ってから・陰の伝導の安全網の直し・Q93 ②/Q105 仮のまま・Q174 → スケールに強い形)/
   QUESTIONS: Q174〜Q186・Q105 を閉じ、答え済みの Q153・Q161 の節を消した・新 **Q187**(2 次元の支えの法則を 3 次元で置き換えるか。測ってから)・Q93 ②・Q157・Q148 に注 /

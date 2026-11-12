@@ -1,5 +1,10 @@
 # NEXT.md — 次にやること(上から順に)
 
+**2026-11-12 本体の作業役(24 回目・この司令塔のチャットの締め): t-1305・t-1230-implicit-parts・t-1230-implicit-gpu・t-1228-rc-sources・t-1314・t-1320-shell-scale・t-1332・t-1295 を main へ(試験・push。結果は HANDOFF 24 回目)。**
+**次のチャットがまず入れるもの(runner/ready・来た順・既定の切り替えなので 1 本ずつ・その都度試験)**: t-1338-grain-layers-default(wt2)→ t-1337-coarse-sweeps-2(wt4)→ t-1322-grain-layers-born(wt2・t-1338 を含む = 代わりにこれ 1 本でよい)。この後に来る印(t-1273・t-1325 など)も来た順に。
+**作業中(各 wt。claude/49 の引き継ぎを見よ)**: wt2 t-1240-wide-layers-2 / wt3 T-1325 → T-1321 / wt4 T-1273・T-1328 / wt5 t-1320-shell-trim(段 1)/ wt6 T-1230 段 2 ③ GPU。
+残る判断待ち: Q187(測りの表は docs/perf.md と T-1295)・Q93 ②・Q157・Q148。次の番号は **D-694・ADR-0479・Q188**。**司令塔の次は T-1339・ADR-0528**(COMMANDER)。
+
 **次のチャットがまず入れるもの(runner/ready・来た順。2026-11-12 本体 23 回目は 2 時間を超えたので入れていない)**: t-1305-layer-request-cost(wt2)→ t-1230-implicit-parts(wt6)→ t-1228-rc-sources(wt4)→ t-1314-halo-covered(wt5)→ t-1320-shell-scale(wt5)→ t-1338-grain-layers-default(wt2・既定の切り替え)→ t-1295-face-forces-3d(wt3)→ t-1337-coarse-sweeps-2(wt4・既定の切り替え)。気を付けることは HANDOFF の 23 回目。
 **2026-11-12 本体の作業役(23 回目・claude/48 の再開): ★ 2026-11-12 ユーザーの答えを反映した = D-684〜D-693・Q187(新)・ADR-0489/0491/0501/0504/0505/0507/0509 Accepted・チケット T-1273・T-1274・T-1320・T-1321・T-1337・T-1338。**
 **既定の切り替え(1 本ずつ自分のブランチで・ハッシュの取り直しはそのブランチの中だけ)**: T-1274 形 A(本体・2026-11-12 main へ)/ T-1337 掃き出し 4 → 2 → T-1273 案 (c)(wt4)/ T-1338 置いた粒は全部層(wt2)。
