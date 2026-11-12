@@ -19,9 +19,11 @@
 //         1 回だけ当てる(ADR-0500 の集めて書く段)。比べに、熱い層の温度を物ごとに変えた 2・3・8 個 × 2 セル + 1 個の場面を足し、
 //         GPU を 2 回回して状態のハッシュが同じか(回ごとに変わらないか)も見る。
 //   --grow(T-1331 の小さく試す 2。比べを飛ばす): 骨格を大きくした紙 1 枚で、箱の大きさと赤黒の回数(0 から収まるまで・多重格子)を出す。
+//         切り分け(T-1349): --grow-shape 列 高さ 層(その 1 つだけ)・--grow-sweeps N(0 から決まった N 回だけ)・--grow-ticks 暖機 測る・--grow-groupshared。
 // 引数は gpu_test_options.h と --measure / --measure-only / --profile / --scale / --grow / --threads N / --sweeps N / --rule N。
 #include <cstdlib>
 #include <cstring>
+#include <optional>
 
 #include "core/aliases.h"
 #include "core/log.h"
@@ -609,6 +611,10 @@ namespace {
         const test::OhCpuTable& shared;
         uint32_t measureSweeps;  // 測る時の「0 から決まった回数」の回数(切り分け。比べは 24 のまま)
         std::string shader;      // シェーダー(--threads で変える。T-1223)
+
+        // --- 測りの刻みの数(--grow-ticks。T-1349 の切り分け)---
+        uint32_t warmTicks = WARM_TICKS;
+        uint32_t measureTicks = MEASURE_TICKS;
     };
 
     // GPU の真実(ボクセル・セル・対の端数・面の運動量)のハッシュ(FNV-1a。回ごとに変わらないかを見る。T-1332)
@@ -761,14 +767,16 @@ namespace {
         gpuState->pressureMode = rule.mode;
         const size_t statsCount = StatsCount(world.objects.size());
         const size_t base = 2 + (2 * world.objects.size());
-        const auto warm = RunTicks(*queue, *gpuState, *debugRing, 2, WARM_TICKS);
+        const auto warm = RunTicks(*queue, *gpuState, *debugRing, 2, context.warmTicks);
         std::expected<std::vector<uint32_t>, std::string> before = std::unexpected(std::string("暖機に失敗"));
         if (warm)
             before = test::object_heat_gpu::ReadUav<uint32_t>(context.device, *queue, gpuState->uavs[UavStats].Get(),
                                                               statsCount);
 
         gpuState->stageMask = stageMask;
-        const auto measured = before ? RunTicks(*queue, *gpuState, *debugRing, 2 + WARM_TICKS, MEASURE_TICKS) : warm;
+        const auto measured = before
+                                  ? RunTicks(*queue, *gpuState, *debugRing, 2 + context.warmTicks, context.measureTicks)
+                                  : warm;
         if (!measured)
             return std::unexpected(measured.error());
 
@@ -783,13 +791,14 @@ namespace {
         // 赤黒の回数(測った 20 刻みと、暖機の 30 刻みの一番多い回数)
         const uint32_t solves = (*stats)[base] - (*before)[base];
         const uint32_t sweeps = (*stats)[base + 1] - (*before)[base + 1];
+        const uint32_t cappedMeasured = (*stats)[base + 3] - (*before)[base + 3];
         Log(Channel::Gpu, Level::Info,
             "測る: {}({} ボクセル・面 {})× {}・圧力の値は{}・{}: 1 刻み {:.3f} ms・赤黒 平均 {:.1f} 回"
-            "(暖機からの一番多い {}・上限で止まった {})",
+            "(暖機からの一番多い {}・上限で止まった {}・測った {} 回の解きのうち上限で止まった {})",
             shape.name, one->voxels.size(), gpuState->faceCount / copies, copies,
             sharedPotential ? " groupshared" : "作業場", rule.name, *measured,
             static_cast<double>(sweeps) / static_cast<double>(std::max<uint32_t>(solves, 1)), (*stats)[base + 2],
-            (*stats)[base + 3]);
+            (*stats)[base + 3], solves, cappedMeasured);
 
         return *measured;
     }
@@ -910,7 +919,34 @@ namespace {
     // --- 箱の大きさと赤黒の回数(T-1331 の小さく試す 2。捨てる測り)---
     // 共有の空気の格子は 1 つの箱が大きい(山 1 つで 1 辺 100 ボクセル級)。0 から収まるまで・多重格子の赤黒の回数が箱の大きさでどう増えるかを、
     // 骨格を大きくした紙 1 枚(物 1 つ = 1 グループ・圧力の値は作業場)で見る。時間は SM 1 つの値なので比べには使わない(回数を見る)。
-    std::expected<void, std::string> Grow(const Context& context) {
+    struct GrowOptions {
+        std::optional<Shape> shape;  // --grow-shape 列 高さ 層(1 つだけ測る)
+        uint32_t fixedSweeps = 0;    // --grow-sweeps N(0 から決まった N 回だけで測る。0 = 既定の 2 つの規則)
+        bool groupshared = false;    // --grow-groupshared(箱が groupshared に載る時だけ意味がある)
+    };
+
+    std::expected<void, std::string> GrowOne(const Context& context, const Shape& shape, const GrowOptions& options) {
+        const std::array<PressureRule, 2> rules = {PressureRule{"0 から収まるまで(既定)", 1024, 1},
+                                                   PressureRule{"多重格子 + 収まるまで", 1024, 5}};
+        if (options.fixedSweeps != 0) {
+            const PressureRule fixed{"0 から決まった回数", options.fixedSweeps, 0};
+            const auto measured = Measure(context, shape, 1, options.groupshared, fixed);
+            return measured ? std::expected<void, std::string>{} : std::unexpected(measured.error());
+        }
+
+        for (const PressureRule& rule : rules) {
+            const auto measured = Measure(context, shape, 1, options.groupshared, rule);
+            if (!measured)
+                return std::unexpected(measured.error());
+        }
+
+        return {};
+    }
+
+    std::expected<void, std::string> Grow(const Context& context, const GrowOptions& options) {
+        if (options.shape)
+            return GrowOne(context, *options.shape, options);
+
         const std::array<Shape, 3> shapes = {Shape{"紙 24 × 3・層 4 段", 24, 3, 4},
                                              Shape{"紙 48 × 12・層 4 段", 48, 12, 4},
                                              Shape{"紙 96 × 24・層 4 段", 96, 24, 4}};
@@ -936,6 +972,9 @@ namespace {
         bool profile = false;
         bool scale = false;
         bool grow = false;
+        GrowOptions growOptions;
+        uint32_t warmTicks = WARM_TICKS;
+        uint32_t measureTicks = MEASURE_TICKS;
         uint32_t threads = 1024;
         uint32_t measureSweeps = 24;
         int32_t onlyRule = -1;
@@ -957,6 +996,18 @@ namespace {
             } else if (text == "--grow") {
                 grow = true;
                 compare = false;
+            } else if (text == "--grow-shape" && i + 3 < arguments.size()) {
+                const auto columns = static_cast<uint32_t>(std::strtoul(arguments[++i], nullptr, 10));
+                const auto sizeZ = static_cast<uint32_t>(std::strtoul(arguments[++i], nullptr, 10));
+                const auto layers = static_cast<uint32_t>(std::strtoul(arguments[++i], nullptr, 10));
+                growOptions.shape = Shape{"指定の紙", columns, sizeZ, layers};
+            } else if (text == "--grow-sweeps" && i + 1 < arguments.size()) {
+                growOptions.fixedSweeps = static_cast<uint32_t>(std::strtoul(arguments[++i], nullptr, 10));
+            } else if (text == "--grow-groupshared") {
+                growOptions.groupshared = true;
+            } else if (text == "--grow-ticks" && i + 2 < arguments.size()) {
+                warmTicks = static_cast<uint32_t>(std::strtoul(arguments[++i], nullptr, 10));
+                measureTicks = static_cast<uint32_t>(std::strtoul(arguments[++i], nullptr, 10));
             } else if (text == "--measure") {
                 measure = true;
             } else if (text == "--measure-only") {
@@ -991,7 +1042,9 @@ namespace {
                               .shared = shared,
                               .measureSweeps = measureSweeps,
                               .shader = threads == 1024 ? std::string("sim/object_shell_flow.cso")
-                                                        : std::format("sim/object_shell_flow_t{}.cso", threads)};
+                                                        : std::format("sim/object_shell_flow_t{}.cso", threads),
+                              .warmTicks = warmTicks,
+                              .measureTicks = measureTicks};
         if (compare) {
             const std::array<Shape, 2> shapes = {Shape{"紙 24 列・層 2 段", 24, 3, 2},
                                                  Shape{"紙 24 列・層 4 段", 24, 3, 4}};
@@ -1031,7 +1084,7 @@ namespace {
         }
 
         if (grow) {
-            if (auto grown = Grow(context); !grown) {
+            if (auto grown = Grow(context, growOptions); !grown) {
                 Log(Channel::Gpu, Level::Error, "gpu_object_shell_flow_test: FAILED({})", grown.error());
                 return 1;
             }
