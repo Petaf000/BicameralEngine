@@ -20,6 +20,9 @@
 //      燃え尽きて畳まれる(欄の頁を返す)までの活性の刻み(multires_uniform_scene の場面)を毎刻み CPU とビット一致。
 //   10. 集めて書く段(T-1252 段 2 の 6 本目): 配り手の欄へ頁を持つ根・一様な根(広げてから)に足し、この刻みだけの欄へ予算 1 で足す
 //      (1 つは頁を取って書き、1 つは作業に残る)。置き場・要約・報告・作業の残り・種(書いた枠をつつく)が CPU の GatherNestField とビット一致。
+//   11. 保存量の配り手の欄(T-1252 段 2 の 7 本目): 5 の木の段を保存量の配り手の欄で。細かくした後に鎖の子の値を 8 で割り切れない値に変えて写し、
+//      粗くする余りが世界の帳簿の「粗くした端数・出」の列(NestFieldLedgerBase + NestConservedIndex)に CPU と同じ段・同じ列で載る。
+//      帳簿・置き場・要約が CPU とビット一致・保存の検査(ComputeConservedTotals)が粗くする前後で同じ。
 // 引数は gpu_test_options.h。
 #include <algorithm>
 #include <cstdint>
@@ -71,14 +74,14 @@ namespace {
     }
 
     // 頁を持つ根(本物の場面の根のセル)と一様な根(反応しない空気)の 2 つ。配り手の欄は根の頁の全部のセルと一様な根の一様の値に書く
-    FieldWorld MakeFieldWorld(const sim::BakedReactionTable& table) {
+    FieldWorld MakeFieldWorld(const sim::BakedReactionTable& table, uint32_t ownerFlags = SF_FLAG_HASHED) {
         FieldWorld world{
             .nest = sim::MakeMultiresNest(test::MakeMultiresCapacity(
                 table, test::MULTIRES_WORLD_BLOCKS, test::MULTIRES_LEVELS, test::MULTIRES_FRACTION_CAPACITY))};
         sim::MultiresNest& nest = world.nest;
-        world.owned = sim::RegisterNestField(nest, "owned",
-                                             SfMakeOwnerDesc(SF_PLACE_CELL, SF_TYPE_I64, SF_PHASE_NONE, SF_FLAG_HASHED,
-                                                             OWNER_COMPONENTS, SF_OWNER_TEST));
+        world.owned = sim::RegisterNestField(
+            nest, "owned",
+            SfMakeOwnerDesc(SF_PLACE_CELL, SF_TYPE_I64, SF_PHASE_NONE, ownerFlags, OWNER_COMPONENTS, SF_OWNER_TEST));
         world.tick = sim::RegisterNestField(nest, "source",
                                             SfMakeTickDesc(SF_PLACE_CELL, SF_TYPE_I64, SF_PHASE_NONE, 2));
 
@@ -716,6 +719,58 @@ namespace {
         return {};
     }
 
+    // --- 11. 保存量の配り手の欄: 粗くする余りを世界の帳簿の列へ ---
+
+    constexpr int32_t CONSERVED_FINEST_LEVEL = 2;  // 鎖の最も細かいレベル(保存の検査の単位)
+
+    std::expected<void, std::string> RunConservedOwner(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                       gpu::DebugRing& ring, const sim::BakedReactionTable& table) {
+        FieldWorld world = MakeFieldWorld(table, SF_FLAG_CONSERVED | SF_FLAG_HASHED);
+        sim::MultiresNest& cpu = world.nest;
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, RegionOptions(0));
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        // --- 細かくする(配り手の配りは割り切れる = 帳簿は動かない)---
+        sim::MultiresNest read = cpu;
+        if (auto both = ProcessBoth(queue, ring, *gpu, cpu, read, OwnerTreeRequests(0), true, "保存量 細かく"); !both)
+            return both;
+
+        // --- 鎖の子の値を 8 で割り切れない値に(子 8 つの和の端数が親の 1 単位に満たない = 余り)---
+        const uint32_t chainChild = FindRealBlock(cpu, 2, false);
+        if (chainChild == MR_NO_BLOCK)
+            return std::unexpected("場面の確かめ: 細かくした鎖の子が見つからない");
+
+        for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+            for (uint32_t c = 0; c < OWNER_COMPONENTS; ++c)
+                sim::StoreNestField(cpu, world.owned, chainChild, index, c,
+                                    (OwnerValue(index, c) * 3) + static_cast<int64_t>(index % 5));
+        }
+
+        const sim::ConservedTotals before = sim::ComputeConservedTotals(cpu, table, CONSERVED_FINEST_LEVEL);
+        const std::vector<uint64_t> ledgerBefore = cpu.ledger;
+        for (uint32_t round = 1; round < 3; ++round) {
+            if (auto both = ProcessBoth(queue, ring, *gpu, cpu, read, OwnerTreeRequests(round), round == 1,
+                                        std::format("保存量 粗く {} 回目", round));
+                !both)
+                return both;
+
+            if (cpu.ledger != read.ledger)
+                return std::unexpected(std::format("保存量 粗く {} 回目: 世界の帳簿が CPU と違う", round));
+        }
+
+        if (cpu.ledger == ledgerBefore)
+            return std::unexpected("場面の確かめ: 粗くする余りが帳簿に載らない");
+
+        if (sim::ComputeConservedTotals(cpu, table, CONSERVED_FINEST_LEVEL) != before ||
+            sim::ComputeConservedTotals(read, table, CONSERVED_FINEST_LEVEL) != before)
+            return std::unexpected("保存の検査: 粗くする前後で保存量(配り手の欄の列)が変わる");
+
+        Log(Channel::Gpu, Level::Info, "保存量の配り手の欄: 細かく → 粗く 2 回で帳簿の余りの列・置き場・要約が一致");
+
+        return {};
+    }
+
     // --- 4. 区画を持たない GPU は断る ---
     std::expected<void, std::string> RunRefusal(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring,
                                                 const sim::BakedReactionTable& table) {
@@ -776,6 +831,8 @@ namespace {
             ran = RunUniformTicks(device->Get(), *queue, *ring, *table);
         if (ran)
             ran = RunGather(device->Get(), *queue, *ring, *table);
+        if (ran)
+            ran = RunConservedOwner(device->Get(), *queue, *ring, *table);
         if (!ran) {
             Log(Channel::Gpu, Level::Error, "gpu_field_region_test: FAILED ({})", ran.error());
             return 1;
@@ -786,7 +843,9 @@ namespace {
 
         Log(Channel::Gpu, Level::Info,
             "gpu_field_region_test: "
-            "OK(欄の区画を写して戻す・刻む・欄の無い世界・断り・木の段・影の鎖・畳む・広げる・集めて書くの配り手の欄で "
+            "OK("
+            "欄の区画を写して戻す・刻む・欄の無い世界・断り・木の段・影の鎖・畳む・広げる・集めて書く・保存量の配り手の"
+            "欄で "
             "GPU と CPU がビット一致)");
 
         return 0;

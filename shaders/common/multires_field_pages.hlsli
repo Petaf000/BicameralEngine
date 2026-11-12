@@ -113,7 +113,10 @@ FX_CONST uint32_t MF_TABLE_FIELD = 0;    // CPU の登録の番号(MultiresNest:
 FX_CONST uint32_t MF_TABLE_OWNER = 1;    // 配り手の番号(SF_OWNER_*。配り手でなければ SF_NO_OWNER)
 FX_CONST uint32_t MF_TABLE_STORE = 2;    // 置き場の始まり
 FX_CONST uint32_t MF_TABLE_UNIFORM = 3;  // 一様の値の始まり
-FX_CONST uint32_t MF_TABLE_WORDS = 4;
+FX_CONST uint32_t
+    MF_TABLE_LEDGER = 4;  // 保存量の欄の世界の帳簿の列の始まり(CPU の NestFieldLedgerBase + NestConservedIndex)
+FX_CONST uint32_t MF_TABLE_WORDS = 5;
+FX_CONST uint32_t MF_NO_LEDGER_COLUMN = 0xFFFFFFFFu;  // 表の帳簿の列: 保存量の欄でない
 
 FX_FN uint32_t MfRegionTableAddress(uint32_t entry, uint32_t word) {
     return 1u + (entry * MF_TABLE_WORDS) + word;

@@ -55,6 +55,10 @@ GPU の段は並べて走るので、同じ番号にするには「1 つの段�
    枠の順に取る → 書く・書いた枠をつつく(CPU の GatherNestField の ExpandGatheredBlocks・ExpandWantedPages・WriteGathered と同じ順・同じ番号)。
    作業は書き手のバッファ(u5。刻みの中だけ・保存点に入らない)= 区画に置かない(仮)。容量が尽きた時の約束は T-1252 の「検討」(司令塔の印)。
 
+9. **保存量の配り手の欄(2026-11-13 wt6・t-1252-conserved-owner)**: 区画の表を 5 語に(5 語目 = 保存量の欄の世界の帳簿の列の始まり = CPU の NestFieldLedgerBase + NestConservedIndex。
+   保存量でなければ MF_NO_LEDGER_COLUMN)。粗くする段(CoarsenCarriedFields)が SfOwnerCoarsen の余りを「粗くした端数・出」の列へ子のレベルで足す(CPU の CoarsenOwners と同じ段・列)。
+   GPU の帳簿は CPU の capacity.ledgerColumns で作る(保存量の欄の列を含む)ので列は足さない。RecordUpload は保存量の配り手の欄を断らない。相の層の配りは T-1231。
+
 ## 確かめ
 - gpu_field_gather(HW・WARP): 空きのスタックのある置き場に頁を持つ枠・持たない枠へ足す / 予算で尽きる / 根 700 個に乱数(プレフィックス和が塊をまたぐ)/ 一様な枠の印。
   pageOf・空きのスタック・使った高さ・頁の値・作業の残り・報告の数が CPU の GatherNestField とビット一致。
@@ -62,6 +66,7 @@ GPU の段は並べて走るので、同じ番号にするには「1 つの段�
   木の段(配り手の欄を細かく → 粗く・一様な親を広げる・この刻みだけの欄の頁を返す。6)。
   影の鎖(細かく 3 回・取り直し・引き戻しで新しい頁)・畳む(全部 0 の頁を返す・一様な頁を畳む)・活性の刻みの広げる/畳む 123 刻み(7)。
 - gpu_field_region の 10(HW・WARP): 配り手の欄へ頁を持つ枠・一様な枠(広げてから)に足す・この刻みだけの欄の予算切れ。置き場・要約・報告・作業の残り・種が CPU とビット一致(8)。
+- gpu_field_region の 11(HW・WARP): 保存量の配り手の欄を細かく → 子の値を変えて写す → 粗く 2 回。世界の帳簿・置き場・要約が CPU とビット一致・保存の検査が前後で同じ(9)。
 - 新しい形の欄が無い世界: GPU の世界(sim/gpu_multires)の段は何も変えていない(この ADR の段はまだ GpuMultires から呼ばない)。
 
 ## 要る現象の一覧(docs/design/21 §3)との照らし

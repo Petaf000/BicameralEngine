@@ -88,7 +88,8 @@ namespace bicameral::sim {
         // 影の鎖(RecordRefineShadow・RecordPullBack)・畳む(RecordFoldPages)・広げる(刻みの TreeExpand)も区画を読み書きする(5 本目)。
         // 影・広げる段で欄の頁が尽きたら頁なしで数える(断れない。CPU とずれる = fieldPages を足りる数に)。
         // 集めて書く段(RecordGather)も区画の欄へ書く(6 本目。書き手 = T-1227・T-1228 はまだ無い)。
-        // 保存量の配り手の欄(粗くする余りの帳簿)・相の層の配り手の欄(セルを読む。T-1231)は写さない(RecordUpload が false)
+        // 保存量の配り手の欄は粗くする余りを世界の帳簿の列へ(CPU と同じ列・同じ段。7 本目)。
+        // 相の層の配り手の欄(セルを読む。T-1231)は写さない(RecordUpload が false)
         uint32_t fieldPages = 0;
         uint32_t fieldValues = 0;  // 載せる欄の値の数の和の上限(0 = state_field の SF_MAX_COMPONENTS)
 

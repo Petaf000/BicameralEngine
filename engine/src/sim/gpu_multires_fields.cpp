@@ -136,6 +136,10 @@ namespace bicameral::sim {
             region[MfRegionTableAddress(entry, MF_TABLE_OWNER)] = nest.fields[field].desc.owner;
             region[MfRegionTableAddress(entry, MF_TABLE_STORE)] = storeStart;
             region[MfRegionTableAddress(entry, MF_TABLE_UNIFORM)] = uniformStart;
+            region[MfRegionTableAddress(entry, MF_TABLE_LEDGER)] = SfConserved(nest.fields[field].desc)
+                                                                       ? NestFieldLedgerBase(nest) +
+                                                                             NestConservedIndex(nest, field)
+                                                                       : MF_NO_LEDGER_COLUMN;
             ++entry;
         }
 

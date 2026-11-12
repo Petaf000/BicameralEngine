@@ -30,6 +30,11 @@ bool CarriedOwned(uint32_t field) {
     return CarriedOwner(field) != SF_NO_OWNER;
 }
 
+// 保存量の欄の世界の帳簿の列の始まり(保存量でなければ MF_NO_LEDGER_COLUMN。CPU の NestFieldLedgerBase + NestConservedIndex)
+uint32_t CarriedLedgerColumn(uint32_t field) {
+    return CarriedTable(field, MF_TABLE_LEDGER);
+}
+
 // 欄 field の置き場の始まり(g_layers の語)
 uint32_t CarriedStoreBase(uint32_t field) {
     return g_external2 + CarriedTable(field, MF_TABLE_STORE);
