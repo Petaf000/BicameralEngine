@@ -29,6 +29,7 @@
 // 引数は gpu_test_options.h と --measure / --measure-only / --profile / --scale / --grow / --large-box / --threads N / --sweeps N / --rule N / --split / --split-only / --split-sweeps。
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <optional>
 
 #include "core/aliases.h"
@@ -1113,11 +1114,14 @@ namespace {
         uint32_t fixedSweeps = 0;    // --grow-sweeps N(0 から決まった N 回だけで測る。0 = 既定の 2 つの規則)
         bool groupshared = false;    // --grow-groupshared(箱が groupshared に載る時だけ意味がある)
         uint32_t cpuTicks = 0;  // --grow-cpu N(GPU を使わず CPU で N 刻み回し、上限で止まった解きの中身を出す。T-1349)
+        // --grow-dump 書き出し先 回数(T-1362。CPU の線の答えだけ回し、V 字がこの回数以上の解きの問題を書き出す。刻みごとの一番多い回数も出す)
+        std::string dumpPath;
+        uint32_t dumpMinCycles = 0;
     };
 
     // CPU で回して、上限で止まった解きの最後の赤黒を見る(T-1349 の ①: ゆっくり収まっているのか、整数の行き来で収まらないのか)
     std::expected<void, std::string> GrowCpu(const Context& context, const Shape& shape, const PressureRule& rule,
-                                             uint32_t ticks) {
+                                             uint32_t ticks, std::ostream* dump = nullptr, uint32_t dumpMinCycles = 0) {
         auto one = MakePaper(context.table, context.shared, context.tables.gases, shape);
         if (!one)
             return std::unexpected("層を作れない");
@@ -1127,6 +1131,8 @@ namespace {
         for (uint32_t o = 0; o < flows.size(); ++o) {
             test::ResetShellFlow(world, o, flows[o]);
             ApplyRule(rule, flows[o]);
+            flows[o].pressureDump = dump;
+            flows[o].pressureDumpMinCycles = dumpMinCycles;
         }
 
         uint64_t reportedSolves = 0;
@@ -1135,7 +1141,13 @@ namespace {
             if (!test::StepShellFlows(context.shared, context.tables.gases, world, flows, t))
                 return std::unexpected(std::format("CPU の流れが崩れた(刻み {})", t));
 
-            const test::OhShellFlow& flow = flows[0];
+            test::OhShellFlow& flow = flows[0];
+            if (dump != nullptr) {
+                Log(Channel::Gpu, Level::Info, "CPU: 刻み {}: 解き {}・V 字の和 {}・この刻みの一番多い {}・上限 {}", t,
+                    flow.pressureSolves, flow.pressureSweepsUsed, flow.pressureMostSweeps, flow.pressureCapped);
+                flow.pressureMostSweeps = 0;
+            }
+
             if (flow.pressureCapped != reportedCapped || t + 1 == 2 + ticks) {
                 Log(Channel::Gpu, Level::Info,
                     "CPU: {}({} ボクセル)・{}: 刻み {} まで 解き {}・赤黒 平均 {:.1f}・上限で止まった {}"
@@ -1177,6 +1189,12 @@ namespace {
     std::expected<void, std::string> Grow(const Context& context, const GrowOptions& options) {
         if (options.cpuTicks != 0) {
             const Shape shape = options.shape.value_or(Shape{"紙 48 × 12・層 4 段", 48, 12, 4});
+            if (!options.dumpPath.empty()) {
+                std::ofstream dump(options.dumpPath, std::ios::binary);
+                return GrowCpu(context, shape, PressureRule{"多重格子を線まで(既定)", 0, 4}, options.cpuTicks, &dump,
+                               options.dumpMinCycles);
+            }
+
             for (const PressureRule& rule :
                  {PressureRule{"0 から収まるまで", 1024, 1}, PressureRule{"多重格子を線まで(既定)", 0, 4}}) {
                 if (auto ran = GrowCpu(context, shape, rule, options.cpuTicks); !ran)
@@ -1252,6 +1270,9 @@ namespace {
                 growOptions.fixedSweeps = static_cast<uint32_t>(std::strtoul(arguments[++i], nullptr, 10));
             } else if (text == "--grow-groupshared") {
                 growOptions.groupshared = true;
+            } else if (text == "--grow-dump" && i + 2 < arguments.size()) {
+                growOptions.dumpPath = arguments[++i];
+                growOptions.dumpMinCycles = static_cast<uint32_t>(std::strtoul(arguments[++i], nullptr, 10));
             } else if (text == "--grow-cpu" && i + 1 < arguments.size()) {
                 growOptions.cpuTicks = static_cast<uint32_t>(std::strtoul(arguments[++i], nullptr, 10));
             } else if (text == "--grow-ticks" && i + 2 < arguments.size()) {
