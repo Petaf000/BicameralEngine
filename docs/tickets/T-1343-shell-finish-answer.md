@@ -1,6 +1,6 @@
 # T-1343 物の殻の流れの圧力の「仕上げ」を別の決まった答えにする候補を比べる(研究・捨てる試作)
 
-- Status: Doing(2026-11-12 wt3。ブランチ t-1343-shell-finish-answer = t-1321-shell-mg-rules f7cbdd90 の上)
+- Status: Done(2026-11-12 wt3。研究の答え = 案 A〔(i) 線 7〕がおすすめ・仮。ユーザーの【エンジン】の答え待ち。ブランチ t-1343-shell-finish-answer)
 - 種類: 研究(捨てる試作。既定は変えない・main の共通部分に足さない。試作は tests/object_flow_cpu.h・tests/object_shell_test.cpp の中だけ)
 - PC: 必須(CPU だけ)
 - マイルストーン: 試作の列 1(docs/plan/ROADMAP.md)
@@ -77,3 +77,4 @@ D-677(決まった回数で止める形には戻さない)の範囲で、仕上�
   **次の一手(引き継ぎ)**: (1) ユーザーの答えが案 A なら新しいチケット(司令塔の番号)で GPU の MgSolveStart を (i) にし、CPU とビット一致・GPU の時間(紙 層 4 段・× 46・A4 層 6 段)を測る。
   既定の切り替えはハッシュの取り直しを伴うので 1 本で(T-1350 の後)。(2) 今の答えの 1 % の偏りが切り捨ての偏りかは、(i) の線 3 と今の規則の残差の符号の偏りを書き出して確かめる(未確認)。
   (3) 0 から赤黒だけの動かない点(多重格子なし。T-1201 の形)も世界の流れで 8.15 mm/s(赤黒 124 / 184 / 176・一番多い 321)= 動かない点の答えは解き始めに依らず 8.14〜8.16 に揃い、(i) は 8.24〜8.26 に揃う。
+  試験(release・既定のまま): 警告 0・ctest object_shell(--quick)・float_check 5 本・dxil_alloca_check・gpu_object_shell_flow(HW。CPU リファレンスの MgFineLevel の切り出しの後もビット一致)合格・archmap --check OK・clang-format OK。
