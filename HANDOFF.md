@@ -3,10 +3,10 @@
 最終更新: 2026-11-12(本体の作業役 30 回目・22:30 の巡目のマージ。前は 29 回目)
 
 ## この仕事でしたこと(2026-11-12・本体の作業役・30 回目〔22:30 の巡目: runner/ready の印のマージ・試験・push〕)
-- **入れた(--no-ff・来た順・既定の切り替えではない・衝突なし)**: wt2 t-1341-wide-chain-mismatch 55cd862d(ec62e73a。T-1341 Done = 根は溢れの塊の置き場〔既定 170 塊〕が尽きて GPU が頁を待たせた・試験 RunWideDeepChain だけ・エンジンのコードは不変)/ wt2 t-1340-wide-grain-layers 356e4bde(e7824edc。チケットの文書だけ = 設計の詰め)/ wt4 t-1156-fire-spread-rc 9818006a(937f2236。T-1156 Done = 草原の根は放射の面の崖 τ ≥ 32・測りの口 KeepCascadeCellNet と道具・試験 radiation_scene_spread だけ・シミュの法則は不変)。
+- **入れた(--no-ff・来た順・既定の切り替えではない・衝突なし)**: wt2 t-1341-wide-chain-mismatch 55cd862d(ec62e73a。T-1341 Done = 根は溢れの塊の置き場〔既定 170 塊〕が尽きて GPU が頁を待たせた・試験 RunWideDeepChain だけ・エンジンのコードは不変)/ wt2 t-1340-wide-grain-layers 356e4bde(e7824edc。チケットの文書だけ = 設計の詰め)/ wt4 t-1156-fire-spread-rc 9818006a(937f2236。T-1156 Done = 草原の根は放射の面の崖 τ ≥ 32・測りの口 KeepCascadeCellNet と道具・試験 radiation_scene_spread だけ・シミュの法則は不変)/ wt5 t-1368-lab-probe-failures 01a78da0(文書だけ。T-1368 Done = lab_box・probe_phase の失敗 12 件の根の表・エンジンの不具合 0)/ wt6 t-1252-gather-tree 9e5441f8(T-1252 段 2 の 6 本目 = 集めて書く段を GPU の世界の木の段に・ADR-0532 の 8・既定の答えとハッシュ不変)。
 - **入れなかった**: wt5 t-1356-slope-touch-proto 4b74b018(研究・捨てる試作。印は runner/ready に残す。ユーザーが触る手順は wt5 のチケット)。
-- **記録**: ROADMAP(T-1341 Done・T-1359 の行〔Q189 待ち〕・T-1340 設計の詰めまで・T-1156 Done・T-1365〔研究・wt4 が次〕・T-1366 の行)・QUESTIONS(**Q189【エンジン】** = 溢れの塊の置き場が尽きた時〔仮 A・C を後で・司令塔の印 = T-1252 の欄の頁と一つの芯〕と T-1340 の 9 種目の層の小さい問い〔仮 = 数えて舞う粒のまま〕/ **Q190【エンジン】** = ADR-0535 放射の不透明な面の崖〔仮 (a)・おすすめ (b) を T-1365 で〕)・NEXT。ゲームの中身へ: 草の光の a(T-1156)。
-- **試験(release)**: 後で追記(下の行)。
+- **記録**: ROADMAP(T-1341 Done・T-1359 の行〔Q189 待ち〕・T-1340 設計の詰めまで・T-1156 Done・T-1365〔研究・wt4 が次〕・T-1366・T-1368 Done・T-1369〔wt5 が次〕・T-1370 の行)・QUESTIONS(**Q189【エンジン】** = GPU の器が尽きた時の約束〔溢れの塊・欄の頁・層の頁・層の組を 1 つの芯に。wt6 の 3 つの扱い・おすすめ 欄と層の頁 = 構造の上限・溢れ = 作り手の上限 + 刻み直し・仮 = 今のまま〕と T-1340 の 9 種目の層の小さい問い〔仮 = 数えて舞う粒のまま〕/ **Q190【エンジン】** = ADR-0535 放射の不透明な面の崖〔仮 (a)・おすすめ (b) を T-1365 で〕)・NEXT。ゲームの中身へ(司令塔が回す): 草の光の a(T-1156)・サンプルの熱分解が発熱で火を付けた木のセルが 3200 K(T-1368)。
+- **試験(release・RTX 3070 Ti)**: t-1341 / t-1340 / t-1156 の後(23dcd294)= release ビルド警告 0・multires_layers・float_check 系 5・dxil_alloca_check・radiation_reference・radiation_scene_spread(72 秒)・probe_radiation(56 秒)合格 + GPU gpu_multires_layers(HW 37 秒)・gpu_multires_layers_warp(457 秒)合格・archmap --check OK。radiation_scene(404 秒)は流していない。t-1368 は文書だけ。t-1252-gather-tree の後 = 下の行(後で追記)。
 - 次の番号は **D-701・ADR-0479・Q191**(本体。Q189・Q190 は使った)。
 
 ## この仕事でしたこと(2026-11-12・本体の作業役・29 回目〔22:30 の巡目・★ の反映。docs だけ・コードは触らない〕)
