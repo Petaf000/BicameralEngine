@@ -2,6 +2,7 @@
 // 64bit の値は下位・上位の 2 語(multires_field_pages.hlsli の並び)。
 #include "sim/gpu_multires_fields.h"
 
+#include <algorithm>
 #include <format>
 
 #include "common/multires_field_pages.hlsli"
@@ -79,6 +80,81 @@ namespace bicameral::sim {
         const size_t base = MfValueAddress(cellPages, capacity, store.components, 0, 0, 0);
         for (size_t value = 0; value < store.pages.size(); ++value)
             store.pages[value] = LoadPair(words, base + (value * 2));
+    }
+
+    // --- GPU の世界の欄の区画 ---
+
+    bool GpuCarriesField(const MultiresField& field) {
+        return SfOnCells(field.desc) && (SfOwned(field.desc) || SfTickOnly(field.desc));
+    }
+
+    uint32_t GpuCarriedFieldCount(const MultiresNest& nest) {
+        return static_cast<uint32_t>(std::ranges::count_if(nest.fields, GpuCarriesField));
+    }
+
+    uint32_t GpuCarriedFieldValues(const MultiresNest& nest) {
+        uint32_t values = 0;
+        for (const MultiresField& field : nest.fields) {
+            if (GpuCarriesField(field))
+                values += field.desc.components;
+        }
+
+        return values;
+    }
+
+    std::expected<std::vector<uint32_t>, std::string> MakeGpuFieldRegion(const MultiresNest& nest, uint32_t capacity,
+                                                                         uint32_t slots, uint32_t cellPages) {
+        const uint32_t count = GpuCarriedFieldCount(nest);
+        std::vector<uint32_t> region(1 + (size_t{count} * MF_TABLE_WORDS), 0);
+        region[0] = count;
+
+        uint32_t entry = 0;
+        for (uint32_t field = 0; field < nest.fields.size(); ++field) {
+            if (!GpuCarriesField(nest.fields[field]))
+                continue;
+
+            auto store = MakeGpuFieldImage(nest, field, capacity);
+            if (!store)
+                return std::unexpected(std::format("欄 {}: {}", nest.fields[field].name, store.error()));
+
+            const MultiresFieldStore& values = nest.fields[field].store;
+            if (values.cellPages != cellPages)
+                return std::unexpected(
+                    std::format("欄 {}: セルの頁の数が GPU の世界と合わない", nest.fields[field].name));
+
+            if (values.uniform.size() != size_t{slots} * values.components)
+                return std::unexpected(std::format("欄 {}: 一様の値の数が枠の数と合わない", nest.fields[field].name));
+
+            const auto storeStart = static_cast<uint32_t>(region.size());
+            region.insert(region.end(), store->begin(), store->end());
+            const auto uniformStart = static_cast<uint32_t>(region.size());
+            region.resize(region.size() + (values.uniform.size() * 2), 0);
+            for (size_t value = 0; value < values.uniform.size(); ++value)
+                StorePair(region, uniformStart + (value * 2), values.uniform[value]);
+
+            region[MfRegionTableAddress(entry, MF_TABLE_FIELD)] = field;
+            region[MfRegionTableAddress(entry, MF_TABLE_OWNER)] = nest.fields[field].desc.owner;
+            region[MfRegionTableAddress(entry, MF_TABLE_STORE)] = storeStart;
+            region[MfRegionTableAddress(entry, MF_TABLE_UNIFORM)] = uniformStart;
+            ++entry;
+        }
+
+        return region;
+    }
+
+    void ApplyGpuFieldRegion(MultiresNest& nest, std::span<const uint32_t> words) {
+        const uint32_t count = words[0];
+        for (uint32_t entry = 0; entry < count; ++entry) {
+            const uint32_t field = words[MfRegionTableAddress(entry, MF_TABLE_FIELD)];
+            const uint32_t storeStart = words[MfRegionTableAddress(entry, MF_TABLE_STORE)];
+            const uint32_t uniformStart = words[MfRegionTableAddress(entry, MF_TABLE_UNIFORM)];
+            FX_ASSERT(field < nest.fields.size() && GpuCarriesField(nest.fields[field]));
+            ApplyGpuFieldImage(nest, field, words.subspan(storeStart, uniformStart - storeStart));
+
+            MultiresFieldStore& store = nest.fields[field].store;
+            for (size_t value = 0; value < store.uniform.size(); ++value)
+                store.uniform[value] = LoadPair(words, uniformStart + (value * 2));
+        }
     }
 
     NestGatherReport GpuFieldGatherReport(std::span<const uint32_t> words) {
