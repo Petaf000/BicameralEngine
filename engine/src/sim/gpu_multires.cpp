@@ -495,6 +495,9 @@ namespace bicameral::sim {
 
             if (options.wideCells && pass == PassExpand)
                 path = "sim/multires_tree_wide_expand.cso";  // 一様の値の溢れを写す塊も配る(T-0384)
+
+            if (options.wideCells && pass == PassSettle)
+                path = "sim/multires_tree_wide_settle.cso";  // 一様の値の層を溢れの成分まで比べる(T-1240 の 7 の 5)
             auto pipeline = LoadComputePipeline(device, m_rootSignature.Get(), options.pipelineCache, path);
             if (!pipeline)
                 return std::unexpected(pipeline.error());
@@ -514,8 +517,10 @@ namespace bicameral::sim {
 
         // 層を合わせる段(層の頁を持つ世界だけ。T-1221)
         if (options.layerPages > 0) {
-            auto layers = LoadComputePipeline(device, m_rootSignature.Get(), options.pipelineCache,
-                                              "sim/multires_layers.cso");
+            // 溢れを使う世界は溢れの成分の量で結ぶ変種(T-1240 の 7 の 5)
+            auto layers = LoadComputePipeline(
+                device, m_rootSignature.Get(), options.pipelineCache,
+                options.wideCells ? "sim/multires_layers_wide.cso" : "sim/multires_layers.cso");
             if (!layers)
                 return std::unexpected(layers.error());
 
@@ -1061,6 +1066,12 @@ namespace bicameral::sim {
         // 層を使う世界で反応が粒を生む表: CPU は生まれた粒を層に足す(T-1322。ADR-0489 の 3 (B))ので、GPU も刻む前のセルを写し、
         // 刻みの後に比べて足す(T-1323)。写しは u1 と同じ大きさ(要る世界だけ作る)
         m_grainBorn = m_layerCapacity > 0 && nest.cellLayers.enabled && ProducesGrain(nest);
+        if (m_grainBorn && nest.wideCells) {
+            // 生まれた粒を層に足す段は刻む前の溢れを写さない(T-1340。溢れを使う世界の層は T-1240 の 7 の 5 で読める)
+            Log(Channel::Gpu, Level::Error, "溢れを使う世界で反応が粒を生む表の層はまだ GPU の段が足せない(T-1340)");
+            return false;
+        }
+
         if (m_grainBorn && !EnsureGrainSnapshot()) {
             Log(Channel::Gpu, Level::Error, "刻む前のセルの写し(層を使う世界で粒を生む表。T-1323)のバッファを作れない");
             return false;

@@ -3,7 +3,8 @@
 // 像にする・読み戻した像を CPU の頁の層へ戻す。GpuMultires が RecordUpload・Read で使い、層を合わせる段(shaders/sim/multires_layers.hlsl)が
 // 間で付け替え、木の段(頁を返す・畳む)が層の頁を返す。
 // 一様の枠の層(MultiresCellStore::uniformLayers)も枠ごとの組に写す・戻す(T-1240 の 4 段目)。
-// まだの所(T-1240 の続き): 溢れを使う世界の層は写さない(写す像を作らずに理由を返す)。
+// 溢れを使う世界(T-1240 の 7 の 5)も溢れの成分の層まで物質で組に詰める(組は 1 セル・一様の枠 1 つに RX_MAX_CELL_SPECIES まで)。
+// まだの所: GPU の段(層を合わせる段・木の段)が溢れの成分の量を読まないので、GpuMultires::RecordUpload は溢れを使う世界の層をまだ断る。
 #pragma once
 
 #include <cstdint>
@@ -25,7 +26,7 @@ namespace bicameral::sim {
     };
 
     // nest の層のある頁を capacity 頁の置き場の像にする(頁の番号の順に層の頁 0, 1, … を配り、残りを空きのスタックに積む)。
-    // 層の頁が足りない・溢れを使う世界に層がある時は理由を返す
+    // 層の頁が足りない・層を持つ物質が RX_MAX_CELL_SPECIES 種を超えるセル / 一様の枠がある時は理由を返す
     [[nodiscard]] std::expected<GpuLayerImage, std::string> MakeGpuLayerImage(const MultiresNest& nest,
                                                                               uint32_t capacity);
 
