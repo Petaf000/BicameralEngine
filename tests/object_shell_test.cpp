@@ -401,7 +401,8 @@ namespace {
     // Flow = 層 k 段 + 流れ(T-1143。object_flow_cpu.h)
     enum class ShellMode : uint8_t { None, OnDemand, OnDemandRelieved, Flow };
 
-    // 圧力の反復の規則(T-1201。既定 = 0 から収まったら止める。T-1200 までの形は {24, false, false})
+    // 圧力の規則(既定 = 多重格子を残差の線まで回して丸める。T-1355。finish = 0 で整数の赤黒の規則〔T-1201。0 から収まったら止める〕・
+    // T-1200 までの形は finish = 0 の {24, false, false})
     struct PressureRule {
         uint32_t sweeps = 1024;  // 上限(untilQuiet = false なら決まった回数)
         bool untilQuiet = true;
@@ -411,8 +412,7 @@ namespace {
         uint32_t multigridSmooth = 2;  // 調べるだけ(T-1321): 段ごとの前と後の赤黒の数
         uint32_t multigridCycles = 2;  // 調べるだけ(T-1321): V 字の回数(1 = ② を細かい段の赤黒だけで)
         int64_t quietTolerance = 0;    // 調べるだけ: 収まったとみなす 1 回の赤黒の値の変わりの上限
-        uint32_t
-            finish = 0;  // 調べるだけ(T-1343): 仕上げの候補(OhShellFlow::pressureFinish)・残差の線・今の規則と比べるか
+        uint32_t finish = 1;  // 答えの規則(OhShellFlow::pressureFinish。T-1343・T-1355)・残差の線・動かない点と比べるか
         uint32_t finishLineBits = 7;
         bool finishCompare = false;
         std::ostream* dump = nullptr;  // 調べるだけ(T-1202): 圧力の問題の書き出し先と、何回に 1 回
@@ -452,6 +452,9 @@ namespace {
         std::array<SweepStats, 3> sweepStats{};   // 流れ: 圧力の反復の回数(燃え方の場面ごと。T-1201)
         int64_t gapSpeedQ16 = 0;                  // 流れ: 決まった回数と止まった時の面の速さの差の最大(T-1201)
         int64_t gapReferenceQ16 = 0;
+        int64_t biasLineMinusFixed = 0;  // 流れ: 丸めの偏り(T-1355。OhShellFlow の bias*。比べの時だけ)
+        std::array<int64_t, 2> biasResidualQ8{};
+        std::array<uint64_t, 2> biasVoxels{};
         double cpuMilliseconds = 0;
         bool conserved = true;
         bool failed = false;
@@ -699,6 +702,9 @@ namespace {
         burn.limitedShares = flow.limitedShares;
         burn.gapSpeedQ16 = flow.gapSpeedQ16;
         burn.gapReferenceQ16 = flow.gapReferenceQ16;
+        burn.biasLineMinusFixed = flow.biasLineMinusFixed;
+        burn.biasResidualQ8 = flow.biasResidualQ8;
+        burn.biasVoxels = flow.biasVoxels;
 
         burn.conserved = burn.conserved && totals() == start;
         burn.cpuMilliseconds = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - began)
@@ -793,6 +799,15 @@ namespace {
                 "小刻み)\n",
                 static_cast<long long>(burn.gapSpeedQ16), static_cast<long long>(burn.gapReferenceQ16));
 
+        if (burn.biasVoxels[0] != 0 && burn.biasVoxels[1] != 0)
+            std::printf(
+                "  丸めの偏り(T-1355。Ψ ≠ 0 のボクセルの平均): Ψ の符号 × 残差 ÷ 重みの和 線の答え %+.4f・動かない点 "
+                "%+.4f(Ψ "
+                "の単位)・線の答えの符号 ×(線 − 動かない点)%+.4f\n",
+                static_cast<double>(burn.biasResidualQ8[0]) / (256.0 * static_cast<double>(burn.biasVoxels[0])),
+                static_cast<double>(burn.biasResidualQ8[1]) / (256.0 * static_cast<double>(burn.biasVoxels[1])),
+                static_cast<double>(burn.biasLineMinusFixed) / static_cast<double>(burn.biasVoxels[0]));
+
         std::printf("  列に火が来た刻み:");
         for (const uint32_t tick : burn.litTick)
             std::printf(" %u", tick);
@@ -854,7 +869,8 @@ int main(int argc, char** argv) {
             pressure.dumpEvery = static_cast<uint32_t>(std::atoi(argv[16]));
         }
 
-        // 調べるだけ(T-1343)[仕上げの候補 = 候補 × 100 + 残差の線 × 10 + 今の規則と比べるか(1)。例 171 = (i)・線 7・比べる]
+        // [答えの規則 = 規則 × 100 + 残差の線 × 10 + 動かない点と比べるか(1)。省くと既定 170 = 線 7・比べない(T-1355)。
+        //  0 = 整数の赤黒の動かない点(11〜14 番目の規則)・171 = 線 7 で、丸めの偏りも見る(T-1343・T-1355)]
         //   書き出しを使わない時は 15・16 番目を「- 0」に
         if (argc >= 18) {
             const auto rule = static_cast<uint32_t>(std::atoi(argv[17]));
@@ -928,34 +944,34 @@ int main(int argc, char** argv) {
     EXPECT(first.digest == awake.digest);
     EXPECT(first.shellsMade >= 1 && first.shellsReturned >= 1);
 
-    // 1b. 圧力の解き始めを多重格子で作っても(T-1202。最後は同じ赤黒を収まるまで)、燃え広がりは 0 から赤黒だけの時と同じ
-    //     (同じ整数の式の別の動かない点。違いは 1 % 以内・2026-10-26 の紙 層 2 段で 16.35 ↔ 16.35 mm/s)・保存・上限に当たらない・赤黒が減る
+    // 1b. 圧力の答え(既定 = 多重格子を残差の線まで回して丸める。T-1355)は、整数の赤黒の動かない点(0 から収まるまで。T-1201)と
+    //     燃え広がりが 1 % 以内・保存・V 字が上限に当たらない・費用(V 字と残差を見る分。細かい格子の赤黒 1 回分の単位)が赤黒の半分未満
     {
-        PressureRule rule;
-        rule.multigrid = true;
-        const Burn withMultigrid = RunBurn(noMonoxide, FUELS[0], 0, ShellMode::Flow, true, false, 2, true, {}, false,
-                                           nullptr, 0, rule);
-        const double zeroStartSpeed = SpreadOf(first).millimetresPerSecond;
-        const double multigridSpeed = SpreadOf(withMultigrid).millimetresPerSecond;
+        PressureRule fixedPoint;
+        fixedPoint.finish = 0;
+        const Burn settled = RunBurn(noMonoxide, FUELS[0], 0, ShellMode::Flow, true, false, 2, true, {}, false, nullptr,
+                                     0, fixedPoint);
+        const double lineSpeed = SpreadOf(first).millimetresPerSecond;
+        const double fixedSpeed = SpreadOf(settled).millimetresPerSecond;
         uint64_t capped = 0;
-        uint64_t sweepsPlain = 0;
-        uint64_t sweepsMultigrid = 0;
+        uint64_t sweepsFixed = 0;
+        uint64_t workLine = 0;
         for (size_t phase = 0; phase < 3; ++phase) {
-            capped += withMultigrid.sweepStats[phase].capped;
-            sweepsPlain += first.sweepStats[phase].sweeps;
-            sweepsMultigrid += withMultigrid.sweepStats[phase].sweeps +
-                               (withMultigrid.sweepStats[phase].multigridWork / 1000);
+            capped += first.sweepStats[phase].capped;
+            sweepsFixed += settled.sweepStats[phase].sweeps;
+            workLine += first.sweepStats[phase].finishWork / 1000;
         }
 
         std::printf(
-            "多重格子の解き始め: 速さ %.2f mm/s(0 から赤黒だけ %.2f)・上限に当たった %llu・赤黒の和 %llu(赤黒だけ "
-            "%llu)\n",
-            multigridSpeed, zeroStartSpeed, static_cast<unsigned long long>(capped),
-            static_cast<unsigned long long>(sweepsMultigrid), static_cast<unsigned long long>(sweepsPlain));
-        EXPECT(withMultigrid.conserved && !withMultigrid.failed);
+            "圧力の答え(線まで): 速さ %.2f mm/s(動かない点 %.2f)・V 字が上限に当たった %llu・費用 赤黒 %llu "
+            "回分(動かない点 "
+            "%llu 回)\n",
+            lineSpeed, fixedSpeed, static_cast<unsigned long long>(capped), static_cast<unsigned long long>(workLine),
+            static_cast<unsigned long long>(sweepsFixed));
+        EXPECT(settled.conserved && !settled.failed);
         EXPECT(capped == 0);
-        EXPECT(zeroStartSpeed > 0 && std::abs(multigridSpeed - zeroStartSpeed) <= zeroStartSpeed * 0.01);
-        EXPECT(sweepsMultigrid * 2 < sweepsPlain);
+        EXPECT(fixedSpeed > 0 && std::abs(lineSpeed - fixedSpeed) <= fixedSpeed * 0.01);
+        EXPECT(workLine * 2 < sweepsFixed);
     }
 
     // 2. 燃え広がり(燃える物 × 0.5 m / 0.25 m × 表と層)
