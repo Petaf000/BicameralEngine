@@ -93,6 +93,20 @@
 6. 試験: field_owner の場面(配り手の往復・影・この刻みだけ)を GPU の木で・pageOf まで CPU とビット一致(HW・WARP)/ 新しい印の欄が無い世界は今とビット一致(gpu_multires・gpu_lab_box・gpu_tree_refine_placement)。
 - 量の見込み: チャット 2〜3 回(未確認)。1 の決めが先(番号の揃え方が木の段の作りを決める)。
 
+## 段 2 の 2 本目(2026-11-12 wt6 作業役。ブランチ t-1252-tree-gpu = t-1252-registry-owner-gpu の上)
+- **1 が入った(CPU。司令塔の受け取り 15:10)**: 配り手の欄の疎な頁を、木の 1 回の処理の中で「取る」= 割り当ての段(Allocate の後の AllocateOwnerPages)で許可した要求の順に・
+  「返す」= 解放の段(ReleaseAll)で返すセルの頁ごとに要求の順に。頁が要るかは値を作る前に(細かく = 頁を持つ親が欄の頁を持てば鎖の段の数・
+  粗く = 親が頁を持つ枠になり〔広げる親も〕まだ欄の頁が無く、子が欄の頁か 0 でない一様の値を持つか広げる親の一様の値が 0 でない)。
+  RefineOwners・ExpandPage は配り手の欄の頁を返さない(取った頁を使う)・Coarsen は配り手の欄の頁を返さない。一般の疎な欄は今のまま。ADR-0532 の 3 に入った形を書いた。
+- **頁の番号を記録した試験・セーブの写し**: 探した(grep pageOf・freePages)。番号を見るのは field_owner・gpu_field_gather・multires_sparse(一般の欄だけ = 変わらない)。
+  セーブは値の像(FieldPageValues)で頁の番号を持たない = 取り直しは無い。
+- 試験: field_owner に「番号: 1 回の処理の要求の順に取る(空きの上 → 後ろに足す)・返す(要求の順)・往復の値は同じ」を足した。結果は下の作業ログ。
+- **wt2 の T-1323 との突き合わせ(2026-11-12 wt2 の作業ツリーのチケットを読んだ)**: T-1323 は**刻みの段**で u5 に「刻む前のセルの写し」を結ぶ(SnapshotGrainCells・ReconcileGrownLayers。
+  層を使う世界で粒を生む表だけ)。この仕事の 2 は**木の段**(BindLayers の間 = 要求の処理・畳む・TreeExpand)で u5 に欄の置き場を結ぶ予定 = 結ぶ時が違うのでぶつからない。
+  ただし刻みの段の中の広げる段(RecordExpandPass・ExpandStepNode・ConductPrepareBlock)は 0 でない一様の値を持つ配り手の欄を広げる時に欄の置き場が要る(CPU の ExpandWantedPages の ExpandPage)。
+  その時 u5 は T-1323 の写しなので、**欄の置き場は u4 の層の置き場の後ろに並べる**(1 つのバッファ。g_external2 = 欄の置き場の始まりの語)に変える方がよい(仮)。
+  足す場所: T-1323 = 刻みの段の前後(写し・比べる段)/ この仕事 = Allocate・TreeRelease・CoarsenRequest(multires_graph.hlsl 811)・RefineLevel の層の配りの後・TreeExpand。同じ関数に足すのは RefineLevel と TreeExpand だけ(層の配りの後ろに欄の配り)。
+
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-10-29(本体 16 回目・設計): ADR-0500 の改訂で作った。
 - 2026-10-29(本体 18 回目・段 1): 登録の印 2 つ・配り手の表(試験用 1 つ)・セルの配りの口(細かく/粗く・影)・集めて書く段・この刻みだけの読む口と境目の検査・SF_MAX_COMPONENTS 12 を CPU に。
@@ -106,3 +120,6 @@
   **段 1 の残り**(セルの真実を書く道を 1 つにまとめて busyTick を書く所)は T-1228 段 2 と一緒に(段 2 の GPU は wt2)。Status は段 1 の主な形が main に入った状態のまま In Progress。
 - 2026-11-12(wt6 作業役・段 2 の 1 段目): GPU の欄の頁の置き場の並び・集めて書く段の Compute・CPU ⇔ GPU の像(ADR-0532)。gpu_field_gather(HW・WARP)で頁の番号・空きのスタックまで CPU とビット一致。
   木の段への載せは「段 2 の残り」(1 は印 = CPU の頁を返す順の変更の確かめが先)。GpuMultires は変えていない。
+- 2026-11-12(wt6 作業役・段 2 の 2 本目): 段 2 の残りの 1(CPU の配り手の欄の頁を割り当ての段で取る・解放の段で返す)を t-1252-tree-gpu に。ADR-0532 に司令塔の受け取りと入った形。
+  試験(release 警告 0): field_owner(番号の試験を足した)・multires・multires_state・multires_sparse・field_storage・placement_refine・tree_refine_placement・multires_uniform・multires_layers・
+  multires_activity・window_lab・phase_layer_world・warm_start_save 合格。2(GpuMultires に置き場)以降は次の作業役へ(上の「段 2 の 2 本目」の T-1323 との突き合わせを先に読む)。
