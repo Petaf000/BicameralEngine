@@ -1,6 +1,6 @@
 # T-1326 2 次元の支えの違う大きさの面の切り口のずれを 3 次元と同じ分け方に
 
-- Status: Doing(2026-11-12 wt3)
+- Status: Done(2026-11-12 wt3)
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1 回分
@@ -12,11 +12,11 @@
 対の相手の項が自分の細かいセルを引く分も足し、3 次元の MixedForces(T-1325)と同じ「細かいセルが受ける力の全部」の読みにする(司令塔の仮)。
 
 ## 完了条件(チェックできる形で)
-- [ ] 奥行 1 セルの混ざる場面(Extruded 7 場面 × None / 形 A)で、2 次元の FineFaceForces のずれが 3 次元の奥行 2 つの面の和と面ごとに同じ(最大の力の 0.1 %)・粗いセルの面ごとの和も同じ(support_3d_mixed_test 2)
-- [ ] 上の段だけ 0.25 m の梁の上の段の塊の x の釣り合い(切る面の軸の和 + 境の切り口のずれの和 = 0)が 2 次元の読みでも 10^-4 以内(support_3d_mixed_test 4)
-- [ ] 系・答え・ハッシュは変わらない(面の力の読みだけ)。support_law・support_mixed・support_mixed_neighbor_strain・support_3d・support_3d_mixed・support_cost・support_fracture_refine 合格(割れの試験の期待はこのブランチの中で取り直し)
-- [ ] GPU gpu_equilibrium_block HW/WARP(GPU は面の力を読まないので変わらない見込みの確かめ)
-- [ ] release 警告 0・archmap --check
+- [x] 奥行 1 セルの混ざる場面(Extruded 7 場面 × None / 形 A)で、2 次元の FineFaceForces のずれが 3 次元の奥行 2 つの面の和と面ごとに同じ(最大の力の 0.1 %)・粗いセルの面ごとの和も同じ(support_3d_mixed_test 2)
+- [x] 上の段だけ 0.25 m の梁の上の段の塊の x の釣り合い(切る面の軸の和 + 境の切り口のずれの和 = 0)が 2 次元の読みでも 10^-4 以内(support_3d_mixed_test 4)
+- [x] 系・答え・ハッシュは変わらない(面の力の読みだけ)。support_law・support_mixed・support_mixed_neighbor_strain・support_3d・support_3d_mixed・support_cost・support_fracture_refine 合格(割れの試験の期待は取り直し不要だった: support_fracture_refine はそのまま合格)
+- [x] GPU gpu_equilibrium_block HW/WARP(GPU は面の力を読まないので変わらない見込みの確かめ。HW 15 秒・WARP 133 秒で CPU とビット一致)
+- [x] release 警告 0・archmap --check
 
 ## メモ・参考
 - 対の伸びの項(AddMixedPair): TripleTerm の nodes = {粗いセル C, その項の細かいセル, 対の相手}。勾配 1 = 3 g_軸 + mix g_ずれ・勾配 2 = mix g_ずれ(相手の細かいセルを引く分)。
@@ -28,3 +28,7 @@
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-11-12(wt3。ブランチ t-1326-mixed-shear-2d・t-1325-face-cut-3d 463cb02a の上): MixedForces の伸びの項の読みを直し、support_3d_mixed_test の 2 次元との比べにずれ(面ごと・粗いセルの面の和)と 2 次元の釣り合いを足した。ビルドと試験はこの後。
+- 2026-11-12(wt3 続き): release 警告 0。CPU 合格 = support_law(626 秒)・support_3d_mixed・support_mixed・support_mixed_neighbor_strain・support_3d・support_cost・support_fracture_refine・float_check 5 本・dxil_alloca_check。
+  2 次元と 3 次元の切り口の差(軸・ずれ・縁。面ごと)= 7 場面 × 2 形で 6.6 × 10^-8 〜 4.0 × 10^-7(最大の力に対して)・粗いセルの面ごとのずれの和の差 ≤ 4.0 × 10^-7(直す前は 2〜13 %)。
+  上の段の塊の 2 次元の釣り合いの残り 1.10 × 10^-7(None)・7.83 × 10^-8(形 A)。
+  GPU gpu_equilibrium_block HW・WARP 合格(ハッシュは変わらない)・archmap --check OK。
