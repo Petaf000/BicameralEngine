@@ -677,11 +677,15 @@ namespace {
         return Compare(cpu, *read, std::format("まとめて {} 刻み", BATCH_TICKS));
     }
 
+    std::expected<sim::BakedReactionTable, std::string> MakeGrainBornTable();
+
     // --- 時間: 層のある場面の 1 刻み(全部を刻む)を層の頁あり・なしで ---
     std::expected<double, std::string> MeasureStep(ID3D12Device5* device, gpu::ImmediateQueue& queue,
                                                    gpu::DebugRing& ring, const sim::BakedReactionTable& table,
-                                                   uint32_t layerPages) {
-        const sim::MultiresNest cpu = MakeScene(table, true);
+                                                   uint32_t layerPages, bool grainWorld = false) {
+        sim::MultiresNest cpu = MakeScene(table, true);
+        if (grainWorld)
+            sim::EnableCellLayers(cpu, table);  // 粒を生む表なら刻む前の写しと比べる段を通る(T-1323)
         auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, GpuOptions(StepMode::Full, layerPages));
         if (!gpu)
             return std::unexpected(gpu.error());
@@ -870,6 +874,24 @@ namespace {
             Log(Channel::Gpu, Level::Info,
                 "GPU 時間: 1 刻み(全部を刻む・根 1 頁に層)層の頁あり {:.4f} ms・なし {:.4f} ms(層の置き場 {} B)",
                 *withLayers, *without, uint64_t{LayerStoreWords(*table)} * sizeof(uint32_t));
+
+            // 層を使う世界で粒を生む表(T-1323): 刻む前の写しと比べる段の分(同じ場面を粒を生む表で・層を使わない世界と比べる)
+            const auto grainTable = MakeGrainBornTable();
+            if (!grainTable) {
+                Log(Channel::Gpu, Level::Error, "gpu_multires_layers_test: FAILED(粒を生む表: {})", grainTable.error());
+                return 1;
+            }
+
+            const auto grainPlain = MeasureStep(device->Get(), *queue, *ring, *grainTable, LAYER_PAGES);
+            const auto grainBorn = MeasureStep(device->Get(), *queue, *ring, *grainTable, LAYER_PAGES, true);
+            if (!grainPlain || !grainBorn) {
+                Log(Channel::Gpu, Level::Error, "gpu_multires_layers_test: FAILED(粒を生む表の計測)");
+                return 1;
+            }
+
+            Log(Channel::Gpu, Level::Info,
+                "GPU 時間: 粒を生む表の 1 刻み(全部を刻む・根 1 頁に層)層を使う世界 {:.4f} ms・使わない世界 {:.4f} ms",
+                *grainBorn, *grainPlain);
         }
 
         if (auto scenes = RunScenes(device->Get(), *queue, *ring, *table); !scenes) {
