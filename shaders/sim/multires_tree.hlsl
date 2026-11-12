@@ -1050,15 +1050,27 @@ uint32_t CarriedUnmarkedPage(uint32_t raw) {
     return raw & ~CARRIED_RELEASE_MARK;
 }
 
-// 載せた欄が一様か(全部のスレッドが呼ぶ・グループで一様な結果)。全部 0 の欄の頁には返す印を付ける
-bool CarriedFoldable(uint32_t slot, MrBlock block, uint32_t index) {
+// MrFoldValueCell を枠 slot の見出しのバッファから直に(写した見出しの子の並びを動的な添字で読むと局所の配列になる。T-0397)
+uint32_t CarriedFoldValueCell(uint32_t slot) {
+    FX_UNROLL
+    for (uint32_t octant = 0; octant < MR_CHILDREN_PER_CELL; ++octant) {
+        if (g_blocks[slot].children[octant] == MR_NO_BLOCK)
+            return MrCellIndex((octant & 1u) * MR_OCTANT_EDGE, ((octant >> 1) & 1u) * MR_OCTANT_EDGE,
+                               ((octant >> 2) & 1u) * MR_OCTANT_EDGE);
+    }
+
+    return MR_BLOCK_CELLS;
+}
+
+// 載せた欄が一様か(全部のスレッドが呼ぶ・グループで一様な結果)。全部 0 の欄の頁には返す印を付ける。page = 枠 slot のセルの頁
+bool CarriedFoldable(uint32_t slot, uint32_t page, bool real, uint32_t index) {
     const uint32_t count = CarriedFieldCount();
-    const uint32_t valueCell = MrFoldValueCell(block);
-    const bool covered = block.kind == MR_BLOCK_REAL &&
+    const uint32_t valueCell = CarriedFoldValueCell(slot);
+    const bool covered = real &&
                          g_blocks[slot].children[MrOctantOfCell(index)] != MR_NO_BLOCK;  // バッファから直に(T-0397)
     bool foldable = true;
     for (uint32_t f = 0; f < count; ++f) {
-        const uint32_t fieldPage = CarriedPageOf(f, block.page);  // グループで一様
+        const uint32_t fieldPage = CarriedPageOf(f, page);  // グループで一様
         if (fieldPage == MF_NO_PAGE)
             continue;
 
@@ -1084,7 +1096,7 @@ bool CarriedFoldable(uint32_t slot, MrBlock block, uint32_t index) {
 
         const uint32_t flags = CarriedGroupOr(index, mine);
         if (index == 0 && (flags & CARRIED_FOLD_NONZERO) == 0)
-            SetCarriedPageOf(f, block.page, fieldPage | CARRIED_RELEASE_MARK);
+            SetCarriedPageOf(f, page, fieldPage | CARRIED_RELEASE_MARK);
 
         foldable = foldable && (flags & CARRIED_FOLD_DIFFER) == 0;
     }
@@ -1093,13 +1105,13 @@ bool CarriedFoldable(uint32_t slot, MrBlock block, uint32_t index) {
 }
 
 // 畳む枠 slot の載せた欄の一様の値 = 値のセルの値(全部覆われていれば・欄の頁が無ければ 0。CPU の FoldPage の FoldValue)
-void FoldCarriedUniform(uint32_t slot, MrBlock block) {
+void FoldCarriedUniform(uint32_t slot, uint32_t page) {
     const uint32_t count = CarriedFieldCount();
-    const uint32_t valueCell = MrFoldValueCell(block);
+    const uint32_t valueCell = CarriedFoldValueCell(slot);
     for (uint32_t f = 0; f < count; ++f) {
         uint32_t fieldPage = MF_NO_PAGE;
         if (valueCell != MR_BLOCK_CELLS)
-            fieldPage = CarriedUnmarkedPage(g_layers[CarriedStoreBase(f) + MfPageOfAddress(block.page)]);
+            fieldPage = CarriedUnmarkedPage(g_layers[CarriedStoreBase(f) + MfPageOfAddress(page)]);
 
         const uint32_t components = CarriedComponents(f);
         for (uint32_t c = 0; c < components; ++c)
@@ -1520,7 +1532,7 @@ uint32_t FoldLayerFlags(MrBlock block, uint32_t layerPage, uint32_t index) {
 
     // 載せた欄(T-1252): 全部 0 の欄の頁に返す印・欄が一様でなければ畳まない(CPU の FoldExact・FoldNear の PageFoldable。グループで一様な分岐)
     if (foldable && CarriedFieldCount() > 0) {
-        if (!CarriedFoldable(slot, block, index))
+        if (!CarriedFoldable(slot, block.page, block.kind == MR_BLOCK_REAL, index))
             foldable = false;
     }
 
@@ -1558,7 +1570,7 @@ uint32_t FoldLayerFlags(MrBlock block, uint32_t layerPage, uint32_t index) {
     }
 
     if (index == 0 && folds && CarriedFieldCount() > 0)
-        FoldCarriedUniform(slot, block);
+        FoldCarriedUniform(slot, block.page);
 
     if (index == 0 && flags != 0)
         g_treeWords[TreeClaimAddress(slot)] = MR_CLAIM_FOLD_BASE | flags;
