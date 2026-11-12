@@ -116,35 +116,19 @@ uint32_t GridCellOf(uint32_t thread, bool copyAll) {
                           corner.z + (local / (PROBE_BLOCK_SIZE * PROBE_BLOCK_SIZE)));
 }
 
-// 放つセルの一覧(作業の workEmitBits。T-1228 段 1)の bit を、放つセルの数の増減(EmitDelta。1 = 立てる・mod 2^32 の −1 = 下ろす)に合わせて直す。
-// 波の中で同じ語のセルをまとめ、語ごとに立てる bit・下ろす bit を集めて 1 語に 1 回ずつ原子操作する(T-1328。全部写す刻みはセルの番号の順に
-// 並ぶので、直すセルのある語は波 1 つに 1〜2 個)。1 セルの bit を書くのは 1 スレッドだけで bit は重ならないので、セルごとに当てるのと
-// 結果は同じ(順によらない)。一覧はいつも「作業の今の中身で放つ」セル(数と同じ判定)。波の命令は波で揃った所(写しの段の最後)から呼ぶ
-void UpdateEmitBits(RWByteAddressBuffer work, uint32_t bitsOffset, uint32_t cell, uint32_t step) {
-    if (bitsOffset == 0u)
+// 放つセルの一覧(作業の workEmitBits。T-1228 段 1)のセルの 1 bit を、放つセルの数の増減(EmitDelta)に合わせて立てる・下ろす。
+// 1 セルを書くのは 1 スレッドだけで、ビットは重ならないので順によらない。一覧はいつも「作業の今の中身で放つ」セル(数と同じ判定)
+void UpdateEmitBit(RWByteAddressBuffer work, uint32_t bitsOffset, uint32_t cell, uint32_t step) {
+    if (bitsOffset == 0u || step == 0u)
         return;
 
     const uint32_t at = RcEmitBitsWordOffset(bitsOffset, cell);
     const uint32_t mask = RcEmitBitMask(cell);
-    const uint32_t setMask = step == 1u ? mask : 0u;
-    const uint32_t clearMask = (step != 0u && step != 1u) ? mask : 0u;
-    bool pending = step != 0u;
-
-    // 残っている語のうち番地の最も小さい語から 1 つずつ(回る数 = 直すセルのある語の数。直すセルが無い波は回らない)
-    while (WaveActiveAnyTrue(pending)) {
-        const uint32_t wordAt = WaveActiveMin(pending ? at : 0xFFFFFFFFu);
-        const bool inWord = pending && at == wordAt;
-        const uint32_t setBits = WaveActiveBitOr(inWord ? setMask : 0u);
-        const uint32_t clearBits = WaveActiveBitOr(inWord ? clearMask : 0u);
-        uint32_t original;
-        if (WaveIsFirstLane() && setBits != 0u)
-            work.InterlockedOr(wordAt, setBits, original);
-
-        if (WaveIsFirstLane() && clearBits != 0u)
-            work.InterlockedAnd(wordAt, ~clearBits, original);
-
-        pending = pending && !inWord;
-    }
+    uint32_t original;
+    if (step == 1u)
+        work.InterlockedOr(at, mask, original);
+    else
+        work.InterlockedAnd(at, ~mask, original);
 }
 
 bool SameLight(RcCellLight left, RcCellLight right) {
@@ -214,12 +198,10 @@ bool SameLight(RcCellLight left, RcCellLight right) {
             }
             positiveStep = EmitDelta(before.positive, after.positive);
             negativeStep = EmitDelta(before.negative, after.negative);
+            UpdateEmitBit(rcWork, params.workEmitBits, cell, positiveStep);
+            UpdateEmitBit(rcSecond, params.workEmitBits, cell, negativeStep);
         }
     }
-
-    // 放つセルの一覧の bit(波でまとめて語ごとに 1 回。T-1328)
-    UpdateEmitBits(rcWork, params.workEmitBits, cell, positiveStep);
-    UpdateEmitBits(rcSecond, params.workEmitBits, cell, negativeStep);
 
     // 側ごとの放つセルの数(作業の RC_GPU_WORK_EMITTERS。T-1229・T-1235・T-1228)。数はいつも「作業の今の中身で放つセルの数」で、
     // 作った時の作業は温度 0(放たない)・数 0。写さないセルの値は変わらないので、写したセルの増減だけ足せば合う(波に 1 回)。
