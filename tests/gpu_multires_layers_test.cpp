@@ -305,9 +305,11 @@ namespace {
     }
 
     // 成分 i の層 = (index + i) % stride == 0 なら 量 ÷ 4 × 3(stride 3: 0 でない層は 4 種まで・溢れの成分にも。stride 1: 12 種)
+    constexpr uint32_t WIDE_NO_LAYERS = 0;  // stride 0: 層なし(溢れを使う世界の層を使わない場面)
+
     std::vector<uint64_t> WideImageLayers(const RxWideCell& cell, uint32_t index, uint32_t stride) {
         std::vector<uint64_t> layers(cell.speciesCount, 0);
-        for (uint32_t i = 0; i < cell.speciesCount; ++i)
+        for (uint32_t i = 0; i < cell.speciesCount && stride != WIDE_NO_LAYERS; ++i)
             layers[i] = (index + i) % stride == 0 ? cell.amounts[i] / 4 * 3 : 0;
 
         return layers;
@@ -774,17 +776,52 @@ namespace {
         return options;
     }
 
+    // 食い違った時に見る: 最初に違うブロック・セル(量か層)
+    std::string DescribeWideDifference(const sim::MultiresNest& cpu, const sim::MultiresNest& read) {
+        const uint32_t slots = cpu.capacity.worldBlocks + cpu.capacity.observerBlocks;
+        for (uint32_t slot = 0; slot < slots; ++slot) {
+            const MrBlock& a = cpu.blocks[slot];
+            const MrBlock& b = read.blocks[slot];
+            if (a.kind != b.kind || a.level != b.level || MrIsUniform(a) != MrIsUniform(b))
+                return std::format("枠 {} の見出しが違う(種類 {}/{}・段 {}/{}・一様 {}/{})", slot, a.kind, b.kind,
+                                   a.level, b.level, MrIsUniform(a), MrIsUniform(b));
+
+            if (a.kind == MR_BLOCK_UNUSED)
+                continue;
+
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                const RxWideCell x = sim::LoadWideNestCell(cpu, slot, index);
+                const RxWideCell y = sim::LoadWideNestCell(read, slot, index);
+                if (sim::HashReactionCell(x) != sim::HashReactionCell(y))
+                    return std::format("枠 {} セル {} の量が違う(成分 {}/{})", slot, index, x.speciesCount,
+                                       y.speciesCount);
+
+                const std::vector<uint64_t> u = sim::LoadWideNestCellLayers(cpu, slot, index);
+                const std::vector<uint64_t> v = sim::LoadWideNestCellLayers(read, slot, index);
+                for (uint32_t i = 0; i < std::max(u.size(), v.size()); ++i) {
+                    const uint64_t left = i < u.size() ? u[i] : 0;
+                    const uint64_t right = i < v.size() ? v[i] : 0;
+                    if (left != right)
+                        return std::format("枠 {}(段 {}) セル {} 成分 {}(物質 {})の層が違う(cpu {} / gpu {})", slot,
+                                           a.level, index, i, i < x.speciesCount ? x.species[i] : ~0u, left, right);
+                }
+            }
+        }
+
+        return "セルと層は同じ(ほかの欄が違う)";
+    }
+
     std::expected<void, std::string> RunWideChain(ID3D12Device5* device, gpu::ImmediateQueue& queue,
                                                   gpu::DebugRing& ring, const sim::BakedReactionTable& table,
-                                                  test::MultiresScenario scenario, bool paged) {
-        sim::MultiresNest cpu = MakeWideImageRoot(table, 3, paged, true);
+                                                  test::MultiresScenario scenario, bool paged, bool layered = true) {
+        sim::MultiresNest cpu = MakeWideImageRoot(table, layered ? 3 : WIDE_NO_LAYERS, paged, true);
         auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, WideOptions());
         if (!gpu)
             return std::unexpected(gpu.error());
 
-        const std::string scene = std::format("溢れの世界の{}({})",
+        const std::string scene = std::format("溢れの世界の{}({}・{})",
                                               scenario == test::MultiresScenario::Real ? "本物の鎖" : "影の鎖",
-                                              paged ? "頁" : "一様の枠");
+                                              paged ? "頁" : "一様の枠", layered ? "層あり" : "層なし");
         const uint64_t firstSum = RootLayerSum(cpu);
         uint32_t mostLayered = 0;
         for (uint64_t tick = 0; tick < CHAIN_TICKS; ++tick) {
@@ -800,7 +837,8 @@ namespace {
 
             test::StepMultiresScene(cpu, table, scenario, tick);
             if (auto compared = Compare(cpu, *read, std::format("{} 刻み {}", scene, tick)); !compared)
-                return std::unexpected(std::format("{}({})", compared.error(), DescribeRoot(*read)));
+                return std::unexpected(std::format("{}({}・{})", compared.error(), DescribeRoot(*read),
+                                                   DescribeWideDifference(cpu, *read)));
 
             if (gpu->ReadLayerShortage() != 0u)
                 return std::unexpected(std::format("{} 刻み {}: 足りるはずの層の頁が尽きた", scene, tick));
@@ -809,7 +847,7 @@ namespace {
         }
 
         // 頁の根は鎖の頁へ層を配った(試験が空でない)。一様の枠の根は一様の鎖(層の頁は使わない)
-        if (paged && mostLayered <= 1)
+        if (layered && paged && mostLayered <= 1)
             return std::unexpected(std::format("{}: 層のある頁が {}(鎖へ配られない)", scene, mostLayered));
 
         Log(Channel::Gpu, Level::Info, "{}: {} 刻み毎回一致(層の和 {} → {}・層のある頁 最大 {})", scene, CHAIN_TICKS,
@@ -1005,6 +1043,11 @@ namespace {
 
         if (auto wide = TestWideImage(*limits); !wide)
             return wide;
+
+        // 層を使わない溢れの世界(層の段を通らない = 前と同じ)→ 層のある溢れの世界
+        if (auto plainWide = RunWideChain(device, queue, ring, *limits, test::MultiresScenario::Real, true, false);
+            !plainWide)
+            return plainWide;
 
         for (const bool paged : {true, false}) {
             for (const test::MultiresScenario scenario :
