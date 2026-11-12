@@ -248,7 +248,7 @@ LayerTail UniformValueTail(uint32_t slot) {
 // スレッド 0 が段の順に取る(番号は CPU と同じ)。この刻みだけの欄も同じ道(値は木の段では 0)
 int64_t ShadowCarriedValue(uint32_t f, uint32_t owner, MrBlock parent, uint32_t parentSlot, uint32_t parentCell,
                            uint32_t component, uint32_t j) {
-    const int64_t value = LoadCarriedCell(f, parent, parentSlot, parentCell, component);
+    const int64_t value = LoadCarriedSlotCell(f, parentSlot, parentCell, component);
     if (owner == SF_NO_OWNER)
         return SfRefineValue(value);
 
@@ -1292,7 +1292,6 @@ int64_t PullBackCarriedValue(uint32_t owner, int64_t parentValue, SfFamily famil
 
 void PullBackCarried(MrBlock shadow, uint32_t octantCell) {
     const uint32_t count = CarriedFieldCount();
-    const MrBlock parent = g_blocks[shadow.parent];
     const uint32_t parentCell = MrOctantCell(shadow.parentOctant, octantCell);
     for (uint32_t f = 0; f < count; ++f) {
         const uint32_t owner = CarriedOwner(f);
@@ -1302,7 +1301,7 @@ void PullBackCarried(MrBlock shadow, uint32_t octantCell) {
         if (fresh) {
             bool mine = false;
             for (uint32_t c = 0; c < components; ++c) {
-                const int64_t parentValue = LoadCarriedCell(f, parent, shadow.parent, parentCell, c);
+                const int64_t parentValue = LoadCarriedSlotCell(f, shadow.parent, parentCell, c);
                 const SfFamily family = LoadCarriedFamily(f, MF_NO_PAGE, octantCell, c);
                 FX_UNROLL
                 for (uint32_t j = 0; j < SF_CHILDREN; ++j)
@@ -1317,7 +1316,7 @@ void PullBackCarried(MrBlock shadow, uint32_t octantCell) {
             continue;
 
         for (uint32_t c = 0; c < components; ++c) {
-            const int64_t parentValue = LoadCarriedCell(f, parent, shadow.parent, parentCell, c);
+            const int64_t parentValue = LoadCarriedSlotCell(f, shadow.parent, parentCell, c);
             uint32_t familyPage = fieldPage;
             if (fresh)
                 familyPage = MF_NO_PAGE;

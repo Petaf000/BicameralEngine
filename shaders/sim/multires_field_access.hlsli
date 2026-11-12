@@ -135,6 +135,21 @@ int64_t LoadCarriedCell(uint32_t field, MrBlock block, uint32_t slot, uint32_t i
     return LoadCarriedPage(field, CarriedPageOf(field, block.page), index, component);
 }
 
+// LoadCarriedCell を枠 slot の見出しのバッファから直に読む形(写した見出しの子の並びを動的な添字で読むと局所の配列になる。T-0397。
+// 影の鎖・引き戻しの親)
+int64_t LoadCarriedSlotCell(uint32_t field, uint32_t slot, uint32_t index, uint32_t component) {
+    const uint32_t page = g_blocks[slot].page;
+    if (page < MR_PAGE_WANTED)
+        return LoadCarriedPage(field, CarriedPageOf(field, page), index, component);
+
+    const bool covered = g_blocks[slot].kind == MR_BLOCK_REAL &&
+                         g_blocks[slot].children[MrOctantOfCell(index)] != MR_NO_BLOCK;
+    if (covered)
+        return 0;
+
+    return LoadCarriedUniform(field, slot, component);
+}
+
 // 子のブロックのセル index は、親のセルの何番目の子か(MrChildCell の j。CPU の ChildOfCell)
 uint32_t CarriedChildOfCell(uint32_t index) {
     return (MrCellX(index) & 1u) | ((MrCellY(index) & 1u) << 1) | ((MrCellZ(index) & 1u) << 2);
