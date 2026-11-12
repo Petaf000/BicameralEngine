@@ -3,7 +3,12 @@
 // ハッシュの表から計算したブロックの数とエネルギーの合計を取る。規模は最初につつく点で変える:
 //   空気の 1 点 / 8 点 / 64 点(空気を温めて、熱の差が流れの切り捨てを下回ると止まる。止まるまでの刻みも測る)/
 //   木箱の壁の 1 点(燃え広がる。反応の費用)
-// 結果は Markdown の表の行としてログに出す(docs/perf.md に貼る)。エネルギーの合計がつつきの分から変わっていたら失敗。
+// 結果は Markdown の表の行としてログに出す(docs/perf.md に貼る)。
+// 正しさ(T-1346): GPU を走らせた後、同じ刻みの数だけ CPU リファレンス(ProbeReference)を走らせ、刻みごとの要約(ハッシュ・エネルギーの合計・
+// つつきの分・計算したブロックの数)が GPU と一致し、CPU で「セルのエネルギー × 2^16 + 熱の放射の段がセルの外に持つ分」がつつきの分だけ
+// 変わる(保存。gpu_probe_sim_test と同じ式。T-1113)ことを確かめる。どちらかが外れたら失敗。
+// GPU のハッシュの表はセルのエネルギーの和しか持たない(放射の持ち越し・世界の外へ出た分は持たない)ので、燃える場面ではセルだけの和は
+// 放射で外へ出た分だけ減る。T-1346 の前はセルだけの和で保存を見ていて、既定の放射(T-1113)が入った後の木箱の壁で NG と出ていた。
 //
 // ctest には登録しない(時間がかかり、時間は機械しだい)。走らせ方: `job.py run -Preset release -Exe gpu_conduct_bench`。
 // 引数は gpu_test_options.h(--warp)と、--trace(連鎖のトレースを全部の刻み・格子の全体で有効にして、その費用を測る。T-0087)か
@@ -65,7 +70,14 @@ namespace {
         uint64_t ticks = 0;
         uint64_t quietTick = 0;  // 計算したブロックが 0 になった最初の刻み(0 なら止まらなかった)
         uint32_t maxBlocks = 0;
-        bool energyConserved = true;
+        bool cellEnergyKept = true;  // セルだけの和がつつきの分だけ変わった(放射の段がセルの外へ出すと外れる。参考)
+        std::vector<ProbeTickHash> hashes;  // S(1)〜S(ticks)(CPU リファレンスと比べる)
+        uint32_t radiationOverflow = 0;     // 熱の放射の段の置き場の溢れの印(溢れた刻みからは決定的でない)
+
+        // --- CPU リファレンスとの突き合わせ(T-1346)---
+        bool matchesReference = false;
+        bool energyConserved = false;    // セル × 2^16 + 放射がセルの外に持つ分の保存(CPU)
+        int64_t radiationOutsideMj = 0;  // 最後の刻みで放射の段がセルの外に持つ分(mJ。持ち越し + 外へ出た分)
 
         // --- 時間(計算したブロックの数の範囲ごと・単位ごと)---
         std::array<Bucket, BUCKET_LIMITS.size()> buckets{};
@@ -128,7 +140,7 @@ namespace {
                 result.unitMicroseconds[unit] += unitMicroseconds(unit);
 
             result.maxBlocks = std::max(result.maxBlocks, state.scheduledBlocks);
-            result.energyConserved = result.energyConserved && state.energy == energy + state.sourceEnergy;
+            result.cellEnergyKept = result.cellEnergyKept && state.energy == energy + state.sourceEnergy;
             energy = state.energy;
             if (state.scheduledBlocks == 0 && result.quietTick == 0)
                 result.quietTick = state.tick;
@@ -166,6 +178,8 @@ namespace {
                 return result;
 
             AccumulateFrame(result, readback, unitsPerTick, microsecondsPerTick, energy);
+            result.hashes.insert(result.hashes.end(), readback.hashes.begin(), readback.hashes.end());
+            result.radiationOverflow |= readback.radiationOverflow;
             result.ticks = tick + TICKS_PER_FRAME;
         }
 
@@ -175,11 +189,70 @@ namespace {
         return result;
     }
 
+    // GPU と同じ刻みの数だけ CPU リファレンスを走らせ、刻みごとの要約と保存を確かめる(T-1346。gpu_probe_sim_test の HashesMatch と同じ欄)
+    void CheckAgainstReference(const BakedReactionTable& table, const Scenario& scenario, ScenarioResult& result) {
+        if (!result.ok || result.hashes.size() != result.ticks)
+            return;
+
+        const std::vector<ProbeCommand> pokes = MakePokes(scenario.pointsPerAxis);
+        ProbeReference reference(table);
+
+        // 保存の単位: セルのエネルギー × 2^16 + 熱の放射の段がセルの外に持つ分(2^−16 mJ の mod 2^64。T-1113)
+        const auto units = [&reference](std::span<const reaction::RxCell> cells) {
+            return (ProbeEnergySum(cells) << reaction::RC_ENERGY_SHIFT) + reference.CascadeRadiationUnits();
+        };
+
+        uint64_t previousUnits = units(reference.State(0));
+        result.matchesReference = true;
+        result.energyConserved = true;
+
+        for (uint64_t tick = 0; tick < result.ticks; ++tick) {
+            reference.Advance(tick, tick == 0 ? std::span<const ProbeCommand>(pokes) : std::span<const ProbeCommand>());
+            const std::span<const reaction::RxCell> state = reference.State(tick + 1);
+
+            const ProbeTickHash& gpu = result.hashes[tick];
+            const uint64_t cpuHash = reference.StateHash(tick + 1);
+            const uint64_t cpuEnergy = ProbeEnergySum(state);
+            const bool same = gpu.tick == tick + 1 && gpu.hash == cpuHash && gpu.energy == cpuEnergy &&
+                              gpu.sourceEnergy == reference.SourceEnergy() &&
+                              gpu.scheduledBlocks == reference.ScheduledBlocks();
+
+            if (!same && result.matchesReference) {
+                Log(Channel::Sim, Level::Error,
+                    "{}: S({}) が CPU と違う: GPU {:016x} エネルギー {} つつき {} ブロック {} / CPU {:016x} エネルギー "
+                    "{} "
+                    "つつき {} ブロック {}",
+                    scenario.name, tick + 1, gpu.hash, gpu.energy, gpu.sourceEnergy, gpu.scheduledBlocks, cpuHash,
+                    cpuEnergy, reference.SourceEnergy(), reference.ScheduledBlocks());
+            }
+
+            result.matchesReference = result.matchesReference && same;
+
+            const uint64_t nowUnits = units(state);
+            const uint64_t expectedUnits = previousUnits + (reference.SourceEnergy() << reaction::RC_ENERGY_SHIFT);
+            if (nowUnits != expectedUnits && result.energyConserved) {
+                Log(Channel::Sim, Level::Error, "{}: S({}) で保存が外れた(CPU。単位の差 {})", scenario.name, tick + 1,
+                    static_cast<int64_t>(nowUnits - expectedUnits));
+            }
+
+            result.energyConserved = result.energyConserved && nowUnits == expectedUnits;
+            previousUnits = nowUnits;
+        }
+
+        result.radiationOutsideMj = static_cast<int64_t>(reference.CascadeRadiationUnits()) >>
+                                    reaction::RC_ENERGY_SHIFT;
+    }
+
     void Report(const Scenario& scenario, const ScenarioResult& result) {
         Log(Channel::Sim, Level::Info,
-            "{}: {} 刻み  止まった刻み {}  計算したブロックの最大 {} / {}  エネルギーの保存 {}", scenario.name,
-            result.ticks, result.quietTick == 0 ? std::string("(止まらない)") : std::to_string(result.quietTick),
-            result.maxBlocks, PROBE_BLOCK_COUNT, result.energyConserved ? "OK" : "NG");
+            "{}: {} 刻み  止まった刻み {}  計算したブロックの最大 {} / {}  CPU と一致 {}  "
+            "エネルギーの保存(放射を含む){}",
+            scenario.name, result.ticks,
+            result.quietTick == 0 ? std::string("(止まらない)") : std::to_string(result.quietTick), result.maxBlocks,
+            PROBE_BLOCK_COUNT, result.matchesReference ? "OK" : "NG", result.energyConserved ? "OK" : "NG");
+        Log(Channel::Sim, Level::Info,
+            "{}: セルだけの和の保存 {}(放射の段がセルの外に持つ分 {} mJ)  放射の置き場の溢れ {}", scenario.name,
+            result.cellEnergyKept ? "OK" : "外れ", result.radiationOutsideMj, result.radiationOverflow);
 
         const double ticks = static_cast<double>(std::max<uint64_t>(result.ticks, 1));
 
@@ -263,12 +336,13 @@ int main(int argc, char** argv) {
     bool passed = true;
 
     for (const Scenario& scenario : SCENARIOS) {
-        const ScenarioResult result = RunScenario(device->Get(), *table, scenario, trace, traceCapacity);
+        ScenarioResult result = RunScenario(device->Get(), *table, scenario, trace, traceCapacity);
         if (!result.ok)
             Log(Channel::Sim, Level::Error, "{}: 走らせられない", scenario.name);
 
+        CheckAgainstReference(*table, scenario, result);
         Report(scenario, result);
-        passed = passed && result.ok && result.energyConserved;
+        passed = passed && result.ok && result.matchesReference && result.energyConserved;
     }
 
     passed = passed && test::PassesValidation(*device, "gpu_conduct_bench");

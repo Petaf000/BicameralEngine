@@ -5,7 +5,8 @@
 //
 // 設定(1 つの引数 = 1 回。カンマ区切り。書かない鍵は既定):
 //   w=<川の幅のセル>(既定 4 = 2 m。向こう岸 x 44〜63 は変えず、手前の岸を伸び縮みさせる)・gap=1(川の代わりに草の無い土の隙間)
-//   ac=<セルロースの a>・ak=<炭(carbon)の a>・as=<砂の a>・aw=<水の a>(mm²/mol。書かなければ表の値。T-1066 の前は既定 0 で表の値を消していた)・rad=0(放射の段を入れない)
+//   ac=<セルロースの a>・ak=<炭(carbon)の a>・as=<砂の a>・aw=<水の a>(mm²/mol。書かなければ表の値。T-1066 の前は既定 0 で表の値を消していた)・rad=0(対の形の放射の段を入れない)・
+//   cascade=0(既定の熱の放射の段 RC〔T-1113〕も入れない。rad=0 だけでは RC の段が流れる〔rad=1 の時は対の形が RC の代わり〕。T-1347)
 //   seed=<向きの種>・sec=<上限の秒>(既定 60)・tall=<草の層の数>・trace=1(1 秒ごとの経過)
 //   gas=1(気体の区画: 川と両岸の上の空気 x 32〜51・y 4〜11・z 16〜47。T-0671 の場面の flow_regions と同じ。閉じた壁)・
 //   gz=<奥行き>(気体の区画の z の奥行き。既定 32。z = 32 を中に縮める。CPU の気体の段が重いので)・gh=<高さ>(既定 8)・
@@ -54,6 +55,7 @@ namespace {
         uint32_t riverCells = 4;
         bool gap = false;
         bool radiation = true;
+        bool cascade = true;                          // 既定の熱の放射の段(RC)。cascade=0 で外す(T-1347)
         std::optional<uint32_t> absorptionCellulose;  // 書かなければ表の値のまま(T-1066)
         std::optional<uint32_t> absorptionCarbon;     // 書かなければ表の値のまま(T-1066)
         std::optional<uint32_t> absorptionSilica;     // 書かなければ表の値のまま(T-1066)
@@ -114,6 +116,8 @@ namespace {
                     setting.gap = value != 0;
                 else if (key == "rad")
                     setting.radiation = value != 0;
+                else if (key == "cascade")
+                    setting.cascade = value != 0;
                 else if (key == "ac")
                     setting.absorptionCellulose = static_cast<uint32_t>(value);
                 else if (key == "ak")
@@ -359,6 +363,8 @@ namespace {
         ProbeReference reference(table, world);
         if (setting.radiation)
             reference.EnableRadiation({.seed = setting.seed});
+        if (!setting.cascade)
+            reference.SetCascadeRadiation({.enabled = false});
 
         // 区画(T-0697。T-0671 の場面の flow_regions と同じ形。気体は閉じた壁)
         const uint32_t riverFirst = FAR_FIRST_X - setting.riverCells;
