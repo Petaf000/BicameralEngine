@@ -18,7 +18,9 @@
 //   1 つのセルに物が 2・3・8 個(T-1332): セルへの受け渡しは物ごとに粗い量を貯め、刻みの終わりに OhShellApplyCells がセルごとに物の順で足して
 //         1 回だけ当てる(ADR-0500 の集めて書く段)。比べに、熱い層の温度を物ごとに変えた 2・3・8 個 × 2 セル + 1 個の場面を足し、
 //         GPU を 2 回回して状態のハッシュが同じか(回ごとに変わらないか)も見る。
-// 引数は gpu_test_options.h と --measure / --measure-only / --profile / --scale / --threads N / --sweeps N / --rule N。
+//   --mg-extra N(T-1321 の調べ。研究): 多重格子の規則(4 の bit)で、② の後に V 字を N 回重ねる(CPU の pressureMultigridCycles = 2 + N・
+//         GPU の g_pressureMode の 8〜11 bit)。比べと測りの両方に効く。既定 0 = 今の規則。
+// 引数は gpu_test_options.h と --measure / --measure-only / --profile / --scale / --threads N / --sweeps N / --rule N / --mg-extra N。
 #include <cstdlib>
 #include <cstring>
 
@@ -338,6 +340,10 @@ namespace {
         uint32_t stageMask = ALL_STAGES;  // 回す段(測るだけ。T-1223)
     };
 
+    // 重ねる V 字の数の置き場(g_pressureMode の 8〜11 bit。shaders の OH_PRESSURE_MG_EXTRA_*。T-1321)
+    constexpr uint32_t MG_EXTRA_SHIFT = 8;
+    constexpr uint32_t MG_EXTRA_MASK = 15;
+
     // 圧力の反復の規則(T-1201。CPU の OhShellFlow と GPU の g_pressureMode に同じものを渡す)
     struct PressureRule {
         const char* name;
@@ -350,6 +356,7 @@ namespace {
         flow.pressureUntilQuiet = (rule.mode & 1u) != 0;
         flow.pressureWarmStart = (rule.mode & 2u) != 0;
         flow.pressureMultigrid = (rule.mode & 4u) != 0;
+        flow.pressureMultigridCycles = 2 + ((rule.mode >> MG_EXTRA_SHIFT) & MG_EXTRA_MASK);
     }
 
     size_t StatsCount(size_t objects) {
@@ -606,9 +613,20 @@ namespace {
         const sim::BakedReactionTable& table;
         const test::OhTables& tables;
         const test::OhCpuTable& shared;
-        uint32_t measureSweeps;  // 測る時の「0 から決まった回数」の回数(切り分け。比べは 24 のまま)
-        std::string shader;      // シェーダー(--threads で変える。T-1223)
+        uint32_t measureSweeps;             // 測る時の「0 から決まった回数」の回数(切り分け。比べは 24 のまま)
+        std::string shader;                 // シェーダー(--threads で変える。T-1223)
+        uint32_t multigridExtraCycles = 0;  // --mg-extra N(T-1321。多重格子の規則で ② の後に重ねる V 字の数)
     };
+
+    // 多重格子の規則なら、重ねる V 字の数(--mg-extra)を mode に足す(T-1321。ほかの規則はそのまま)
+    PressureRule WithExtraCycles(const Context& context, const PressureRule& rule) {
+        if ((rule.mode & 4u) == 0 || context.multigridExtraCycles == 0)
+            return rule;
+
+        return {.name = rule.name,
+                .sweeps = rule.sweeps,
+                .mode = rule.mode | ((context.multigridExtraCycles & MG_EXTRA_MASK) << MG_EXTRA_SHIFT)};
+    }
 
     // GPU の真実(ボクセル・セル・対の端数・面の運動量)のハッシュ(FNV-1a。回ごとに変わらないかを見る。T-1332)
     std::expected<uint64_t, std::string> GpuDigest(ID3D12Device5* device, gpu::ImmediateQueue& queue,
@@ -643,7 +661,8 @@ namespace {
 
     // CPU と GPU を同じ場面から回して比べる。戻り値 = 最後の GPU の真実のハッシュ
     std::expected<uint64_t, std::string> RunCompare(const Context& context, const Shape& shape, bool sharedPotential,
-                                                    const PressureRule& rule, const CompareScene& scene = {}) {
+                                                    const PressureRule& baseRule, const CompareScene& scene = {}) {
+        const PressureRule rule = WithExtraCycles(context, baseRule);
         std::vector<test::OhWorld> variants;
         for (const int32_t shellMk : {HOT_SHELL_MK, 1200000, 1800000}) {
             auto one = MakePaper(context.table, context.shared, context.tables.gases, shape, shellMk);
@@ -742,8 +761,9 @@ namespace {
 
     // 戻り値 = 1 刻みの平均の GPU の ms。stageMask を全部でなくすると暖機の後だけ段を外す(結果は変わるので数え上げは見ない・書き出さない)
     std::expected<double, std::string> Measure(const Context& context, const Shape& shape, uint32_t copies,
-                                               bool sharedPotential, const PressureRule& rule,
+                                               bool sharedPotential, const PressureRule& baseRule,
                                                uint32_t stageMask = ALL_STAGES, uint32_t objectsPerCell = 1) {
+        const PressureRule rule = WithExtraCycles(context, baseRule);
         const auto one = MakePaper(context.table, context.shared, context.tables.gases, shape);
         if (!one)
             return std::unexpected("層を作れない");
@@ -915,6 +935,7 @@ namespace {
         uint32_t threads = 1024;
         uint32_t measureSweeps = 24;
         int32_t onlyRule = -1;
+        uint32_t multigridExtraCycles = 0;
         for (size_t i = 0; i < arguments.size(); ++i) {
             char* argument = arguments[i];
             const std::string_view text = argument;
@@ -922,6 +943,8 @@ namespace {
                 measureSweeps = static_cast<uint32_t>(std::strtoul(arguments[++i], nullptr, 10));
             } else if (text == "--rule" && i + 1 < arguments.size()) {
                 onlyRule = static_cast<int32_t>(std::strtol(arguments[++i], nullptr, 10));
+            } else if (text == "--mg-extra" && i + 1 < arguments.size()) {
+                multigridExtraCycles = static_cast<uint32_t>(std::strtoul(arguments[++i], nullptr, 10)) & MG_EXTRA_MASK;
             } else if (text == "--threads" && i + 1 < arguments.size()) {
                 threads = static_cast<uint32_t>(std::strtoul(arguments[++i], nullptr, 10));
             } else if (text == "--profile") {
@@ -964,7 +987,12 @@ namespace {
                               .shared = shared,
                               .measureSweeps = measureSweeps,
                               .shader = threads == 1024 ? std::string("sim/object_shell_flow.cso")
-                                                        : std::format("sim/object_shell_flow_t{}.cso", threads)};
+                                                        : std::format("sim/object_shell_flow_t{}.cso", threads),
+                              .multigridExtraCycles = multigridExtraCycles};
+        if (multigridExtraCycles != 0)
+            Log(Channel::Gpu, Level::Info, "多重格子の規則: ② の後に V 字を {} 回重ねる(V 字 {} 回。T-1321 の調べ)",
+                multigridExtraCycles, 2 + multigridExtraCycles);
+
         if (compare) {
             const std::array<Shape, 2> shapes = {Shape{"紙 24 列・層 2 段", 24, 3, 2},
                                                  Shape{"紙 24 列・層 4 段", 24, 3, 4}};
