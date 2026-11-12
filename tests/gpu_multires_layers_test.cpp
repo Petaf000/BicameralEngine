@@ -770,6 +770,7 @@ namespace {
             if (species.name != "test_dew")
                 continue;
 
+            species.density = 917;  // 氷と同じ(kg/m³。ばらける固体は沈むか浮くかに要る)
             species.transport.solidMotion = sim::SolidMotion::Loose;
             species.transport.reposeAngleDegrees = 35;
             species.transport.packingPercent = sim::DEFAULT_PACKING_PERCENT;
