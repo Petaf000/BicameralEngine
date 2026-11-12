@@ -516,6 +516,20 @@ namespace bicameral::sim {
                 return std::unexpected(layers.error());
 
             m_layerPipeline = std::move(*layers);
+
+            // 層を使う世界で反応が粒を生む表の段(T-1323)
+            auto snapshot = LoadComputePipeline(device, m_rootSignature.Get(), options.pipelineCache,
+                                                "sim/multires_layers_grain_snapshot.cso");
+            auto grown = LoadComputePipeline(device, m_rootSignature.Get(), options.pipelineCache,
+                                             "sim/multires_layers_grain_reconcile.cso");
+            if (!snapshot)
+                return std::unexpected(snapshot.error());
+
+            if (!grown)
+                return std::unexpected(grown.error());
+
+            m_grainSnapshotPipeline = std::move(*snapshot);
+            m_grainReconcilePipeline = std::move(*grown);
         }
 
         const gpu::CreationCost computeCost = computeTimer.Elapsed();
@@ -1028,11 +1042,11 @@ namespace bicameral::sim {
             return false;
         }
 
-        // 層を使う世界で反応が粒を生む表は、まだ GPU に写さない: CPU は生まれた粒を層に足す(T-1322。ADR-0489 の 3 (B))が、
-        // GPU の層を合わせる段は反応の前の量を持たず 層 = min(前の層, 量) だけ(舞う粒のまま = 結果が CPU と変わる。D-428)。同じ規則は T-1323
-        if (nest.cellLayers.enabled && ProducesGrain(nest)) {
-            Log(Channel::Gpu, Level::Error,
-                "層を使う世界で反応が粒を生む表は GPU に写せない(生まれた粒を層に足す規則が GPU にまだ無い。T-1323)");
+        // 層を使う世界で反応が粒を生む表: CPU は生まれた粒を層に足す(T-1322。ADR-0489 の 3 (B))ので、GPU も刻む前のセルを写し、
+        // 刻みの後に比べて足す(T-1323)。写しは u1 と同じ大きさ(要る世界だけ作る)
+        m_grainBorn = m_layerCapacity > 0 && nest.cellLayers.enabled && ProducesGrain(nest);
+        if (m_grainBorn && !EnsureGrainSnapshot()) {
+            Log(Channel::Gpu, Level::Error, "刻む前のセルの写し(層を使う世界で粒を生む表。T-1323)のバッファを作れない");
             return false;
         }
 
@@ -1378,6 +1392,7 @@ namespace bicameral::sim {
             return false;  // 活性のグラフはまだ溢れを読まない(T-0212)
 
         SetTick(worldSeed, tick);
+        RecordGrainSnapshot(list, debugRing);  // 刻む前のセル(層を使う世界で粒を生む表だけ。T-1323)
         m_constants.stepFlags = options.conduction ? STEP_FLAG_CONDUCTION | STEP_FLAG_LISTED : 0;
 
         // --- 起こす段がつつかれたブロックの印を直し、起こす刻みが来たブロックをこの刻みの種の一覧へ足す(CPU の StepActive の種。
@@ -1429,7 +1444,7 @@ namespace bicameral::sim {
         }
 
         m_activityCurrent = next;
-        RecordLayerReconcile(list, debugRing);  // 刻みの段がセルを書いた後(T-1221)
+        RecordLayerReconcile(list, debugRing, true);  // 刻みの段がセルを書いた後(T-1221・T-1323)
 
         return true;
     }
@@ -1439,6 +1454,7 @@ namespace bicameral::sim {
         SetTick(worldSeed, tick);
         m_stageStamp = 0;
         StampStage(list);
+        RecordGrainSnapshot(list, debugRing);  // 刻む前のセル(層を使う世界で粒を生む表だけ。T-1323)
         m_constants.stepFlags = options.conduction ? STEP_FLAG_CONDUCTION : 0;
         FX_ASSERT(!m_wideCells || !options.implicitConduction);  // 陰解法の段はまだ溢れを読まない(T-0211 の残り)
         if (options.conduction) {
@@ -1448,7 +1464,7 @@ namespace bicameral::sim {
             RecordStepWait(list, debugRing);
         }
 
-        RecordLayerReconcile(list, debugRing);  // 刻みの段がセルを書いた後(T-1221)
+        RecordLayerReconcile(list, debugRing, true);  // 刻みの段がセルを書いた後(T-1221・T-1323)
     }
 
     // u4 に層の置き場を結ぶ(外のバッファの口。T-0096)。g_external0 = 層の頁の数(0 = 層を持たない世界: 段は u4 を読まない)・
@@ -1468,18 +1484,52 @@ namespace bicameral::sim {
 
     // 層を合わせる段(T-1221): CPU は刻みの段(反応)の中で 1 セルを 1 回書き、書くたびに層を付け替える(T-1220 の洗い出し)。GPU の刻みも
     // 1 セル 1 回の書き込みなので、刻みの段の後に 1 回合わせればビット一致する。層の頁は木の段が取る・返すので、層の頁の全部に投げ、
-    // 空いている層の頁は段が飛ばす(T-1240)。写した時に層が 1 つも無かった世界は投げない(GPU だけで層が生まれる道は無い)
-    void GpuMultires::RecordLayerReconcile(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
-        if (m_layerCapacity == 0 || m_layerUsed == 0)
+    // 空いている層の頁は段が飛ばす(T-1240)。写した時に層が 1 つも無かった世界は投げない(GPU だけで層が生まれる道は、層を使う世界で
+    // 反応が粒を生む表だけ = 刻みの段の後は枠ごとに刻む前の写しと比べる段が、粒の増えないセルも同じ min で合わせる。T-1323)
+    void GpuMultires::RecordLayerReconcile(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                           bool afterStep) {
+        const bool grown = afterStep && m_grainBorn;
+        if (m_layerCapacity == 0 || (m_layerUsed == 0 && !m_grainBorn))
             return;
 
         const ExternalBinding saved = BindLayers();
+        if (grown)
+            m_externalViews[1] = m_grainBefore->GetGPUVirtualAddress();
+
         list->SetComputeRootSignature(m_rootSignature.Get());
-        list->SetPipelineState(m_layerPipeline.Get());
+        list->SetPipelineState(grown ? m_grainReconcilePipeline.Get() : m_layerPipeline.Get());
         BindRoot(list, debugRing);
-        list->Dispatch(m_layerCapacity * MR_LAYER_GROUPS_PER_PAGE, 1, 1);
+        list->Dispatch(grown ? std::max(1u, m_blockCapacity) : m_layerCapacity * MR_LAYER_GROUPS_PER_PAGE, 1, 1);
         UavBarrier(list);
         RestoreExternal(saved);
+    }
+
+    // 刻む前のセル(T-1323): 枠ごとに一様の値か頁のセルを u5 の写しへ(刻みの段が書く前。後の段 ReconcileGrownLayers が比べる)
+    void GpuMultires::RecordGrainSnapshot(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {
+        if (!m_grainBorn)
+            return;
+
+        const ExternalBinding saved = BindLayers();
+        m_externalViews[1] = m_grainBefore->GetGPUVirtualAddress();
+        list->SetComputeRootSignature(m_rootSignature.Get());
+        list->SetPipelineState(m_grainSnapshotPipeline.Get());
+        BindRoot(list, debugRing);
+        list->Dispatch(std::max(1u, m_blockCapacity), 1, 1);
+        UavBarrier(list);
+        RestoreExternal(saved);
+    }
+
+    bool GpuMultires::EnsureGrainSnapshot() {
+        if (m_grainBefore)
+            return true;
+
+        ComPtr<ID3D12Device> device;
+        if (FAILED(m_buffers[BufferCells]->GetDevice(IID_PPV_ARGS(&device))))
+            return false;
+
+        m_grainBefore = gpu::CreateBuffer(device.Get(), BufferSizes()[BufferCells], gpu::BufferKind::UnorderedAccess);
+
+        return m_grainBefore != nullptr;
     }
 
     void GpuMultires::RecordWake(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,

@@ -13,7 +13,9 @@
 //   5 は粗くする刻み(COARSEN_TICK から 1 段ずつ)まで比べる(T-1240 の 3 段目: 子の層の和 ÷ 8・子の層の頁を返す)。
 //   7. 一様の枠の層(T-1240 の 3・4 段目): 層まで同じ静かな頁を畳む(層ごと一様の枠の層へ)→ 一様な根を本物の鎖で細かくする(子は親と同じ
 //      一様の枠の層)→ 粗くして戻す。燃える一様な根(一様の枠の層)を刻むと頁に広げる(一様の枠の層を頁へ)。毎刻み比べる
-//   9. 層を使う世界で反応が粒を生む表(T-1322): CPU は生まれた粒を層に足すが GPU にはまだ無い(T-1323)ので写さずに断る
+//   9. 層を使う世界で反応が粒を生む表(T-1322・T-1323): 燃える根(層なしで始める = GPU が層の頁を取る)と燃える一様な根(一様の枠の層 →
+//      頁に広げて刻む)を、全部を刻む・伝導つき・活性だけで毎刻み比べる。表は燃えて出た湯気が粒の露になる規則を足したもの。
+//      生まれた粒が層になる(層の和が増える)
 //   8. 一様な親の影の鎖(影の頁へ一様の枠の層を今の値と結んで写す)・一様な親へ層の違う一様な子を粗くする(親を頁に広げて
 //      子の層の和 ÷ 8。T-1240 の 4 段目で試していなかった道)
 // 時間(WARP では測らない): 層のある場面の 1 刻み(全部を刻む)を層の頁あり・なしで測り、層を合わせる段の分を見る(docs/perf.md)。
@@ -55,6 +57,7 @@ namespace {
     constexpr uint64_t EXPAND_TICKS = 24;                              // 一様な根を広げる場面の刻みの数
     constexpr uint32_t WARMUP_STEPS = 200;                             // 計測の前の刻み(GPU のクロックを上げる)
     constexpr uint32_t MEASURE_STEPS = 64;                             // 計測の刻み
+    constexpr uint64_t GRAIN_DEW_RATE_PER_SECOND = 1000;               // 粒を生む表の湯気 → 露(粒)の速さ(9)
 
     enum class StepMode : uint8_t {
         Full,
@@ -674,11 +677,15 @@ namespace {
         return Compare(cpu, *read, std::format("まとめて {} 刻み", BATCH_TICKS));
     }
 
+    std::expected<sim::BakedReactionTable, std::string> MakeGrainBornTable();
+
     // --- 時間: 層のある場面の 1 刻み(全部を刻む)を層の頁あり・なしで ---
     std::expected<double, std::string> MeasureStep(ID3D12Device5* device, gpu::ImmediateQueue& queue,
                                                    gpu::DebugRing& ring, const sim::BakedReactionTable& table,
-                                                   uint32_t layerPages) {
-        const sim::MultiresNest cpu = MakeScene(table, true);
+                                                   uint32_t layerPages, bool grainWorld = false) {
+        sim::MultiresNest cpu = MakeScene(table, true);
+        if (grainWorld)
+            sim::EnableCellLayers(cpu, table);  // 粒を生む表なら刻む前の写しと比べる段を通る(T-1323)
         auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, GpuOptions(StepMode::Full, layerPages));
         if (!gpu)
             return std::unexpected(gpu.error());
@@ -712,52 +719,83 @@ namespace {
         return static_cast<double>(stamps[1] - stamps[0]) * 1000.0 / static_cast<double>(frequency) / MEASURE_STEPS;
     }
 
-    // --- 9. 層を使う世界で反応が粒を生む表(T-1322)---
+    // --- 9. 層を使う世界で反応が粒を生む表(T-1322・T-1323)---
 
-    // 層を使う世界(EnableCellLayers)の根の場面を GPU に写せるか(grainProducts なら表の規則の生成物を全部粒の印に、
-    // でなければ生成物の粒の印を全部外す〔熱分解の炭は表の粒〕)
-    std::expected<bool, std::string> UploadsLayeredWorld(ID3D12Device5* device, gpu::ImmediateQueue& queue,
-                                                         gpu::DebugRing& ring, const sim::BakedReactionTable& table,
-                                                         bool grainProducts) {
-        sim::MultiresNest cpu = MakeScene(table, false);
+    // 層を使う世界(EnableCellLayers。粒の印は表のまま = 熱分解の炭が粒)の燃える場面を毎刻み比べる。uniform なら燃える一様な根
+    // (3/4 の一様の枠の層。刻むと頁に広げる)、でなければ燃える根を層なしで(粒が生まれた頁に GPU が層の頁を取る)
+    std::expected<void, std::string> RunGrainBorn(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                  gpu::DebugRing& ring, const sim::BakedReactionTable& table,
+                                                  StepMode mode, bool uniform) {
+        sim::MultiresNest cpu = uniform ? MakeUniformScene(table, BurningCrate(table), false) : MakeScene(table, false);
         sim::EnableCellLayers(cpu, table);
-        for (const RxRule& rule : table.rules) {
-            for (uint32_t k = 0; k < rule.productCount; ++k)
-                cpu.cellLayers.grain[rule.products[k]] = grainProducts ? 1 : 0;
-        }
-
-        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, GpuOptions(StepMode::Full, LAYER_PAGES));
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, GpuOptions(mode, LAYER_PAGES));
         if (!gpu)
             return std::unexpected(gpu.error());
 
-        bool uploaded = false;
-        const auto record = [&](ID3D12GraphicsCommandList10* list) {
-            uploaded = gpu->RecordUpload(list, cpu);
-            return true;
-        };
-        if (auto read = Execute(queue, ring, *gpu, record); !read && uploaded)
-            return std::unexpected(std::format("粒を生む表: {}", read.error()));
+        const std::string scene = std::format("粒を生む {}・{}", ModeName(mode), uniform ? "一様な根" : "層なしの根");
+        const uint64_t firstSum = RootLayerSum(cpu);
+        uint64_t mostSum = firstSum;
+        for (uint64_t tick = 0; tick < LAYER_TICKS; ++tick) {
+            const auto record = [&](ID3D12GraphicsCommandList10* list) {
+                if (tick == 0 && !gpu->RecordUpload(list, cpu))
+                    return false;
 
-        return uploaded;
+                return RecordGpuStep(list, *gpu, ring.GpuAddress(), mode, tick);
+            };
+            auto read = Execute(queue, ring, *gpu, record);
+            if (!read)
+                return std::unexpected(std::format("{} 刻み {}: {}", scene, tick, read.error()));
+
+            StepCpu(cpu, table, mode, tick);
+            if (auto compared = Compare(cpu, *read, std::format("{} 刻み {}", scene, tick)); !compared)
+                return compared;
+
+            if (gpu->ReadLayerShortage() != 0u)
+                return std::unexpected(std::format("{} 刻み {}: 足りるはずの層の頁が尽きた", scene, tick));
+
+            mostSum = std::max(mostSum, RootLayerSum(*read));
+        }
+
+        // 生まれた粒が層になった(試験が空でない。舞う粒のままなら層の和は増えない)
+        if (mostSum <= firstSum)
+            return std::unexpected(std::format("{}: 粒が層にならない(層の和 {} → 最大 {})", scene, firstSum, mostSum));
+
+        Log(Channel::Gpu, Level::Info, "{}: {} 刻み毎回一致(層の和 {} → 最大 {})", scene, LAYER_TICKS, firstSum,
+            mostSum);
+
+        return {};
     }
 
-    // CPU は生まれた粒を層に足すが、GPU にはまだその規則が無い(T-1323)ので写さずに断る。粒の印が生成物に無ければ今のまま写す
-    std::expected<void, std::string> RunGrainProductRefused(ID3D12Device5* device, gpu::ImmediateQueue& queue,
-                                                            gpu::DebugRing& ring,
-                                                            const sim::BakedReactionTable& table) {
-        const auto refused = UploadsLayeredWorld(device, queue, ring, table, true);
-        if (!refused)
-            return std::unexpected(refused.error());
+    // 粒を生む表: 試験の燃える表に、湯気が粒の露(ばらける固体)になる規則を足す(燃えて出た湯気がすぐ粒になる)
+    std::expected<sim::BakedReactionTable, std::string> MakeGrainBornTable() {
+        sim::ReactionTableDefinition definition = sim::MakeCombustionTestTable();
+        sim::AddDewCondensationForTest(definition, GRAIN_DEW_RATE_PER_SECOND);
+        for (sim::SpeciesDefinition& species : definition.species) {
+            if (species.name != "test_dew")
+                continue;
 
-        if (*refused)
-            return std::unexpected("粒を生む表: 層を使う世界で反応が粒を生む表を GPU が断らない");
+            species.density = 917;  // 氷と同じ(kg/m³。ばらける固体は沈むか浮くかに要る)
+            species.transport.solidMotion = sim::SolidMotion::Loose;
+            species.transport.reposeAngleDegrees = 35;
+            species.transport.packingPercent = sim::DEFAULT_PACKING_PERCENT;
+        }
 
-        const auto plain = UploadsLayeredWorld(device, queue, ring, table, false);
-        if (!plain)
-            return std::unexpected(plain.error());
+        return sim::BakeReactionTable(definition);
+    }
 
-        if (!*plain)
-            return std::unexpected("粒を生む表: 生成物が粒でない層を使う世界まで断る");
+    std::expected<void, std::string> RunGrainBornScenes(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                        gpu::DebugRing& ring) {
+        const auto baked = MakeGrainBornTable();
+        if (!baked)
+            return std::unexpected(std::format("粒を生む表: {}", baked.error()));
+
+        const sim::BakedReactionTable& table = *baked;
+        for (const bool uniform : {false, true}) {
+            for (const StepMode mode : {StepMode::Full, StepMode::Conduction, StepMode::Active}) {
+                if (auto run = RunGrainBorn(device, queue, ring, table, mode, uniform); !run)
+                    return run;
+            }
+        }
 
         return {};
     }
@@ -795,8 +833,8 @@ namespace {
         if (auto coarsen = RunUniformCoarsenExpand(device, queue, ring, table); !coarsen)
             return coarsen;
 
-        if (auto refused = RunGrainProductRefused(device, queue, ring, table); !refused)
-            return refused;
+        if (auto born = RunGrainBornScenes(device, queue, ring); !born)
+            return born;
 
         return RunBatch(device, queue, ring, table);
     }
@@ -836,6 +874,24 @@ namespace {
             Log(Channel::Gpu, Level::Info,
                 "GPU 時間: 1 刻み(全部を刻む・根 1 頁に層)層の頁あり {:.4f} ms・なし {:.4f} ms(層の置き場 {} B)",
                 *withLayers, *without, uint64_t{LayerStoreWords(*table)} * sizeof(uint32_t));
+
+            // 層を使う世界で粒を生む表(T-1323): 刻む前の写しと比べる段の分(同じ場面を粒を生む表で・層を使わない世界と比べる)
+            const auto grainTable = MakeGrainBornTable();
+            if (!grainTable) {
+                Log(Channel::Gpu, Level::Error, "gpu_multires_layers_test: FAILED(粒を生む表: {})", grainTable.error());
+                return 1;
+            }
+
+            const auto grainPlain = MeasureStep(device->Get(), *queue, *ring, *grainTable, LAYER_PAGES);
+            const auto grainBorn = MeasureStep(device->Get(), *queue, *ring, *grainTable, LAYER_PAGES, true);
+            if (!grainPlain || !grainBorn) {
+                Log(Channel::Gpu, Level::Error, "gpu_multires_layers_test: FAILED(粒を生む表の計測)");
+                return 1;
+            }
+
+            Log(Channel::Gpu, Level::Info,
+                "GPU 時間: 粒を生む表の 1 刻み(全部を刻む・根 1 頁に層)層を使う世界 {:.4f} ms・使わない世界 {:.4f} ms",
+                *grainBorn, *grainPlain);
         }
 
         if (auto scenes = RunScenes(device->Get(), *queue, *ring, *table); !scenes) {
