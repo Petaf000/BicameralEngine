@@ -1,6 +1,6 @@
 # T-1323 GPU: 層を使う世界で反応で生まれた粒を層に足す(T-1322 の GPU)
 
-- Status: In Progress
+- Status: Done
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1〜2 回分
@@ -17,7 +17,7 @@ T-1322 の CPU の規則(層を使う世界で、反応・実験室の命令で�
 - [x] 層の頁の無いセルの頁で粒が生まれたら層の頁を取る(尽きたら計器で数える)・組の空きに物質を足す
 - [x] (今は要らない: 作業ログ 4 本目)実験室の命令(lab_box.hlsl の LabCells)も同じ規則
 - [x] `ProducesGrain` の断りを外し、gpu_multires_layers の 9 を「層を使う世界の燃える場面(生成物を粒の印に)で CPU と GPU HW/WARP がビット一致」に
-- [ ] 層を使わない世界は今とビット単位で同じ・release 警告 0・archmap --check
+- [x] 層を使わない世界は今とビット単位で同じ・release 警告 0・archmap --check
 
 ## メモ・参考(T-1322 の作業役の見立て)
 - 今の層を合わせる段(shaders/sim/multires_layers.hlsl)は層の頁だけに投げ、層 = min(前の層, 今の量)。前の量を持たない。
@@ -50,3 +50,5 @@ T-1322 の CPU の規則(層を使う世界で、反応・実験室の命令で�
 - 2026-11-12 wt2(4 本目・続き): 試験 9 = 試験の燃える表は粒を生まない(炭は粒だが生成物でない)ので、湯気 → 露(ばらける固体・密度 917)の規則を足した表で、
   層なしの根(GPU が層の頁を取る)・一様な根(一様の枠の層 → 頁に広げる)× 全部・伝導つき・活性の 6 場面を 24 刻み毎回 CPU と HW 一致(層の和 0 → 8.1e9 / 1.66e10 → 1.0e11)。
   測り(RTX 3070 Ti・docs/perf.md): 粒を生む表の 1 刻み 層を使う世界 1.80 ms / 使わない世界 1.63 ms(+0.16 ms)。粒を生まない表は変わらず。
+- 2026-11-12 wt2(4 本目・終わり): rebase main(f56dab43)。release 警告 0・archmap --check・multires_layers・dxil_alloca_check・
+  gpu_multires_layers HW/WARP・gpu_multires_uniform・gpu_lab_box・gpu_tree_refine_placement 合格。Done。
