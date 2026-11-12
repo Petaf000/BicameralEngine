@@ -24,6 +24,7 @@
 #include <cstdint>
 #include <ostream>
 #include <span>
+#include <utility>
 #include <vector>
 
 #include "object_shell_cpu.h"
@@ -53,6 +54,19 @@ namespace bicameral::test {
         // 既定なら答えとハッシュは今のまま
         uint32_t pressureMultigridSmooth = 2;
         uint32_t pressureMultigridCycles = 2;
+        // 調べるだけ(T-1343。研究・捨てる試作): 仕上げの規則。0 = 今(整数の赤黒を動かない点まで)/
+        // 1 = 細かい単位の V 字を残差の線まで回して丸める(赤黒の仕上げなし)/ 2 = 1 と同じ答えを丸めず細かい単位のまま力積に /
+        // 3 = 今の丸めの後に整数の残りを V 字 1 回で運んでから今の仕上げ。既定 0 なら答えとハッシュは今のまま
+        uint32_t pressureFinish = 0;
+        uint32_t pressureFinishLineBits = 7;    // 残差の線 = 重みの和 << この数(細かい単位。7 = Ψ の半分)
+        uint32_t pressureFinishMaxCycles = 32;  // 1・2 の V 字の上限(当たったら数える)
+        bool pressureFinishCompare =
+            false;  // 1・2 の時、同じ問題を今の規則でも解き、面の速さの差を gapSpeedQ16 に(答えは 1・2 のもの)
+        uint64_t pressureFinishCycles =
+            0;  // 数えるだけ: 1・2 の V 字の回数の和・一番多い回数・上限に当たった回数・費用(赤黒 1 回 = 1000)
+        uint32_t pressureFinishMostCycles = 0;
+        uint64_t pressureFinishCapped = 0;
+        uint64_t pressureFinishWork = 0;
         // 調べるだけ(T-1201): 「収まった」とみなす 1 回の赤黒の値の変わりの上限(0 = 1 つも変わらない。GPU は 0 だけ)
         int64_t pressureQuietTolerance = 0;
         uint64_t pressureMultigridWork = 0;
@@ -374,10 +388,9 @@ namespace bicameral::test {
         return work + ((((2 * uint64_t{smooth}) + 1) * 1000 * count) + (500 * count)) / fineCount;
     }
 
-    // ① ② ③ の解き始め(戻り値 = 費用)。smooth・cycles は OhShellFlow の pressureMultigridSmooth・pressureMultigridCycles(T-1321)
-    inline uint64_t PressureMultigrid(const OhFlowBox& box, const std::array<std::vector<uint64_t>, 3>& weight,
-                                      const std::vector<int64_t>& residual, std::vector<int64_t>& potential,
-                                      uint32_t smooth = OH_MG_SMOOTH_SWEEPS, uint32_t cycles = 2) {
+    // 細かい段(Ψ × 2^8 の単位。値は 0)を箱の面の重みと残りから作る
+    inline OhMgLevel MgFineLevel(const OhFlowBox& box, const std::array<std::vector<uint64_t>, 3>& weight,
+                                 const std::vector<int64_t>& residual) {
         OhMgLevel fine;
         for (uint32_t a = 0; a < 3; ++a)
             fine.size[a] = box.size[a];
@@ -405,6 +418,16 @@ namespace bicameral::test {
             }
         }
 
+        return fine;
+    }
+
+    // ① ② ③ の解き始め(戻り値 = 費用)。smooth・cycles は OhShellFlow の pressureMultigridSmooth・pressureMultigridCycles(T-1321)
+    inline uint64_t PressureMultigrid(const OhFlowBox& box, const std::array<std::vector<uint64_t>, 3>& weight,
+                                      const std::vector<int64_t>& residual, std::vector<int64_t>& potential,
+                                      uint32_t smooth = OH_MG_SMOOTH_SWEEPS, uint32_t cycles = 2) {
+        OhMgLevel fine = MgFineLevel(box, weight, residual);
+        const size_t count = fine.Count();
+
         // ①
         uint64_t work = MgCycle(fine, count, smooth);
 
@@ -427,6 +450,88 @@ namespace bicameral::test {
         }
 
         // ③ 四捨五入(0 から遠い方へ)
+        const int64_t halfUnit = int64_t{1} << (OH_MG_FINE_BITS - 1);
+        for (size_t v = 0; v < count; ++v) {
+            const int64_t value = fine.value[v];
+            potential[v] = value >= 0 ? (value + halfUnit) >> OH_MG_FINE_BITS
+                                      : -((-value + halfUnit) >> OH_MG_FINE_BITS);
+        }
+
+        return work;
+    }
+
+    // --- 仕上げの候補(T-1343。研究・捨てる試作。既定では呼ばない)---
+
+    // どのボクセルの残差(右辺 − 重みの和 × 値 + 隣の重みつきの和)も 重みの和 << lineBits 以下か(最大の比べ = 順に依らない)
+    inline bool MgWithinLine(const OhMgLevel& level, uint32_t lineBits) {
+        for (uint32_t z = 0; z < level.size[2]; ++z) {
+            for (uint32_t y = 0; y < level.size[1]; ++y) {
+                for (uint32_t x = 0; x < level.size[0]; ++x) {
+                    const size_t v = level.Index(x, y, z);
+                    const int64_t applied = (static_cast<int64_t>(level.total[v]) * level.value[v]) -
+                                            MgNeighbourSum(level, x, y, z);
+                    const auto line = static_cast<int64_t>(std::max<uint64_t>(level.total[v], 1) << lineBits);
+                    if (std::abs(level.rhs[v] - applied) > line)
+                        return false;
+                }
+            }
+        }
+
+        return true;
+    }
+
+    struct OhFinishCount {
+        uint32_t cycles = 0;
+        bool capped = false;
+    };
+
+    // (i)・(i'): 0 から細かい単位の V 字を残差の線まで回す(回数は状態で決まる)。fineAnswer = 細かい単位の答え・potential = 四捨五入。戻り値 = 費用
+    inline uint64_t PressureMultigridToLine(const OhFlowBox& box, const std::array<std::vector<uint64_t>, 3>& weight,
+                                            const std::vector<int64_t>& residual, std::vector<int64_t>& potential,
+                                            std::vector<int64_t>& fineAnswer, uint32_t smooth, uint32_t lineBits,
+                                            uint32_t maxCycles, OhFinishCount& counted) {
+        OhMgLevel fine = MgFineLevel(box, weight, residual);
+        const size_t count = fine.Count();
+        uint64_t work = 0;
+        for (;;) {
+            work += 1000;  // 残差を見るのは赤黒 1 回分
+            if (MgWithinLine(fine, lineBits))
+                break;
+
+            if (counted.cycles == maxCycles) {
+                counted.capped = true;
+                break;
+            }
+
+            work += MgCycle(fine, count, smooth);
+            ++counted.cycles;
+        }
+
+        const int64_t halfUnit = int64_t{1} << (OH_MG_FINE_BITS - 1);
+        for (size_t v = 0; v < count; ++v) {
+            const int64_t value = fine.value[v];
+            potential[v] = value >= 0 ? (value + halfUnit) >> OH_MG_FINE_BITS
+                                      : -((-value + halfUnit) >> OH_MG_FINE_BITS);
+        }
+
+        fineAnswer = std::move(fine.value);
+
+        return work;
+    }
+
+    // (ii): 丸めた整数の値から、動かない点の幅の真ん中へ寄せた残りを V 字 1 回で運び、もう一度丸める(この後は今の仕上げ)。戻り値 = 費用
+    inline uint64_t PressureCarryCorrection(const OhFlowBox& box, const std::array<std::vector<uint64_t>, 3>& weight,
+                                            const std::vector<int64_t>& residual, std::vector<int64_t>& potential,
+                                            uint32_t smooth) {
+        OhMgLevel fine = MgFineLevel(box, weight, residual);
+        const size_t count = fine.Count();
+        for (size_t v = 0; v < count; ++v) {
+            fine.value[v] = potential[v] * (int64_t{1} << OH_MG_FINE_BITS);
+            const auto middle = static_cast<int64_t>((std::max<uint64_t>(fine.total[v], 1) - 1) / 2) << OH_MG_FINE_BITS;
+            fine.rhs[v] -= fine.value[v] >= 0 ? middle : -middle;
+        }
+
+        const uint64_t work = MgCycle(fine, count, smooth);
         const int64_t halfUnit = int64_t{1} << (OH_MG_FINE_BITS - 1);
         for (size_t v = 0; v < count; ++v) {
             const int64_t value = fine.value[v];
@@ -626,9 +731,29 @@ namespace bicameral::test {
         if (flow.pressureWarmStart && flow.potential.size() == count)
             potential = flow.potential;
 
-        if (flow.pressureMultigrid)
+        // 仕上げの候補(T-1343。既定 0 = 通らない): 1・2 は答えを先に作り、比べる時だけ今の規則の答えを下の赤黒で作る
+        const bool toLine = flow.pressureFinish == 1 || flow.pressureFinish == 2;
+        std::vector<int64_t> finishAnswer;
+        std::vector<int64_t> fineAnswer;
+        if (toLine) {
+            OhFinishCount counted;
+            flow.pressureFinishWork += PressureMultigridToLine(
+                box, weight, residual, potential, fineAnswer, flow.pressureMultigridSmooth, flow.pressureFinishLineBits,
+                flow.pressureFinishMaxCycles, counted);
+            flow.pressureFinishCycles += counted.cycles;
+            flow.pressureFinishMostCycles = std::max(flow.pressureFinishMostCycles, counted.cycles);
+            flow.pressureFinishCapped += counted.capped ? 1u : 0u;
+            finishAnswer = potential;
+            std::fill(potential.begin(), potential.end(), 0);
+        }
+
+        if (flow.pressureMultigrid && (!toLine || flow.pressureFinishCompare))
             flow.pressureMultigridWork += PressureMultigrid(box, weight, residual, potential,
                                                             flow.pressureMultigridSmooth, flow.pressureMultigridCycles);
+
+        if (flow.pressureFinish == 3)
+            flow.pressureFinishWork += PressureCarryCorrection(box, weight, residual, potential,
+                                                               flow.pressureMultigridSmooth);
 
         // 隣が変わったボクセル(数えるだけ。最初は全部)
         std::vector<uint8_t> dirty(count, 1);
@@ -652,7 +777,9 @@ namespace bicameral::test {
         std::vector<int64_t> atGap;
         uint32_t used = 0;
         bool quiet = false;
-        for (uint32_t sweep = 0; sweep < flow.pressureSweeps; ++sweep) {
+        const uint32_t sweepLimit = toLine && !flow.pressureFinishCompare ? 0 : flow.pressureSweeps;
+        quiet = sweepLimit == 0;
+        for (uint32_t sweep = 0; sweep < sweepLimit; ++sweep) {
             bool moved = false;
             for (uint32_t colour = 0; colour < 2; ++colour) {
                 for (uint32_t z = 0; z < box.size[2]; ++z) {
@@ -704,6 +831,14 @@ namespace bicameral::test {
             }
         }
 
+        // 比べ(T-1343): 今の規則の答え(potential)と仕上げの候補の答えの面の速さの差。流れには候補の答えを使う
+        if (toLine) {
+            if (flow.pressureFinishCompare)
+                MeasurePressureGap(box, finishAnswer, potential, flow);
+
+            potential = finishAnswer;
+        }
+
         if (flow.pressureWarmStart)
             flow.potential = potential;
 
@@ -722,9 +857,18 @@ namespace bicameral::test {
         // 運動量に圧力の力積(ΔM = (Ψ_i − Ψ_j)× 基準の質量)→ 速さ
         for (uint32_t a = 0; a < 3; ++a) {
             forFaces(a, [&](size_t f, Sides s, const uint32_t*) {
-                const int64_t minus = s.minus == SIZE_MAX ? 0 : potential[s.minus];
-                const int64_t plus = s.plus == SIZE_MAX ? 0 : potential[s.plus];
-                next[a][f] += (minus - plus) * static_cast<int64_t>(cellFlow.mass);
+                if (flow.pressureFinish == 2) {
+                    // (i'): 細かい単位のまま(÷ 2^8 を 0 へ切る。対の面なので保存は同じ)
+                    const int64_t fineMinus = s.minus == SIZE_MAX ? 0 : fineAnswer[s.minus];
+                    const int64_t finePlus = s.plus == SIZE_MAX ? 0 : fineAnswer[s.plus];
+                    next[a][f] += rx::OhMulDivToward0(fineMinus - finePlus, cellFlow.mass,
+                                                      uint64_t{1} << OH_MG_FINE_BITS);
+                } else {
+                    const int64_t minus = s.minus == SIZE_MAX ? 0 : potential[s.minus];
+                    const int64_t plus = s.plus == SIZE_MAX ? 0 : potential[s.plus];
+                    next[a][f] += (minus - plus) * static_cast<int64_t>(cellFlow.mass);
+                }
+
                 speed[a][f] = rx::OhFlowSpeed(next[a][f], faceMass[a][f]);
                 flow.fastestQ16 = std::max(flow.fastestQ16, std::abs(speed[a][f]));
             });
