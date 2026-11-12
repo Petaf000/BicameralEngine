@@ -602,8 +602,11 @@ namespace bicameral::sim {
                 if (!SfOnCells(field.desc))
                     continue;
 
-                // 0 は疎の無い頁に書かない(全部 0 の一様なブロックを広げても欄の頁を作らない。T-0921)
-                StartPage(field.store, page);
+                // 0 は疎の無い頁に書かない(全部 0 の一様なブロックを広げても欄の頁を作らない。T-0921)。
+                // 配り手の欄は粗くする親を広げる時に割り当ての段が取った頁を使う(返さない。ADR-0532 の 3)
+                if (!SfOwned(field.desc))
+                    StartPage(field.store, page);
+
                 for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
                     const bool covered = MrIsCoveredCell(block, index);
                     for (uint32_t c = 0; c < field.desc.components; ++c) {
@@ -826,8 +829,8 @@ namespace bicameral::sim {
                     continue;
                 }
 
-                // --- 頁を持つ親: 親のセルごとに子 2³ へ配り手の関数で(相の層の配りはセルを読む。ADR-0512 の 1)---
-                StartPage(store, childPage);
+                // --- 頁を持つ親: 親のセルごとに子 2³ へ配り手の関数で(相の層の配りはセルを読む。ADR-0512 の 1)。
+                //     子の欄の頁は割り当ての段が取ってある(親が頁を持つ時。ADR-0532 の 3)---
                 if (owner == SF_OWNER_PHASE_LAYER && !nest.wideCells) {
                     RefinePhaseLayerOctant(nest, field, parent, octant, childPage);
                     CoverParentOctant(store, components, parent.page, octant);
@@ -1019,8 +1022,9 @@ namespace bicameral::sim {
             if (MrIsUniform(child))
                 return;
 
+            // 配り手の欄の頁は解放の段が要求の順に返す(ReleaseOwnerPages。ADR-0532 の 3)
             for (MultiresField& field : nest.fields) {
-                if (SfOnCells(field.desc))
+                if (SfOnCells(field.desc) && !SfOwned(field.desc))
                     ReleasePage(field.store, child.page);
             }
         }
@@ -1094,6 +1098,35 @@ namespace bicameral::sim {
                                           : SfPullBackChild(parentValue, family, j));
                     }
                 }
+            }
+        }
+
+        bool OwnerPageHeld(const MultiresNest& nest, uint32_t field, uint32_t cellPage) {
+            const MultiresFieldStore& store = nest.fields[field].store;
+            FX_ASSERT(SfOwned(nest.fields[field].desc) && store.sparse);
+
+            return store.pageOf[cellPage] != MULTIRES_NO_FIELD_PAGE;
+        }
+
+        bool OwnerUniformNonZero(const MultiresNest& nest, uint32_t field, uint32_t slot) {
+            const MultiresField& entry = nest.fields[field];
+            for (uint32_t c = 0; c < entry.desc.components; ++c) {
+                if (entry.store.uniform[UniformAddress(entry, slot, c)] != 0)
+                    return true;
+            }
+
+            return false;
+        }
+
+        void TakeOwnerPage(MultiresNest& nest, uint32_t field, uint32_t cellPage) {
+            FX_ASSERT(SfOwned(nest.fields[field].desc) && nest.fields[field].store.sparse);
+            static_cast<void>(EnsurePage(nest.fields[field].store, cellPage));
+        }
+
+        void ReleaseOwnerPages(MultiresNest& nest, uint32_t cellPage) {
+            for (MultiresField& field : nest.fields) {
+                if (SfOnCells(field.desc) && SfOwned(field.desc))
+                    ReleasePage(field.store, cellPage);
             }
         }
 
