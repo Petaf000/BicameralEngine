@@ -43,10 +43,26 @@ struct OhShellFace {
     uint32_t padding;
 };
 
+// 圧力の赤黒が毎回読む欄を 32bit の重みで詰めたもの(T-1320 段 1。48 バイト = 64bit の欄の 72 バイトの 2/3)。
+// 色ごとの並び(色 c の k 番目 = PressureColour の k)に置くので、隣のスレッドが続いた所を読む。④ はこの欄だけを書く(64bit の欄を毎小刻み書かない)。
+// ボクセルの重みが 1 つでも 32bit に入らなければ、そのボクセルだけ重みを g_voxelWork の 64bit の欄に書き、weightMinusX に印 OH_PRESSURE_WIDE を置く
+// (残りと逆数はどちらでもこの欄。値は同じなので結果はビット単位で同じ)。多重格子の解き始め(MgPrepareFine)も残りと逆数をこの欄から読む
+struct OhShellPressure {
+    int64_t residual;  // 膨らみたい体積 − 予測の出る体積(Q16)
+    FxRecip64 recip;   // 重みの和の逆数
+    uint32_t weightMinusX;
+    uint32_t weightPlusX;
+    uint32_t weightMinusY;
+    uint32_t weightPlusY;
+    uint32_t weightMinusZ;
+    uint32_t weightPlusZ;
+};
+
 // 物ごとの面の並びの始まり(軸 0・1・2 の順に続く。g_momentum と g_faceWork で同じ)
 struct OhShellObject {
     uint32_t faceBegin[3];
     uint32_t multigridBegin;  // 圧力の多重格子の作業場 g_multigrid の始まり(全部の段を続けて。T-1222)
+    uint32_t pressureBegin;   // 詰めた圧力の欄 g_pressure の始まり(色 2 つ × PressureSlots。T-1320 段 1)
 };
 
 // 圧力の多重格子の段のボクセル(作業場。段 0 = 細かい格子・段 1.. = 粗い格子。T-1222)
@@ -78,10 +94,13 @@ RWStructuredBuffer<OhShellVoxel> g_voxelWork : register(u8);
 RWStructuredBuffer<OhVoxelGas> g_gasWork : register(u9);
 RWStructuredBuffer<OhShellFace> g_faceWork : register(u10);
 RWStructuredBuffer<OhShellMultigrid> g_multigrid : register(u11);
-RWStructuredBuffer<RxCell> g_cellViews
-    : register(u12);  // 物ごとの囲むセルの見立て(刻みの初めのセル + この物の分。作業。T-1332)
-RWStructuredBuffer<OhFlow> g_exchanges
-    : register(u13);  // 物ごとのこの刻みにセルへ渡す粗い量の和(セルの単位。作業。T-1332)
+// 物ごとの囲むセルの見立て(刻みの初めのセル + この物の分)と、この刻みにセルへ渡す粗い量の和(セルの単位)。どちらも作業(T-1332)
+RWStructuredBuffer<RxCell> g_cellViews : register(u12);
+RWStructuredBuffer<OhFlow> g_exchanges : register(u13);
+// 詰めた圧力の欄(作業。T-1320 段 1)
+RWStructuredBuffer<OhShellPressure> g_pressure : register(u14);
+// 面ごとの流れ(− 側 → + 側の向きが正。速さが 0 の面は書かない・読まない。作業。T-1320 段 1)
+RWStructuredBuffer<OhFlow> g_faceFlows : register(u15);
 StructuredBuffer<RxSpecies> g_species : register(t0);
 StructuredBuffer<OhSpecies> g_objectSpecies : register(t1);
 StructuredBuffer<uint32_t> g_molarMasses : register(t2);
@@ -118,6 +137,10 @@ FX_CONST uint32_t OH_SHELL_OUTSIDE = 0xFFFFFFFFu;
 FX_CONST uint32_t OH_PRESSURE_UNTIL_QUIET = 1;  // 1 回の赤黒で値が 1 つも変わらなければ止める
 FX_CONST uint32_t OH_PRESSURE_WARM_START = 2;   // 前の小刻みの圧力の値から解き始める
 FX_CONST uint32_t OH_PRESSURE_MULTIGRID = 4;    // 解き始めを多重格子で作る(T-1222。CPU の pressureMultigrid)
+// 試験だけ: x が 3 の倍数のボクセルを 32bit に入らない時の道(64bit の欄)に回す(結果は同じ。両方の道を CPU と比べる。T-1320 段 1)
+FX_CONST uint32_t OH_PRESSURE_TEST_WIDE = 8;
+// 詰めた欄の weightMinusX がこの値なら、重みは g_voxelWork の 64bit の欄にある(重みの 0xFFFFFFFF もこちらへ回すので印と重ならない)
+FX_CONST uint32_t OH_PRESSURE_WIDE = 0xFFFFFFFFu;
 // 段の印(g_stageMask。測るだけ)
 FX_CONST uint32_t OH_STAGE_VOXELS = 1u << 0;    // ① ボクセルの見立て
 FX_CONST uint32_t OH_STAGE_FACES = 1u << 1;     // ② 面の質量・速さ・重み
@@ -174,6 +197,7 @@ struct ShellBox {
     uint3 size;
     uint32_t faceBegin[3];
     uint32_t multigridBegin;  // 圧力の多重格子の作業場の始まり
+    uint32_t pressureBegin;   // 詰めた圧力の欄の始まり
 };
 
 uint32_t Axis(uint3 value, uint32_t axis) {
@@ -461,6 +485,56 @@ void AdvectFaces(ShellBox box, uint32_t thread, uint64_t gravity) {
     }
 }
 
+// 色の並びの数(行ごとに x を 2 つおき。色 0 と色 1 で同じ数え方)
+uint32_t PressureSlots(ShellBox box) {
+    return ((box.size.x + 1) >> 1) * box.size.y * box.size.z;
+}
+
+// ボクセル (x, y, z) の色の並びの番号(どちらの色でも x ÷ 2 + 行 × 半分の幅)
+uint32_t PressureSlotOf(ShellBox box, uint32_t x, uint32_t y, uint32_t z) {
+    return (x >> 1) + (((box.size.x + 1) >> 1) * (y + (box.size.y * z)));
+}
+
+// 詰めた圧力の欄の置き場(色 (x + y + z) の偶奇 × 並びの数 + 並びの番号)
+uint32_t PackedIndex(ShellBox box, uint3 c) {
+    const uint32_t colour = (c.x + c.y + c.z) & 1u;
+
+    return box.pressureBegin + (colour * PressureSlots(box)) + PressureSlotOf(box, c.x, c.y, c.z);
+}
+
+// 重みが詰めた欄に入るか(上の 32bit が 0 で、印 OH_PRESSURE_WIDE と重ならない。32bit の比べだけ)
+bool FitsPacked(uint64_t value) {
+    return (uint32_t)(value >> 32) == 0 && (uint32_t)value != OH_PRESSURE_WIDE;
+}
+
+// ④ の詰めた欄を書く。重みが 1 つでも入らなければ、このボクセルだけ重みを 64bit の欄に書いて印を置く
+void StorePacked(ShellBox box, uint3 c, uint32_t v, int64_t residual, FxRecip64 recip, uint64_t inner[6]) {
+    bool fits = (g_pressureMode & OH_PRESSURE_TEST_WIDE) == 0 || (c.x % 3) != 0;
+    FX_UNROLL
+    for (uint32_t i = 0; i < 6; ++i)
+        fits = fits && FitsPacked(inner[i]);
+
+    OhShellPressure packed;
+    packed.residual = residual;
+    packed.recip = recip;
+    packed.weightMinusX = fits ? (uint32_t)inner[0] : OH_PRESSURE_WIDE;
+    packed.weightPlusX = fits ? (uint32_t)inner[1] : 0u;
+    packed.weightMinusY = fits ? (uint32_t)inner[2] : 0u;
+    packed.weightPlusY = fits ? (uint32_t)inner[3] : 0u;
+    packed.weightMinusZ = fits ? (uint32_t)inner[4] : 0u;
+    packed.weightPlusZ = fits ? (uint32_t)inner[5] : 0u;
+    g_pressure[PackedIndex(box, c)] = packed;
+    if (fits)
+        return;
+
+    g_voxelWork[box.begin + v].weightMinusX = inner[0];
+    g_voxelWork[box.begin + v].weightPlusX = inner[1];
+    g_voxelWork[box.begin + v].weightMinusY = inner[2];
+    g_voxelWork[box.begin + v].weightPlusY = inner[3];
+    g_voxelWork[box.begin + v].weightMinusZ = inner[4];
+    g_voxelWork[box.begin + v].weightPlusZ = inner[5];
+}
+
 // ④ 残り = 膨らみたい体積 − 予測の出る体積・重みの和
 void PrepareResidual(ShellBox box, uint32_t thread) {
     const uint32_t count = box.size.x * box.size.y * box.size.z;
@@ -480,15 +554,9 @@ void PrepareResidual(ShellBox box, uint32_t thread) {
             inner[(2 * axis) + 1] = Axis(c, axis) + 1 < Axis(box.size, axis) ? plusFace.weight : (uint64_t)0;
         }
 
-        g_voxelWork[box.begin + v].weightMinusX = inner[0];
-        g_voxelWork[box.begin + v].weightPlusX = inner[1];
-        g_voxelWork[box.begin + v].weightMinusY = inner[2];
-        g_voxelWork[box.begin + v].weightPlusY = inner[3];
-        g_voxelWork[box.begin + v].weightMinusZ = inner[4];
-        g_voxelWork[box.begin + v].weightPlusZ = inner[5];
-        g_voxelWork[box.begin + v].residual = residual;
-        g_voxelWork[box.begin + v].total = total;
-        g_voxelWork[box.begin + v].recip = FxMakeRecipU64(total > 0 ? total : (uint64_t)1);
+        // 書くのは詰めた欄だけ(重みの和は多重格子が面の重みから足し直す。T-1320 段 1)
+        const FxRecip64 recip = FxMakeRecipU64(total > 0 ? total : (uint64_t)1);
+        StorePacked(box, c, v, residual, recip, inner);
         if ((g_pressureMode & OH_PRESSURE_WARM_START) != 0)
             continue;
 
@@ -496,16 +564,6 @@ void PrepareResidual(ShellBox box, uint32_t thread) {
         if (g_sharedPotential != 0)
             gs_potential[v] = 0;
     }
-}
-
-// 色の並びの数(行ごとに x を 2 つおき。色 0 と色 1 で同じ数え方)
-uint32_t PressureSlots(ShellBox box) {
-    return ((box.size.x + 1) >> 1) * box.size.y * box.size.z;
-}
-
-// ボクセル (x, y, z) の色の並びの番号(どちらの色でも x ÷ 2 + 行 × 半分の幅)
-uint32_t PressureSlotOf(ShellBox box, uint32_t x, uint32_t y, uint32_t z) {
-    return (x >> 1) + (((box.size.x + 1) >> 1) * (y + (box.size.y * z)));
 }
 
 void MarkDirty(uint32_t colour, uint32_t slot) {
@@ -553,21 +611,38 @@ void PressureColour(ShellBox box, uint32_t thread, uint32_t colour, uint32_t slo
         }
 
         const uint32_t v = x + (strideY * y) + (strideZ * z);
-        const OhShellVoxel work = g_voxelWork[box.begin + v];
+        const int64_t minusX = PotentialAt(box, x > 0 ? v - 1 : OH_SHELL_OUTSIDE);
+        const int64_t plusX = PotentialAt(box, x + 1 < box.size.x ? v + 1 : OH_SHELL_OUTSIDE);
+        const int64_t minusY = PotentialAt(box, y > 0 ? v - strideY : OH_SHELL_OUTSIDE);
+        const int64_t plusY = PotentialAt(box, y + 1 < box.size.y ? v + strideY : OH_SHELL_OUTSIDE);
+        const int64_t minusZ = PotentialAt(box, z > 0 ? v - strideZ : OH_SHELL_OUTSIDE);
+        const int64_t plusZ = PotentialAt(box, z + 1 < box.size.z ? v + strideZ : OH_SHELL_OUTSIDE);
+        // 詰めた欄(32bit の重み・色の並び)。印のあるボクセルだけ重みを 64bit の欄から読む(残りと逆数はどちらも詰めた欄)
+        const OhShellPressure work = g_pressure[box.pressureBegin + (colour * slots) + k];
+        const FxRecip64 recip = work.recip;
         int64_t sum = work.residual * 65536;
-        sum += (int64_t)work.weightMinusX * PotentialAt(box, x > 0 ? v - 1 : OH_SHELL_OUTSIDE);
-        sum += (int64_t)work.weightPlusX * PotentialAt(box, x + 1 < box.size.x ? v + 1 : OH_SHELL_OUTSIDE);
-        sum += (int64_t)work.weightMinusY * PotentialAt(box, y > 0 ? v - strideY : OH_SHELL_OUTSIDE);
-        sum += (int64_t)work.weightPlusY * PotentialAt(box, y + 1 < box.size.y ? v + strideY : OH_SHELL_OUTSIDE);
-        sum += (int64_t)work.weightMinusZ * PotentialAt(box, z > 0 ? v - strideZ : OH_SHELL_OUTSIDE);
-        sum += (int64_t)work.weightPlusZ * PotentialAt(box, z + 1 < box.size.z ? v + strideZ : OH_SHELL_OUTSIDE);
+        if (work.weightMinusX != OH_PRESSURE_WIDE) {
+            sum += (int64_t)work.weightMinusX * minusX;
+            sum += (int64_t)work.weightPlusX * plusX;
+            sum += (int64_t)work.weightMinusY * minusY;
+            sum += (int64_t)work.weightPlusY * plusY;
+            sum += (int64_t)work.weightMinusZ * minusZ;
+            sum += (int64_t)work.weightPlusZ * plusZ;
+        } else {
+            sum += (int64_t)g_voxelWork[box.begin + v].weightMinusX * minusX;
+            sum += (int64_t)g_voxelWork[box.begin + v].weightPlusX * plusX;
+            sum += (int64_t)g_voxelWork[box.begin + v].weightMinusY * minusY;
+            sum += (int64_t)g_voxelWork[box.begin + v].weightPlusY * plusY;
+            sum += (int64_t)g_voxelWork[box.begin + v].weightMinusZ * minusZ;
+            sum += (int64_t)g_voxelWork[box.begin + v].weightPlusZ * plusZ;
+        }
 
         // = OhMulDivToward0(sum, 1, 重みの和)(0 の向きに切る。逆数の掛け算は厳密)
-        const int64_t quotient = (int64_t)FxDivRecipU64(FxAbsU64(sum), work.recip);
+        const int64_t quotient = (int64_t)FxDivRecipU64(FxAbsU64(sum), recip);
         const int64_t potential = sum < 0 ? -quotient : quotient;
         bool changed = false;
         if (g_sharedPotential == 0) {
-            changed = !SameInt64(potential, work.potential);
+            changed = !SameInt64(potential, g_voxelWork[box.begin + v].potential);
             g_voxelWork[box.begin + v].potential = potential;
         } else {
             if (!FitsInt32(potential))
@@ -993,9 +1068,12 @@ void MgPrepareFine(ShellBox box, uint32_t thread) {
         fine.weightPlusY = g_faceWork[FaceAt(box, 1, c + Unit(1))].weight;
         fine.weightMinusZ = g_faceWork[FaceAt(box, 2, c)].weight;
         fine.weightPlusZ = g_faceWork[FaceAt(box, 2, c + Unit(2))].weight;
-        fine.total = g_voxelWork[box.begin + v].total;
-        fine.recip = g_voxelWork[box.begin + v].recip;
-        fine.rhs = g_voxelWork[box.begin + v].residual * OH_MG_FINE_SCALE;
+        // 重みの和は ④ と同じ 6 つの面の和(箱の外の面も)。残りと逆数は ④ の詰めた欄から(T-1320 段 1)
+        fine.total = fine.weightMinusX + fine.weightPlusX + fine.weightMinusY + fine.weightPlusY + fine.weightMinusZ +
+                     fine.weightPlusZ;
+        const OhShellPressure packed = g_pressure[PackedIndex(box, c)];
+        fine.recip = packed.recip;
+        fine.rhs = packed.residual * OH_MG_FINE_SCALE;
         fine.value = 0;
         fine.scratch = 0;
         g_multigrid[box.multigridBegin + v] = fine;
@@ -1094,11 +1172,52 @@ void SumOutShares(ShellBox box, uint32_t thread) {
     }
 }
 
-// ⑧ 運ぶ: ボクセルごとに自分の 6 つの面の出入りを集めて当てる。箱の外に面する面はセルへ(グループの和)
-void MoveGas(GpuShellTable table, GpuShellGases gases, ShellBox box, uint32_t thread) {
-    const uint32_t count = box.size.x * box.size.y * box.size.z;
+// ⑧ の 1: 面ごとに流れを 1 回だけ作る(風上のボクセルか箱の外から。− 側 → + 側が正)。箱の外に面する面はセルへ(グループの和)。
+// 面の両側のボクセルが同じ流れをそれぞれ作り直さない(T-1320 段 1。整数の足し算なので当てる順によらずビット単位で同じ)
+void FaceFlows(GpuShellTable table, GpuShellGases gases, ShellBox box, uint32_t thread) {
     const FxRecip64 billion = FxMakeRecipU64(1000000000);
+    const uint32_t faces = AllFaces(box);
     OhFlow toCell = OhZeroFlow();
+    for (uint32_t f = thread; f < faces; f += OH_SHELL_THREADS) {
+        uint32_t axis;
+        uint3 c;
+        FaceOf(box, f, axis, c);
+        const uint32_t global = FaceAt(box, axis, c);
+        const int64_t q = g_faceWork[global].speed;
+        if (q == 0)
+            continue;
+
+        const uint32_t minus = MinusSide(box, axis, c);
+        const uint32_t plus = PlusSide(box, axis, c);
+        const OhFlow moved = MovedThrough(table, gases, box, q, q > 0 ? minus : plus, billion);
+        OhFlow flow = moved;
+        if (q < 0)
+            flow = SubtractFlow(OhZeroFlow(), moved);
+
+        g_faceFlows[global] = flow;
+        // + 側が箱の外ならセルへ入る・− 側が箱の外ならセルから出る
+        if (plus == OH_SHELL_OUTSIDE)
+            toCell = OhAddFlow(toCell, flow);
+        else if (minus == OH_SHELL_OUTSIDE)
+            toCell = SubtractFlow(toCell, flow);
+    }
+
+    // セルへの和(整数の足し算なので順によらない)
+    const int64_t energy = WaveActiveSum(toCell.energy);
+    if (WaveIsFirstLane() && energy != 0)
+        InterlockedAdd(gs_toCell[0], energy);
+
+    FX_UNROLL
+    for (uint32_t g = 0; g < OH_MAX_GASES; ++g) {
+        const int64_t amount = WaveActiveSum(toCell.amounts[g]);
+        if (WaveIsFirstLane() && amount != 0)
+            InterlockedAdd(gs_toCell[1 + g], amount);
+    }
+}
+
+// ⑧ の 2: ボクセルごとに自分の 6 つの面の流れを集めて当てる(− 側の面から入り、+ 側の面へ出る)
+void ApplyFaceFlows(GpuShellGases gases, ShellBox box, uint32_t thread) {
+    const uint32_t count = box.size.x * box.size.y * box.size.z;
     for (uint32_t v = thread; v < count; v += OH_SHELL_THREADS) {
         const uint3 c = VoxelCoord(box, v);
         OhFlow delta = OhZeroFlow();
@@ -1106,25 +1225,15 @@ void MoveGas(GpuShellTable table, GpuShellGases gases, ShellBox box, uint32_t th
         for (uint32_t side = 0; side < 6; ++side) {
             const uint32_t axis = side >> 1;
             const bool plusFace = (side & 1u) != 0;  // 自分の + 側の面(自分は面の − 側)
-            const uint3 faceCoord = plusFace ? c + Unit(axis) : c;
-            const int64_t q = g_faceWork[FaceAt(box, axis, faceCoord)].speed;
-            if (q == 0)
+            const uint32_t global = FaceAt(box, axis, plusFace ? c + Unit(axis) : c);
+            if (g_faceWork[global].speed == 0)
                 continue;
 
-            const uint32_t other = plusFace ? PlusSide(box, axis, faceCoord) : MinusSide(box, axis, faceCoord);
-            const bool selfUpwind = plusFace ? q > 0 : q < 0;
-            const uint32_t upwind = selfUpwind ? v : other;
-            const OhFlow moved = MovedThrough(table, gases, box, q, upwind, billion);
-            // 風上なら出る・風下なら入る。箱の外に面する面は、その逆をセルへ
-            if (selfUpwind) {
-                delta = SubtractFlow(delta, moved);
-                if (other == OH_SHELL_OUTSIDE)
-                    toCell = OhAddFlow(toCell, moved);
-            } else {
-                delta = OhAddFlow(delta, moved);
-                if (other == OH_SHELL_OUTSIDE)
-                    toCell = SubtractFlow(toCell, moved);
-            }
+            const OhFlow flow = g_faceFlows[global];
+            if (plusFace)
+                delta = SubtractFlow(delta, flow);
+            else
+                delta = OhAddFlow(delta, flow);
         }
 
         if (OhFlowIsZero(delta))
@@ -1145,18 +1254,13 @@ void MoveGas(GpuShellTable table, GpuShellGases gases, ShellBox box, uint32_t th
         if (ok == 0)
             gs_failed = 1;
     }
+}
 
-    // セルへの和(整数の足し算なので順によらない)
-    const int64_t energy = WaveActiveSum(toCell.energy);
-    if (WaveIsFirstLane() && energy != 0)
-        InterlockedAdd(gs_toCell[0], energy);
-
-    FX_UNROLL
-    for (uint32_t g = 0; g < OH_MAX_GASES; ++g) {
-        const int64_t amount = WaveActiveSum(toCell.amounts[g]);
-        if (WaveIsFirstLane() && amount != 0)
-            InterlockedAdd(gs_toCell[1 + g], amount);
-    }
+// ⑧ 運ぶ(グループの全スレッドで呼ぶ。面の流れを作る段と当てる段の間に同期)
+void MoveGas(GpuShellTable table, GpuShellGases gases, ShellBox box, uint32_t thread) {
+    FaceFlows(table, gases, box, thread);
+    AllMemoryBarrierWithGroupSync();
+    ApplyFaceFlows(gases, box, thread);
 }
 
 // ⑨ 箱の外へ出た・入った分を対の端数を通して、この物のセルの見立てへ当て、セルへ渡す粗い量に足す(1 スレッド。帳簿「物との受け渡し」)。
@@ -1240,6 +1344,7 @@ void WakeChanged(OhObject object, ShellBox box, uint32_t thread, uint64_t tick, 
     box.faceBegin[1] = shell.faceBegin[1];
     box.faceBegin[2] = shell.faceBegin[2];
     box.multigridBegin = shell.multigridBegin;
+    box.pressureBegin = shell.pressureBegin;
     const uint64_t tick = FX_U64(g_tickHigh, g_tickLow);
     const uint32_t pass = g_passBase + objectIndex + 1;
     const uint64_t gravity = OhFlowGravityQ16(object.bodyLevel, g_substeps);
