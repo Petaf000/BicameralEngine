@@ -137,6 +137,31 @@
 6. 試験: gpu_field_region に field_owner の往復(細かく → 粗く・影)を足し、pageOf まで CPU とビット一致(HW・WARP)。gpu_multires・gpu_lab_box・gpu_tree_refine_placement・gpu_multires_layers は欄の無い世界。
 - wt2 の T-1323 との重なり: 1〜4 は T-1323 が触らない段(Allocate・CoarsenRequest・TreeRelease)。同じ関数は RefineNode の層の配りの後(3)と TreeExpand(5)だけ。u5 は T-1323 の写しのまま(この形は u5 を使わない)。
 
+## 段 2 の 4 本目(2026-11-12 wt6 作業役。ブランチ t-1252-tree-gpu-3 = t-1252-tree-gpu-2 の上)
+- **入った(「段 2 の残り」の 1〜4 と 6 の一部。ADR-0500 改訂・ADR-0532 の 2・3 の形のまま。新しい口は足していない)**:
+  `shaders/sim/multires_field_access.hlsli`(新。木の段の区画の道具: 表・置き場の頭・pageOf・値・一様の値・LoadCarriedCell〔= CPU の LoadNestField〕・
+  CoarsenKeepsUniformCarried・CarriedOwnerNeed〔= CPU の AllocateOwnerPages の規則〕)。multires_tree.hlsl・multires_graph.hlsl が include。
+  - TreeSettle: 載せた欄があれば頁を持つ子は一様な親を広げる・一様な子は配り手の欄 = SfOwnerCoarsen が親の値で余り 0・この刻みだけの欄 = 同じ値(CPU の CoarsenKeepsUniform。64bit の比べは 2 語で)。
+  - TreeAllocate: 欄ごとに要求の順の累積和(gs_layerScan を使い回す)で k 番目 = 空きの上から k 番目・その後は高さの上(ADR-0532 の 2)。取った頁を 0 で埋め、空きの数・高さを書き直す。
+    **ticket の案(要求ごとの始まりの置き場)ではなく、割り当ての段で pageOf まで結ぶ形にした**(取るセルの頁は state.pageBase で決まっている = CPU の TakeOwnerPage と同じ時)。置き場を足さない。
+    取れる数は容量だけ(CPU の木の段は予算を見ない)。尽きたら細かくする/粗くする要求を断る(GPU だけ。層の頁と同じ扱い・欄 0 の頭の MF_HEADER_TREE_SHORTAGE = 10 語目に数える)= 仮。
+  - RefineLevel(要求の鎖の本物だけ): 層の配りの後に SfOwnerRefineChild / SfOwnerRefineUniform(一様な子はこの刻みだけの欄の一様の値も親の写し)・親を覆う所で親の欄の頁の八分の一を 0 に。
+  - CoarsenRequest(既定と溢れの両方の変種): 広げる親は八分の一の外を一様の値(覆われたセルは 0 = CPU の ExpandPage)・八分の一は SfOwnerCoarsen(一様のままの親は書かない)。
+  - TreeRelease: 返すセルの頁の載せた欄の頁(配り手の欄とこの刻みだけの欄)を欄ごとに要求の順に空きへ(CPU の ReleaseOwnerPages・Coarsen の ReleasePage)。頁の中身は消さない(CPU と同じ)。
+  - RecordUpload: 保存量の配り手の欄(粗くする余りの帳簿の列が GPU に無い)・相の層の配り手の欄(セルを読む = T-1231)は写さない(D-428)。RecordRefineShadow は載せる欄があれば誤りを記録。
+- **この刻みだけの欄は木の段では全部 0 の前提**(刻みの境目で 0 = TickOnlyFieldsClear。木の段は刻みの外)。細かく・粗くは値を書かず、頁を返すだけ。0 でない値が木の段に来ると CPU とずれる。
+- 試験 gpu_field_region に 5(頁を持つ根の 2 段の鎖・一様な根の 1 段を細かく → 2 段目と一様な子を粗く → 1 段目を粗く。毎回 置き場〔pageOf・空き・頁・一様〕と要約が CPU とビット一致)・
+  6(一様な子の配り手の値を変えて写し、粗くすると親が頁に広がる + この刻みだけの欄の 0 の頁を持つ子を粗くして頁が返る)。結果は作業ログ。
+
+### 段 2 の残り(次の作業役へ。この順)
+1. **影の鎖**: RefineLevel の影(record.request = MR_NO_BLOCK)は CPU の RefineShadow(StartPage → 0 でない値を書く時に頁を作る)。GPU は並べて取れないので、
+   影の頁の欄の頁は「親が欄の頁か 0 でない一様の値を持てば取る」に CPU を揃える(ADR-0532 の 3 と同じ「値を作る前に決める」)か、影の鎖は 1 本ずつなのでスレッド 0 が順に取る(番号は CPU と同じ順)。引き戻し(PullBackNode)は SfOwnerPullBackChild。
+2. **畳む(TreeFoldCheck・TreeFold)**: CPU の PageFoldable は欄の値が FoldValue と同じかを見る・畳むと欄の頁を返す(枠の順)。GPU は欄を見ずに畳むので、載せる欄のある世界で RecordFoldPages を通すと違う。
+3. **広げる(TreeExpand)**: CPU の ExpandWantedPages → ExpandPage(0 でない一様の値を持つ配り手の欄は割り当て済みの頁…ではなく広げる段で取る。順は枠の順)。
+4. **集めて書く段**を木の段に(multires_field_gather.hlsl を区画の置き場で。書いた枠をつつく)。
+5. **保存量の配り手の欄**: 粗くする余りを世界の帳簿の列(CPU の NestFieldLedgerBase + 保存量の番号)へ。GPU の帳簿の列の数を確かめて表に列を足す(今は RecordUpload が断る)。
+6. 相の層の配り(T-1231)・T-1230 段 2 ③ の残り。
+
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-10-29(本体 16 回目・設計): ADR-0500 の改訂で作った。
 - 2026-10-29(本体 18 回目・段 1): 登録の印 2 つ・配り手の表(試験用 1 つ)・セルの配りの口(細かく/粗く・影)・集めて書く段・この刻みだけの読む口と境目の検査・SF_MAX_COMPONENTS 12 を CPU に。
