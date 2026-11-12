@@ -7,6 +7,9 @@
 //   w=<川の幅のセル>(既定 4 = 2 m。向こう岸 x 44〜63 は変えず、手前の岸を伸び縮みさせる)・gap=1(川の代わりに草の無い土の隙間)
 //   ac=<セルロースの a>・ak=<炭(carbon)の a>・as=<砂の a>・aw=<水の a>(mm²/mol。書かなければ表の値。T-1066 の前は既定 0 で表の値を消していた)・rad=0(対の形の放射の段を入れない)・
 //   cascade=0(既定の熱の放射の段 RC〔T-1113〕も入れない。rad=0 だけでは RC の段が流れる〔rad=1 の時は対の形が RC の代わり〕。T-1347)
+//   lc=<セルロースの長い帯の光の a>・ls=<短い帯の a>(mm²/mol。RC の段が読む表の speciesLight。書かなければ表の値。T-1156)・
+//   expect=1 / expect=0(試験: 終わりに付けたセルの 2 つ先〔x+2〕の草が 1% 以上燃えた / 隣〔x+1〕の草が 1% も燃えていない。外れたら終了コード 1。T-1156)・
+//   watch=1(付けたセルと隣の熱の内訳を 0.25 秒ごとに出す: 温度・放射の段が当てた分の累計・残り〔伝導と反応と流れ〕の累計・草と O2。T-1156)
 //   seed=<向きの種>・sec=<上限の秒>(既定 60)・tall=<草の層の数>・trace=1(1 秒ごとの経過)
 //   gas=1(気体の区画: 川と両岸の上の空気 x 32〜51・y 4〜11・z 16〜47。T-0671 の場面の flow_regions と同じ。閉じた壁)・
 //   gz=<奥行き>(気体の区画の z の奥行き。既定 32。z = 32 を中に縮める。CPU の気体の段が重いので)・gh=<高さ>(既定 8)・
@@ -60,6 +63,10 @@ namespace {
         std::optional<uint32_t> absorptionCarbon;     // 書かなければ表の値のまま(T-1066)
         std::optional<uint32_t> absorptionSilica;     // 書かなければ表の値のまま(T-1066)
         std::optional<uint32_t> absorptionWater;      // 書かなければ表の値のまま(T-1066)
+        std::optional<uint32_t> lightLongCellulose;   // RC の長い帯の a(書かなければ表の値。T-1156)
+        std::optional<uint32_t> lightShortCellulose;  // RC の短い帯の a(書かなければ表の値。T-1156)
+        bool watch = false;                           // 付けたセルと隣の熱の内訳(T-1156)
+        std::optional<bool> expectSpread;             // 試験(T-1156): 燃え広がる / 広がらない
         uint64_t seed = 0;
         uint64_t seconds = 60;
         uint32_t grassLayers = 1;  // 草の層の数(火の強さの代わり。y 4 から上へ重ねる。既定 1 = 場面のまま)
@@ -97,6 +104,10 @@ namespace {
         uint64_t vaporOverRiverPeak = 0;  // µmol。川の列の y 5 以上の湯気の最大
         uint64_t smokeHighPeak = 0;       // µmol。y 8 以上の CO2 の最大
         uint64_t gasSkippedTicks = 0;     // 気体を流さなかった刻み
+
+        // --- T-1156 ---
+        uint64_t nextGrass = 0;    // 終わりの付けたセルの隣(x+1)の草(µmol)
+        uint64_t secondGrass = 0;  // 2 つ先(x+2)の草
     };
 
     Setting ParseSetting(std::string_view text) {
@@ -126,6 +137,14 @@ namespace {
                     setting.absorptionSilica = static_cast<uint32_t>(value);
                 else if (key == "aw")
                     setting.absorptionWater = static_cast<uint32_t>(value);
+                else if (key == "lc")
+                    setting.lightLongCellulose = static_cast<uint32_t>(value);
+                else if (key == "ls")
+                    setting.lightShortCellulose = static_cast<uint32_t>(value);
+                else if (key == "expect")
+                    setting.expectSpread = value != 0;
+                else if (key == "watch")
+                    setting.watch = value != 0;
                 else if (key == "seed")
                     setting.seed = value;
                 else if (key == "sec")
@@ -168,6 +187,52 @@ namespace {
         for (size_t id = 0; id < table.speciesNames.size(); ++id) {
             if (table.speciesNames[id] == name && id < table.speciesRadiationAbsorption.size())
                 table.speciesRadiationAbsorption[id] = *value;
+        }
+    }
+
+    // RC の段が読む光の値(speciesLight)の a を差し替える(T-1156。対の形の speciesRadiationAbsorption とは別)
+    void SetLight(BakedReactionTable& table, std::string_view name, std::optional<uint32_t> longValue,
+                  std::optional<uint32_t> shortValue) {
+        for (size_t id = 0; id < table.speciesNames.size() && id < table.speciesLight.size(); ++id) {
+            if (table.speciesNames[id] != name)
+                continue;
+
+            if (longValue)
+                table.speciesLight[id].absorptionLong = *longValue;
+            if (shortValue)
+                table.speciesLight[id].absorptionShort = *shortValue;
+        }
+    }
+
+    // --- 熱の内訳(watch=1。T-1156)---
+    struct WatchedCell {
+        const char* name;
+        uint32_t x, y, z;
+        int64_t radiation = 0;  // 放射の段が当てた分の累計(mJ)
+        int64_t rest = 0;  // 残り(伝導と反応と流れ。セルのエネルギーは化学の分も含むので反応は内で閉じる)の累計(mJ)
+    };
+
+    uint64_t AmountOf(const BakedReactionTable& table, const reaction::RxCell& cell, std::string_view name) {
+        const uint32_t wanted = table.SpeciesId(name);
+        for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+            if (cell.species[i] == wanted)
+                return cell.amounts[i];
+        }
+
+        return 0;
+    }
+
+    void PrintWatched(const BakedReactionTable& table, const Setting& setting, uint64_t ticks,
+                      std::span<const reaction::RxCell> cells, std::span<const reaction::HcThermalCache> caches,
+                      std::span<const WatchedCell> watched) {
+        for (const WatchedCell& cell : watched) {
+            const uint32_t index = ProbeCellIndex(cell.x, cell.y, cell.z);
+            std::printf("  %s %6.2f 秒 %-6s %8u mK 放射 %+11lld mJ 残り %+11lld mJ 草 %8llu µmol O2 %8llu µmol\n",
+                        setting.text.c_str(), static_cast<double>(ticks) / TICKS_PER_SECOND, cell.name,
+                        caches[index].temperature, static_cast<long long>(cell.radiation),
+                        static_cast<long long>(cell.rest),
+                        static_cast<unsigned long long>(AmountOf(table, cells[index], "cellulose")),
+                        static_cast<unsigned long long>(AmountOf(table, cells[index], "oxygen")));
         }
     }
 
@@ -356,6 +421,7 @@ namespace {
         SetAbsorption(table, "carbon", setting.absorptionCarbon);
         SetAbsorption(table, "silica", setting.absorptionSilica);
         SetAbsorption(table, "water", setting.absorptionWater);
+        SetLight(table, "cellulose", setting.lightLongCellulose, setting.lightShortCellulose);
         SlowGrass(table, setting.slowShift);
         DivideConductivity(table, setting.gasConductivityDivisor, setting.condensedConductivityDivisor);
 
@@ -365,6 +431,12 @@ namespace {
             reference.EnableRadiation({.seed = setting.seed});
         if (!setting.cascade)
             reference.SetCascadeRadiation({.enabled = false});
+        reference.KeepCascadeCellNet(setting.watch);
+        std::array<WatchedCell, 5> watched = {WatchedCell{.name = "付けた", .x = 4, .y = GRASS_Y, .z = 32},
+                                              WatchedCell{.name = "x+1", .x = 5, .y = GRASS_Y, .z = 32},
+                                              WatchedCell{.name = "x+2", .x = 6, .y = GRASS_Y, .z = 32},
+                                              WatchedCell{.name = "z+1", .x = 4, .y = GRASS_Y, .z = 33},
+                                              WatchedCell{.name = "上", .x = 4, .y = GRASS_Y + 1, .z = 32}};
 
         // 区画(T-0697。T-0671 の場面の flow_regions と同じ形。気体は閉じた壁)
         const uint32_t riverFirst = FAR_FIRST_X - setting.riverCells;
@@ -399,10 +471,32 @@ namespace {
         const uint64_t lastTick = setting.seconds * TICKS_PER_SECOND;
         uint64_t tick = 0;
         for (; tick < lastTick; ++tick) {
+            std::array<int64_t, 5> energyBefore{};
+            if (setting.watch) {
+                const auto cells = reference.State(tick);
+                for (size_t i = 0; i < watched.size(); ++i)
+                    energyBefore[i] = cells[ProbeCellIndex(watched[i].x, watched[i].y, watched[i].z)].energy;
+            }
+
             const auto before = chr::steady_clock::now();
             reference.Advance(tick,
                               tick == 0 ? std::span<const ProbeCommand>(ignite) : std::span<const ProbeCommand>());
             total += chr::steady_clock::now() - before;
+            if (setting.watch) {
+                const auto cells = reference.State(tick + 1);
+                const std::span<const int64_t> net = reference.LastCascadeCellNet();
+                for (size_t i = 0; i < watched.size(); ++i) {
+                    const uint32_t index = ProbeCellIndex(watched[i].x, watched[i].y, watched[i].z);
+                    const int64_t radiation = net.empty() ? 0 : net[index];
+                    const int64_t change = cells[index].energy - energyBefore[i];
+                    // 刻み 0 のつつきは「残り」に入る(付けたセルの分)
+                    watched[i].radiation += radiation;
+                    watched[i].rest += change - radiation;
+                }
+
+                if ((tick + 1) % (TICKS_PER_SECOND / 4) == 0)
+                    PrintWatched(table, setting, tick + 1, cells, reference.Caches(tick + 1), watched);
+            }
             pairs += reference.LastRadiationReport().pairs;
             if (setting.gas && reference.LastGasReport().skippedCellOverflow)
                 ++outcome.gasSkippedTicks;
@@ -450,6 +544,8 @@ namespace {
                                  static_cast<double>(farStart == 0 ? 1 : farStart);
         outcome.riverWaterEnd = AmountInColumns(table, reference.State(tick), "water", riverStart, FAR_FIRST_X);
         outcome.vaporEnd = AmountInColumns(table, reference.State(tick), "water_vapor", 0, PROBE_GRID_SIZE);
+        outcome.nextGrass = AmountOf(table, reference.State(tick)[ProbeCellIndex(5, GRASS_Y, 32)], "cellulose");
+        outcome.secondGrass = AmountOf(table, reference.State(tick)[ProbeCellIndex(6, GRASS_Y, 32)], "cellulose");
         outcome.millisecondsPerTick = chr::duration<double, std::milli>(total).count() / static_cast<double>(tick);
         outcome.pairsPerTick = pairs / (tick == 0 ? 1 : tick);
 
@@ -507,5 +603,23 @@ int main(int argc, char** argv) {
             static_cast<unsigned long long>(outcome.gasSkippedTicks));
     }
 
-    return 0;
+    // 試験(expect。T-1156): 草の初めの量は場面の 1.2 mol(world_cells.luau)
+    constexpr uint64_t GRASS_START = 1200000;
+    int failures = 0;
+    for (size_t i = 0; i < settings.size(); ++i) {
+        if (!settings[i].expectSpread)
+            continue;
+
+        const Outcome& outcome = outcomes[i];
+        const bool spread = outcome.secondGrass * 100 < GRASS_START * 99;
+        const bool quiet = outcome.nextGrass * 100 >= GRASS_START * 99;
+        const bool ok = *settings[i].expectSpread ? spread : quiet;
+        std::printf("%s 試験(%s): x+1 の草 %llu µmol・x+2 の草 %llu µmol → %s\n", settings[i].text.c_str(),
+                    *settings[i].expectSpread ? "燃え広がる" : "広がらない",
+                    static_cast<unsigned long long>(outcome.nextGrass),
+                    static_cast<unsigned long long>(outcome.secondGrass), ok ? "OK" : "NG");
+        failures += ok ? 0 : 1;
+    }
+
+    return failures == 0 ? 0 : 1;
 }

@@ -855,6 +855,10 @@ namespace bicameral::sim {
         // 写しの印の確かめ(T-1228 段 1。試験用。結果は変わらない): 刻みの初めの格子とは別に、前に写した刻みの後で変わった印の
         // ブロックだけを写し直す格子を持ち、毎刻み比べて違ったセルを LastCascadeReport().staleCells に数える(GPU の RadiationGrid の約束)
         void CheckCascadeGridMarks(bool enabled) { m_cascadeMarkCheck = enabled; }
+        // セルごとの当てた量を残す(T-1156。測り用。結果は変わらない): 最後の Advance の放射の段がセルへ当てた mJ(PROBE_CELL_COUNT 個。
+        // 入れていない時・段を流さなかった刻みは空)。燃え広がりの熱の内訳(放射の分 = これ、残り = 伝導と反応と流れ)を測る
+        void KeepCascadeCellNet(bool enabled) { m_cascadeKeepNet = enabled; }
+        [[nodiscard]] std::span<const int64_t> LastCascadeCellNet() const { return m_cascadeCellNet; }
         [[nodiscard]] const ProbeCascadeReport& LastCascadeReport() const { return m_cascadeReport; }
         [[nodiscard]] const CascadeCarry& CascadeRadiationCarry() const { return m_cascadeCarry; }
         // 参照の温度との差の負の側の持ち越し(referenceMk が 0 なら空。量はセルから借りた分 = 保存の和では引く)
@@ -912,6 +916,8 @@ namespace bicameral::sim {
         CascadeCarry m_cascadeCarryNegative;       // 参照の温度との差の負の側の持ち越し(T-1164)
         uint64_t m_cascadeOutside = 0;             // これまでに世界の外へ出た分 + 丸めの端数(2^−16 mJ の mod 2^64)
         bool m_cascadeMarkCheck = false;           // 写しの印の確かめ(T-1228)
+        bool m_cascadeKeepNet = false;             // セルごとの当てた量を残す(T-1156。測り用)
+        std::vector<int64_t> m_cascadeCellNet;     // 最後の放射の段がセルへ当てた mJ(残す時だけ)
         CascadeGrid m_markedGrid;                  // 印で写し直す格子(確かめの時だけ)
         std::optional<uint64_t> m_markedGridTick;  // 最後に写した刻み(無い = 次は全部)
         std::optional<ProbeLiquidField> m_liquid;  // 液体の区画(T-0609。無ければ流さない)
