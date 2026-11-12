@@ -10,7 +10,7 @@
 //                      amounts_umol = { cellulose = 38600000 }, temperature_mk = 300000 },
 //       sand_floor = { layer = 2, min_cell = { 0, 0, 0 }, size_cells = { 64, 2, 64 },                       -- 積もった砂の床(T-1236)
 //                      amounts_umol = { sand = 20000000, nitrogen = 4000 }, settled_umol = { sand = 20000000 },
-//                      temperature_mk = 300000 },  -- settled_umol = 中身のうち積もった層の量(層 ≤ 量。省けば層 0)
+//                      temperature_mk = 300000 },  -- settled_umol = 中身のうち積もった層の量(層 ≤ 量。省けば層 0・層を使う世界の粒は全部が層)
 //   }
 //   world_bodies = {
 //       ground = { size_mm = { 100000, 1000, 100000 }, position_mm = { 16000, -500, 16000 }, mass_g = 0 },  -- 0 = 動かない

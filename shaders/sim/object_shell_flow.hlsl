@@ -144,6 +144,9 @@ FX_CONST uint32_t OH_PRESSURE_MULTIGRID = 4;    // 解き始めを多重格子�
 FX_CONST uint32_t OH_PRESSURE_TEST_WIDE = 8;
 // 詰めた欄の weightMinusX がこの値なら、重みは g_voxelWork の 64bit の欄にある(重みの 0xFFFFFFFF もこちらへ回すので印と重ならない)
 FX_CONST uint32_t OH_PRESSURE_WIDE = 0xFFFFFFFFu;
+// 調べるだけ(T-1321。研究): ② の後に重ねる V 字の数(g_pressureMode の 8〜11 bit。0 = 既定の V 字 2 回。CPU の pressureMultigridCycles − 2)
+FX_CONST uint32_t OH_PRESSURE_MG_EXTRA_SHIFT = 8;
+FX_CONST uint32_t OH_PRESSURE_MG_EXTRA_MASK = 15;
 // 段の印(g_stageMask。測るだけ)
 FX_CONST uint32_t OH_STAGE_VOXELS = 1u << 0;    // ① ボクセルの見立て
 FX_CONST uint32_t OH_STAGE_FACES = 1u << 1;     // ② 面の質量・速さ・重み
@@ -1134,6 +1137,14 @@ void MgSolveStart(ShellBox box, uint32_t thread) {
     MgCenterRhs(box, thread);
     MgSync();
     MgCycle(box, thread, false);
+
+    // V 字を重ねる(T-1321 の調べ。回数はルート定数なのでグループの全スレッドが同じ回数を回す。既定は 0 回)
+    const uint32_t extraCycles = (g_pressureMode >> OH_PRESSURE_MG_EXTRA_SHIFT) & OH_PRESSURE_MG_EXTRA_MASK;
+    for (uint32_t cycle = 0; cycle < extraCycles; ++cycle) {
+        MgSync();
+        MgCycle(box, thread, false);
+    }
+
     MgFinishToPotential(box, thread);
 }
 

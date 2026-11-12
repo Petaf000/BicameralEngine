@@ -15,6 +15,7 @@
 // 1 グループの中でスレッドは別々のセルに書き、見出し・返す枠・索引はスレッド 0 だけが書く。数える欄と帳簿は足し算。
 // 次のレベルは前のレベルの書き込みを読むので、出力の前に Barrier(UAV_MEMORY, DEVICE_SCOPE | GROUP_SYNC)、バッファは globallycoherent。
 #include "sim/multires_bindings.hlsli"
+#include "sim/multires_field_access.hlsli"  // 欄の区画(u4 の層の置き場の後ろ。配り手の欄のセルの配りの口。T-1252)
 #include "sim/multires_layer_access.hlsli"  // 層の置き場(u4。細かくする子の頁へ層を写す。T-1240)
 #ifdef MR_WIDE_CELLS
 #include "sim/multires_wide_access.hlsli"
@@ -178,6 +179,69 @@ uint32_t ChildLayerPage(MrRefineRecord record, MrBlock parent, uint32_t childPag
     return layerPage;
 }
 
+// --- 配り手の欄のセルの配りの口(細かくする。CPU の RefineOwners。T-1252 段 2・ADR-0500 の 1)---
+// 要求の鎖の本物の子だけ(影の鎖は区画を読まない = T-1252 の残り)。1 スレッド = 子のセル t。
+// 一様な親: 子も一様(SfOwnerRefineUniform。スレッド t < 値の数が値 t を)。頁を持つ親: 親のセルの値を子 j へ SfOwnerRefineChild
+// (子の欄の頁は割り当ての段が取ってある = 親が欄の頁を持つ時。無ければ親も子も 0 なので書かない)。
+// 相の層の配り(セルを読む)はまだ(T-1231。GPU の世界は相の層の配り手の欄を写さない)
+void RefineCarriedFields(MrBlock parent, uint32_t parentSlot, uint32_t parentCell, uint32_t childSlot,
+                         uint32_t childPage, bool uniformChild, uint32_t t) {
+    const uint32_t count = CarriedFieldCount();
+    for (uint32_t f = 0; f < count; ++f) {
+        const uint32_t owner = CarriedOwner(f);
+        const uint32_t components = CarriedComponents(f);
+
+        // この刻みだけの欄は木の段では 0(CPU の一般の段: 頁へは 0 を書かない・一様な子は親と同じ数)
+        if (!CarriedOwned(f)) {
+            if (uniformChild && t < components)
+                StoreCarriedUniform(f, childSlot, t, LoadCarriedUniform(f, parentSlot, t));
+            continue;
+        }
+
+        if (uniformChild) {
+            if (t < components)
+                StoreCarriedUniform(f, childSlot, t, SfOwnerRefineUniform(owner, LoadCarriedUniform(f, parentSlot, t)));
+            continue;
+        }
+
+        const uint32_t childField = CarriedPageOf(f, childPage);
+        if (childField == MF_NO_PAGE)
+            continue;
+
+        const uint32_t parentField = CarriedPageOf(f, parent.page);
+        const uint32_t j = CarriedChildOfCell(t);
+        for (uint32_t c = 0; c < components; ++c)
+            StoreCarriedPage(f, childField, t, c,
+                             SfOwnerRefineChild(owner, LoadCarriedPage(f, parentField, parentCell, c), j));
+    }
+}
+
+// 細かくした親の八分の一のセル index の配り手の欄を 0 に(CPU の CoverParentOctant。頁を持つ親の欄の頁だけ)
+void CoverCarriedFields(MrBlock parent, uint32_t index) {
+    const uint32_t count = CarriedFieldCount();
+    for (uint32_t f = 0; f < count; ++f) {
+        if (!CarriedOwned(f))
+            continue;
+
+        const uint32_t parentField = CarriedPageOf(f, parent.page);
+        if (parentField == MF_NO_PAGE)
+            continue;
+
+        const uint32_t components = CarriedComponents(f);
+        for (uint32_t c = 0; c < components; ++c)
+            StoreCarriedPage(f, parentField, index, c, 0);
+    }
+}
+
+// 一様な枠 slot の値の溢れ(溢れを使う変種だけ。層を値と結ぶ時に溢れの成分の量も引く。T-1240 の 7 の 5)
+LayerTail UniformValueTail(uint32_t slot) {
+#ifdef MR_WIDE_CELLS
+    return UniformLayerTail(slot);
+#else
+    return NoLayerTail();
+#endif
+}
+
 // 1 段を細かくする(1 スレッド = 子のセル t。親のセル t も読む)
 void RefineLevel(MrRefineRecord record, uint32_t t) {
     const bool fromRequest = record.request != MR_NO_BLOCK;
@@ -233,16 +297,19 @@ void RefineLevel(MrRefineRecord record, uint32_t t) {
     const bool uniformParentLayers = MrIsUniform(parent) && UniformHasLayers(record.parentSlot);
     if (childLayerPage != MR_LAYER_NO_PAGE && parentLayerPage != MR_LAYER_NO_PAGE)
         CopyLayerCell(parentLayerPage, parentCell, childLayerPage, t);
-#ifndef MR_WIDE_CELLS
     else if (childLayerPage != MR_LAYER_NO_PAGE && uniformParentLayers)
-        WriteBoundLayers(UniformLayerBase(record.parentSlot), LoadBlockCell(parent, record.parentSlot, parentCell),
-                         MrLayerEntryAddress(LayerPageCount(), LayerCapacity(), childLayerPage, t, 0));
-#endif
+        WriteBoundLayersAt(UniformLayerBase(record.parentSlot), LoadBlockCell(parent, record.parentSlot, parentCell),
+                           UniformValueTail(record.parentSlot),
+                           MrLayerEntryAddress(LayerPageCount(), LayerCapacity(), childLayerPage, t, 0));
     else if (childLayerPage != MR_LAYER_NO_PAGE)
         ClearLayerCell(childLayerPage, t);
 
     if (uniformChild && LayerCapacity() > 0 && t < MR_LAYER_CELL_WORDS)
         g_layers[UniformLayerBase(childSlot) + t] = g_layers[UniformLayerBase(record.parentSlot) + t];
+
+    // --- 配り手の欄(セルの中身の配りの後。CPU の Refine の最後の RefineOwners)---
+    if (fromRequest && real)
+        RefineCarriedFields(parent, record.parentSlot, parentCell, childSlot, childPage, uniformChild, t);
 
 #ifdef MR_REFINE_PLACE
     // --- 寄せるセルの中身は置かれ方で(T-1188・T-1176。CPU の PlaceRefineOctantCells。端数は上で写した SAME のまま。
@@ -274,6 +341,9 @@ void RefineLevel(MrRefineRecord record, uint32_t t) {
 
         if (parentLayerPage != MR_LAYER_NO_PAGE)
             ClearLayerCell(parentLayerPage, index);  // 空のセルの層は 0(CPU の StorePageCell の付け替え)
+
+        if (fromRequest && !uniformChild)
+            CoverCarriedFields(parent, index);
 
         if (parent.fraction != MR_NO_FRACTION)
             g_fractions[FractionAddress(parent.fraction, index)] = MrMakeEmptyFraction();
@@ -746,6 +816,7 @@ uint32_t CoarsenParentLayerPage(uint32_t request, MrRequestState state, MrBlock 
 #ifndef MR_WIDE_CELLS
 // 子 2³(親の八分の一のセル t の子)の層を物質で結んで和 ÷ 8 の切り捨て、粗いセル coarse の量で抑えて target へ書く
 // (組 c = coarse の成分 c。CPU の CoarsenLayers: 子の層 ≤ 子の量なので 層の和 ÷ 8 ≤ 粗いセルの量。切り捨ての余りは残りへ)。
+// 層を使う世界(LayerGrainFloats)は切り上げて量で抑える(余りを舞う粒にしない。ADR-0489 の 3 (B)。T-1324)。
 // 和は決まった数の回しで成分の位置を選ぶ(動的な添字で構造体の配列を読まない。T-0397)
 void WriteCoarsenedLayers(MrBlock child, uint32_t childSlot, uint32_t t, RxCell coarse, uint32_t target) {
     uint64_t sums[RX_MAX_CELL_SPECIES];
@@ -775,11 +846,12 @@ void WriteCoarsenedLayers(MrBlock child, uint32_t childSlot, uint32_t t, RxCell 
         }
     }
 
+    const uint64_t roundUp = LayerGrainFloats() ? MR_CHILDREN_PER_CELL - 1 : 0u;
     FX_UNROLL
     for (uint32_t c = 0; c < RX_MAX_CELL_SPECIES; ++c) {
         const bool present = c < coarse.speciesCount;
         const uint64_t amount = present ? coarse.amounts[c] : 0;
-        const uint64_t mean = sums[c] / MR_CHILDREN_PER_CELL;
+        const uint64_t mean = (sums[c] + roundUp) / MR_CHILDREN_PER_CELL;
         const uint64_t layer = MrLayerLess(amount, mean) ? amount : mean;
         const uint32_t address = target + (c * MR_LAYER_ENTRY_WORDS);
         g_layers[address] = present ? coarse.species[c] : 0u;
@@ -804,6 +876,145 @@ void WriteCoarsenOctantLayers(MrBlock child, uint32_t childSlot, MrBlock parent,
         WriteBoundLayers(UniformLayerBase(parentSlot), MrUniformCell(parent, g_cells[parentSlot], index), target);
 
     WriteBoundLayers(target, coarse, target);
+}
+#endif
+
+// --- 配り手の欄のセルの配りの口(粗くする。CPU の ExpandPage の配り手の欄の分と CoarsenOwners。T-1252 段 2)---
+// 1 スレッド = 親の八分の一のセル t。広げる親は八分の一の外のセルを一様の値で(覆われたセルは 0)埋める。
+// 八分の一は子 8 つを SfOwnerCoarsen で(一様のままの親は値が親の値と同じ = TreeSettle が見た)。
+// 親の欄の頁は割り当ての段が取ってある(子に 0 でない値がありうる時)。保存量の配り手の欄の余りの帳簿はまだ(GPU の世界は写さない)。
+// 相の層の配り(セルを読む)はまだ(T-1231)
+void CoarsenCarriedFields(MrBlock child, uint32_t childSlot, MrBlock parent, uint32_t parentSlot, uint32_t parentPage,
+                          bool expandParent, uint32_t octant, uint32_t t) {
+    const uint32_t count = CarriedFieldCount();
+    for (uint32_t f = 0; f < count; ++f) {
+        if (!CarriedOwned(f))
+            continue;  // この刻みだけの欄は木の段では 0(子の欄の頁は解放の段が返す)
+
+        const uint32_t owner = CarriedOwner(f);
+        const uint32_t components = CarriedComponents(f);
+        const bool paged = expandParent || !MrIsUniform(parent);
+        const uint32_t parentField = paged ? CarriedPageOf(f, parentPage) : MF_NO_PAGE;
+
+        // --- 広げる親: 八分の一の外(CPU の ExpandPage。覆われたセルは 0)---
+        if (expandParent) {
+            for (uint32_t k = 0; k < MR_BLOCK_CELLS / MR_OCTANT_CELLS; ++k) {
+                const uint32_t index = t + (k * MR_OCTANT_CELLS);
+                if (MrOctantOfCell(index) == octant)
+                    continue;
+
+                for (uint32_t c = 0; c < components; ++c)
+                    StoreCarriedPage(f, parentField, index, c, LoadCarriedCell(f, parent, parentSlot, index, c));
+            }
+        }
+
+        // --- 八分の一: 子 8 つを配り手の粗くする関数で ---
+        const uint32_t index = MrOctantCell(octant, t);
+        for (uint32_t c = 0; c < components; ++c) {
+            SfFamily family;
+            FX_UNROLL
+            for (uint32_t j = 0; j < SF_CHILDREN; ++j)
+                family.values[j] = LoadCarriedCell(f, child, childSlot, MrChildCell(t, j), c);
+
+            const SfCoarsenSum sum = SfOwnerCoarsen(owner, family);
+            if (paged)
+                StoreCarriedPage(f, parentField, index, c, SfCoarsenValue(sum));
+        }
+    }
+}
+
+#ifdef MR_WIDE_CELLS
+// 溢れを使う世界の粗くする層(T-1240 の 7 の 5。CPU は CoarsenLayers・StoreWidePageCellWithLayers): 子 2³(親の八分の一のセル t の子)の層を
+// 子の量(溢れまで)で結んで物質ごとに和 ÷ 8 の切り捨て(層を使う世界は切り上げ。T-1324)、親の頁のセル index の今の量(粗くした溢れを書いた後の面まで)で抑えて target へ。
+// 層を持つ物質は 8 種まで(超える要求は TreeResolve が断った。D-689)。組の位置は物質の初めて出た順(CPU は粗いセルの成分の順。層は物質で結ぶので同じ値)。
+// 和の組は決まった数の回しで選ぶ(動的な添字で書かない。T-0397)
+void WriteWideCoarsenedLayers(MrBlock child, uint32_t childSlot, uint32_t t, uint32_t parentPage, uint32_t index,
+                              uint32_t target) {
+    uint32_t species[RX_MAX_CELL_SPECIES];
+    uint64_t sums[RX_MAX_CELL_SPECIES];
+    FX_UNROLL
+    for (uint32_t m = 0; m < RX_MAX_CELL_SPECIES; ++m) {
+        species[m] = 0;
+        sums[m] = 0;
+    }
+
+    uint32_t count = 0;
+    const uint32_t childLayerPage = MrIsUniform(child) ? MR_LAYER_NO_PAGE : LayerPageOf(child.page);
+    for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
+        const uint32_t cellIndex = MrChildCell(t, j);
+        const RxCell cell = LoadBlockCell(child, childSlot, cellIndex);
+        uint32_t base = UniformLayerBase(childSlot);
+        LayerTail tail = UniformLayerTail(childSlot);
+        if (childLayerPage != MR_LAYER_NO_PAGE) {
+            base = MrLayerEntryAddress(LayerPageCount(), LayerCapacity(), childLayerPage, cellIndex, 0);
+            tail = PageLayerTail(child.page, cellIndex);
+        }
+
+        FX_UNROLL
+        for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES; ++k) {
+            const uint32_t address = base + (k * MR_LAYER_ENTRY_WORDS);
+            const uint32_t id = g_layers[address];
+            const uint64_t layer = LayerAfterWriteAt(cell, tail, id,
+                                                     FX_U64(g_layers[address + 2], g_layers[address + 1]));
+            if (((uint32_t)layer | (uint32_t)(layer >> 32)) == 0)
+                continue;
+
+            bool known = false;
+            FX_UNROLL
+            for (uint32_t m = 0; m < RX_MAX_CELL_SPECIES; ++m) {
+                if (m < count && species[m] == id) {
+                    sums[m] += layer;
+                    known = true;
+                }
+            }
+
+            FX_UNROLL
+            for (uint32_t m = 0; m < RX_MAX_CELL_SPECIES; ++m) {
+                if (!known && m == count) {
+                    species[m] = id;
+                    sums[m] = layer;
+                }
+            }
+
+            if (!known && count < RX_MAX_CELL_SPECIES)
+                count += 1;
+        }
+    }
+
+    const RxCell coarse = g_cells[PageCellAddress(parentPage, index)];
+    const LayerTail coarseTail = PageLayerTail(parentPage, index);
+    const uint64_t roundUp = LayerGrainFloats() ? MR_CHILDREN_PER_CELL - 1 : 0u;  // 層を使う世界は切り上げ(T-1324)
+    FX_UNROLL
+    for (uint32_t c = 0; c < RX_MAX_CELL_SPECIES; ++c) {
+        const bool present = c < count;
+        const uint64_t amount = present ? LayerAmountOf(coarse, coarseTail, species[c]) : 0;
+        const uint64_t mean = (sums[c] + roundUp) / MR_CHILDREN_PER_CELL;
+        const uint64_t layer = MrLayerLess(amount, mean) ? amount : mean;
+        const uint32_t address = target + (c * MR_LAYER_ENTRY_WORDS);
+        g_layers[address] = present ? species[c] : 0u;
+        g_layers[address + 1] = (uint32_t)layer;
+        g_layers[address + 2] = (uint32_t)(layer >> 32);
+    }
+}
+
+// 粗くした親のセル index(八分の一)の層(溢れを使う世界): 子に層があれば子の層の和 ÷ 8、無ければ前の層(広げた親は一様の枠の層)を
+// 今の値(頁の今の面の溢れまで)と結ぶ
+void WriteWideCoarsenOctantLayers(MrBlock child, uint32_t childSlot, MrBlock parent, uint32_t parentSlot,
+                                  uint32_t parentPage, uint32_t parentLayerPage, bool expandParent, uint32_t t,
+                                  uint32_t index) {
+    const uint32_t target = MrLayerEntryAddress(LayerPageCount(), LayerCapacity(), parentLayerPage, index, 0);
+    const bool childLayered = MrIsUniform(child) ? UniformHasLayers(childSlot)
+                                                 : LayerPageOf(child.page) != MR_LAYER_NO_PAGE;
+    if (childLayered) {
+        WriteWideCoarsenedLayers(child, childSlot, t, parentPage, index, target);
+        return;
+    }
+
+    if (expandParent)
+        WriteBoundLayersAt(UniformLayerBase(parentSlot), MrUniformCell(parent, g_cells[parentSlot], index),
+                           UniformLayerTail(parentSlot), target);
+
+    WriteBoundLayersAt(target, g_cells[PageCellAddress(parentPage, index)], PageLayerTail(parentPage, index), target);
 }
 #endif
 
@@ -870,12 +1081,11 @@ void CoarsenRequest(uint32_t request, uint32_t t) {
         if (expandParent)
             g_cells[PageCellAddress(parentPage, index)] = MrUniformCell(parent, g_cells[parentSlot], index);
 
-#ifndef MR_WIDE_CELLS
-        // 広げた親の層は一様の枠の層(CPU の FillPageFromUniform。T-1240。溢れを使う世界は層を持たない)
+        // 広げた親の層は一様の枠の層(CPU の FillPageFromUniform。T-1240。溢れを使う世界は値の溢れの成分の層も)
         if (expandParent && parentLayerPage != MR_LAYER_NO_PAGE)
-            WriteBoundLayers(UniformLayerBase(parentSlot), MrUniformCell(parent, g_cells[parentSlot], index),
-                             MrLayerEntryAddress(LayerPageCount(), LayerCapacity(), parentLayerPage, index, 0));
-#endif
+            WriteBoundLayersAt(UniformLayerBase(parentSlot), MrUniformCell(parent, g_cells[parentSlot], index),
+                               UniformValueTail(parentSlot),
+                               MrLayerEntryAddress(LayerPageCount(), LayerCapacity(), parentLayerPage, index, 0));
 
         if (parent.fraction == MR_NO_FRACTION)
             g_fractions[FractionAddress(parentFraction, index)] = MrMakeEmptyFraction();
@@ -891,6 +1101,9 @@ void CoarsenRequest(uint32_t request, uint32_t t) {
         g_cells[PageCellAddress(parentPage, index)] = result.cell;
 
     g_fractions[FractionAddress(parentFraction, index)] = result.fraction;
+
+    // 配り手の欄(セルの中身と一般の欄の後。CPU の Coarsen の最後の CoarsenOwners)
+    CoarsenCarriedFields(child, childSlot, parent, parentSlot, parentPage, expandParent, octant, t);
 
 #ifndef MR_WIDE_CELLS
     if (parentLayerPage != MR_LAYER_NO_PAGE)
@@ -917,6 +1130,21 @@ void CoarsenRequest(uint32_t request, uint32_t t) {
     WriteCoarsenTails(child, childSlot, TailCount(result.cellTotal), TailCount(result.fractionTotal),
                       parentPaged ? parentPage : MR_NO_PAGE, !expandParent, WideFractionArea(parentFraction),
                       parent.fraction != MR_NO_FRACTION, octant, t);
+
+    // --- 層: 粗くした溢れを親の頁へ書いた後(親の量は頁の今の面まで引く)・子の溢れを空にする前(子の量も溢れまで引く)。T-1240 の 7 の 5 ---
+    if (parentLayerPage != MR_LAYER_NO_PAGE)
+        WriteWideCoarsenOctantLayers(child, childSlot, parent, parentSlot, parentPage, parentLayerPage, expandParent, t,
+                                     index);
+
+    if (LayerCapacity() > 0) {
+        DeviceMemoryBarrierWithGroupSync();
+        if (t < MR_LAYER_CELL_WORDS) {
+            g_layers[UniformLayerBase(childSlot) + t] = 0;
+            if (expandParent)
+                g_layers[UniformLayerBase(parentSlot) + t] = 0;
+        }
+    }
+
     if (!MrIsUniform(child))
         ClearWideSideWords(child.page, t, MR_OCTANT_CELLS);
 

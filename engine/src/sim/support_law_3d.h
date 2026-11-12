@@ -5,7 +5,7 @@
 // 範囲: 面の残りの硬さ(Q16)・荷・違う大きさのセル(T-1294: 印のセルを一辺 cellMm ÷ 2 の 2 × 2 × 2 に分ける。粗いセルの面に並ぶ
 //   4 つの細かいセルを 1 つの組としてつなぐ = 対の平均の 3 次元〔ADR-0485・ADR-0501・ADR-0519〕。細かいセルはレベル 1。式は support_law_3d_mixed.cpp)。
 //   面の力(FaceForces。割れの法則が読む縁・角の力とたわみのエネルギー)・掘った後の温めた始まりの運び(CarryFrom)は T-1295。
-//   違う大きさの面の切り口の力は未着手(FineFaceForces が 0 を返す。T-1295 の作業ログ)。
+//   違う大きさの面の細かい側の切り口の力(FineFaceForces。式は support_law_3d_mixed.cpp の MixedForces)は T-1325。
 // 単位は 2 次元と同じ: 変位 2^-16 nm(int64)・力 mN・係数 2^-32 mN/nm・右辺 2^-16 mN。帳簿の回りの力は mN × セル ÷ 2(位置はセルの半分の単位)。
 // データの流れ: SupportScene3D → 項(面・段の棒・固定した面)→ EquilibriumBlockSystem → SolveEquilibriumBlocks → 変位と回り → 帳簿
 #pragma once
@@ -119,10 +119,11 @@ namespace bicameral::sim {
         // セル (x, 上, 奥行) と +軸の隣の間の面の力(同じ大きさのセルどうし)。面が無い・割れ切った・分けたセルが絡むなら全部 0
         SupportFaceForces3D FaceForces(uint32_t x, uint32_t up, uint32_t z, uint32_t axis) const;
         // 細かい座標のセルと +軸の隣の間の面の力: 両方が細かいセルなら細かい面(幅 cellMm ÷ 2)・両方が分けていない違うセルなら
-        // 粗い面(FaceForces と同じ)・同じ分けていないセルの中・面が無い・違う大きさの面(未着手)なら全部 0
+        // 粗い面(FaceForces と同じ)・違う大きさの面なら細かい側の面の位置の切り口(幅 cellMm ÷ 2。粗いセルの面の 4 分の 1。T-1325)・
+        // 同じ分けていないセルの中・面が無いなら全部 0
         SupportFaceForces3D FineFaceForces(uint32_t fx, uint32_t fup, uint32_t fz, uint32_t axis) const;
         uint32_t MixedFaceCount() const {
-            return m_mixedFaceCount;
+            return (uint32_t)m_mixedFaces.size();
         }  // 違う大きさの面(粗いセルの面 1 つ = 細かいセル 4 つの組)
         SupportLedger3D Ledger() const;
         uint64_t Hash() const;
@@ -135,6 +136,8 @@ namespace bicameral::sim {
         const EquilibriumBlockSystem& BlockSystem() const { return m_blockSystem; }
         const EquilibriumBlockGrid& BlockGrid() const { return m_blockGrid; }
         const std::vector<int64_t>& BlockValues() const { return m_blockState.values; }
+        // 値を外から置く(試験が一様な場を置いて面の力を読む。並びは BlockValues と同じ。共役勾配の向きは捨てる。T-1325)
+        void SetBlockValues(const std::vector<int64_t>& values);
 
     private:
         using Gradient = std::array<int64_t, SUPPORT3_COMPONENTS>;
@@ -157,11 +160,30 @@ namespace bicameral::sim {
 
         // 節が 3〜5 つの項 ½ c (Σ g_i · x_i)²(違う大きさの面の 4 つの組。T-1294。nodes[0] は粗いセル)
         static constexpr uint32_t MULTI_NODES = 5;
+        enum class MultiKind : uint8_t {
+            Shear,   // ずれ(4 つの和。index = 横の軸)
+            Strain,  // 形 A の辺の対(nodes[1]・[2] が対)
+            Axial,   // 伸び(index = 自分の細かいセル k。nodes[1 + k])
+            Turn,    // 回り(index = 回りの軸)
+        };
         struct MultiTerm {
             std::array<uint32_t, MULTI_NODES> nodes{};
             std::array<Gradient, MULTI_NODES> gradients{};
             uint32_t count = 0;
             uint64_t coefficient = 0;
+
+            // --- 面の力が読む(MixedForces。T-1325)---
+            MultiKind kind = MultiKind::Shear;
+            uint32_t index = 0;
+        };
+
+        // 違う大きさの面 1 つ(粗いセルの面 = 細かいセル 4 つの組)の項の範囲 m_multiTerms[firstTerm, endTerm)(T-1325)
+        struct MixedFace {
+            uint32_t firstTerm = 0;
+            uint32_t endTerm = 0;
+            uint32_t axis = 0;
+            int32_t side = 0;  // 細かいセルが粗いセルの +軸の側なら +1
+            uint32_t intact = 0;
         };
 
         // 同じ大きさのセルどうしの面(AddBond が m_terms に並べる 6 つの項の最初。順は 伸び・ずれ 2〔横の軸の小さい順〕・回り 3〔軸の順〕)
@@ -176,6 +198,9 @@ namespace bicameral::sim {
         // unit = b(残りの硬さ intact を掛けた後)
         void AddBond(uint32_t low, uint32_t high, uint32_t axis, uint64_t unit, uint32_t intact);
         SupportFaceForces3D BondForces(const Bond& bond) const;
+        SupportFaceForces3D MixedForces(uint32_t fine, const MixedFace& face) const;  // support_law_3d_mixed.cpp
+        // 縁と角の力 = 軸の力 ± 開く分(opening[j] = t_j の +側の縁の力 − N)。面の中の直線の分布
+        static void FillEdges(SupportFaceForces3D& forces, const std::array<int64_t, 2>& opening);
         int64_t TermProjection(const Term& term) const;
         int64_t CarriedValue(const SupportLaw3D& before, uint32_t cell, uint32_t component) const;
         void AddClamp(uint32_t cell, uint32_t axis, int32_t side, uint64_t unit);
@@ -229,7 +254,9 @@ namespace bicameral::sim {
         std::vector<uint32_t> m_bondAt;  // [セル × 3 + 軸] → 面(無い・割れ切ったなら UINT32_MAX)
         std::vector<FixedTerm> m_fixedTerms;
         std::vector<MultiTerm> m_multiTerms;
-        uint32_t m_mixedFaceCount = 0;
+        std::vector<MixedFace> m_mixedFaces;
+        std::vector<uint32_t>
+            m_mixedFaceAt;  // [細かいセル × 3 + 軸] → 違う大きさの面(外向きの面は軸ごとに 1 つ。無いなら UINT32_MAX)
         uint32_t m_braceCount = 0;        // 辺の斜めの棒
         uint32_t m_cornerBraceCount = 0;  // 角の斜めの棒
 

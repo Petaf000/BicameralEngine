@@ -331,6 +331,60 @@ namespace bicameral::sim {
             nest.counters[MR_COUNTER_FREE_PAGES] = freePages - grantedPages;
         }
 
+        // --- 3b. 配り手の欄の頁: 許可した要求の順に取る(GPU の TreeAllocate と同じ順。T-1252 段 2・ADR-0532 の 3)---
+
+        // 粗くする要求 i の親が配り手の欄 field の頁を要るか(親が頁を持つ枠になり・まだ欄の頁が無く・子か広げる親に 0 でない値がありうる)
+        bool CoarsenNeedsOwnerPage(MultiresNest& nest, uint32_t field, uint32_t i) {
+            const MrRequestState& state = nest.states[i];
+            const MrBlock& child = nest.blocks[state.target];
+            const MrBlock& parent = nest.blocks[child.parent];
+            const bool expanded = state.pageNeed != 0;
+            if (MrIsUniform(parent) && !expanded)
+                return false;
+
+            if (!expanded && nest_fields::OwnerPageHeld(nest, field, parent.page))
+                return false;
+
+            const bool childValues = MrIsUniform(child) ? nest_fields::OwnerUniformNonZero(nest, field, state.target)
+                                                        : nest_fields::OwnerPageHeld(nest, field, child.page);
+
+            return childValues || (expanded && nest_fields::OwnerUniformNonZero(nest, field, child.parent));
+        }
+
+        void AllocateOwnerPages(MultiresNest& nest, uint32_t count) {
+            for (uint32_t f = 0; f < nest.fields.size(); ++f) {
+                const MultiresField& field = nest.fields[f];
+                if (!SfOnCells(field.desc) || !SfOwned(field.desc) || !field.store.sparse)
+                    continue;
+
+                for (uint32_t i = 0; i < count; ++i) {
+                    const MrRequestState& state = nest.states[i];
+                    if (state.status != MR_STATUS_GRANTED)
+                        continue;
+
+                    // 細かくする: 頁を持つ親が欄の頁を持てば、鎖の子の全部に(子の値は親の値から配る)
+                    if (nest.requests[i].op == MR_REQUEST_REFINE) {
+                        const MrBlock& parent = nest.blocks[state.target];
+                        if (MrIsUniform(parent) || !nest_fields::OwnerPageHeld(nest, f, parent.page))
+                            continue;
+
+                        for (uint32_t depth = 0; depth < state.levels; ++depth)
+                            nest_fields::TakeOwnerPage(nest, f, PoppedPage(nest, state, depth));
+
+                        continue;
+                    }
+
+                    if (!CoarsenNeedsOwnerPage(nest, f, i))
+                        continue;
+
+                    const uint32_t parentPage = state.pageNeed != 0
+                                                    ? PoppedPage(nest, state, 0)
+                                                    : nest.blocks[nest.blocks[state.target].parent].page;
+                    nest_fields::TakeOwnerPage(nest, f, parentPage);
+                }
+            }
+        }
+
         // --- 4. 適用: 細かくする(1 段)---
 
         // 溢れを使う世界で、親の八分の一のセルと端数を子の頁・端数の枠へ溢れごと写す(T-0187)。
@@ -481,7 +535,9 @@ namespace bicameral::sim {
         }
 
         // 子 2³ の層を成分ごとに和 ÷ 8 の切り捨てで(粗いセル coarse の成分と同じ位置。T-1220。ADR-0481 の 5 の 4)。
-        // 子の層 ≤ 子の量なので 層の和 ÷ 8 ≤ 量の和 ÷ 8 ≤ 粗いセルの量(端数は量の側にだけ入る)。切り捨ての余りは層から残りへ移る
+        // 子の層 ≤ 子の量なので 層の和 ÷ 8 ≤ 量の和 ÷ 8 ≤ 粗いセルの量(端数は量の側にだけ入る)。切り捨ての余りは層から残りへ移る。
+        // 層を使う世界(cellLayers.enabled)は切り上げて量で抑える(余り 0〜7 µmol を舞う粒にしない。ADR-0489 の 3 (B)「舞う粒は
+        // 崩れ・吹き上げの出来事からだけ」。T-1324)
         std::vector<uint64_t> CoarsenLayers(const MultiresNest& nest, uint32_t childSlot, uint32_t local,
                                             const RxWideCell& coarse) {
             std::vector<uint64_t> sums(coarse.speciesCount, 0);
@@ -497,8 +553,9 @@ namespace bicameral::sim {
                 }
             }
 
+            const uint64_t roundUp = nest.cellLayers.enabled ? MR_CHILDREN_PER_CELL - 1 : 0;
             for (uint32_t k = 0; k < coarse.speciesCount; ++k)
-                sums[k] = std::min(sums[k] / MR_CHILDREN_PER_CELL, coarse.amounts[k]);
+                sums[k] = std::min((sums[k] + roundUp) / MR_CHILDREN_PER_CELL, coarse.amounts[k]);
 
             return sums;
         }
@@ -626,7 +683,8 @@ namespace bicameral::sim {
                 if (state.releasePage == MR_NO_PAGE)
                     continue;
 
-                nest_detail::ClearPageLayers(nest, state.releasePage);  // 次に使う所に古い層を残さない(T-1210)
+                nest_detail::ClearPageLayers(nest, state.releasePage);    // 次に使う所に古い層を残さない(T-1210)
+                nest_fields::ReleaseOwnerPages(nest, state.releasePage);  // 配り手の欄の頁も要求の順に(ADR-0532 の 3)
                 FreePageAt(nest, nest.counters[MR_COUNTER_FREE_PAGES]++) = state.releasePage;
             }
 
@@ -660,7 +718,15 @@ namespace bicameral::sim {
 
     uint32_t PlaceRootBlock(MultiresNest& nest, int64_t originX, int64_t originY, int64_t originZ,
                             std::span<const RxCell> cells) {
-        return PlaceRootBlock(nest, originX, originY, originZ, cells, {});
+        if (!nest.cellLayers.enabled)
+            return PlaceRootBlock(nest, originX, originY, originZ, cells, {});
+
+        // --- 層を使う世界: 層を渡さずに置いた粒は全部が層(T-1322。ADR-0489 の 3 (B)・D-687)---
+        std::vector<MrCellLayers> layers(MR_BLOCK_CELLS);
+        for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
+            layers[index] = nest_detail::SettledGrainLayers(nest, cells[index]);
+
+        return PlaceRootBlock(nest, originX, originY, originZ, cells, layers);
     }
 
     uint32_t PlaceRootBlock(MultiresNest& nest, int64_t originX, int64_t originY, int64_t originZ,
@@ -753,6 +819,7 @@ namespace bicameral::sim {
             Settle(nest, i);
 
         Allocate(nest, count);
+        AllocateOwnerPages(nest, count);
         nest_detail::SnapshotRefineHalos(nest, count);  // 隣の写しは刻みの前の木から(T-1189)
         for (uint32_t i = 0; i < count; ++i) {
             if (nest.states[i].status != MR_STATUS_GRANTED)

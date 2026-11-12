@@ -9,6 +9,9 @@
 
 #include "common/multires_layers.hlsli"
 #include "sim/multires_bindings.hlsli"
+#ifdef MR_WIDE_CELLS
+#include "sim/multires_wide_access.hlsli"  // 層と結ぶ量を溢れまで引く(T-1240 の 7 の 5)
+#endif
 
 globallycoherent RWStructuredBuffer<uint32_t> g_layers : register(u4);
 
@@ -111,6 +114,123 @@ void WriteBoundLayers(uint32_t from, RxCell cell, uint32_t to) {
         const uint32_t source = from + (k * MR_LAYER_ENTRY_WORDS);
         const uint32_t species = g_layers[source];
         const uint64_t bound = MrLayerAfterWrite(cell, species, FX_U64(g_layers[source + 2], g_layers[source + 1]));
+        const uint32_t target = to + (k * MR_LAYER_ENTRY_WORDS);
+        g_layers[target] = species;
+        g_layers[target + 1] = (uint32_t)bound;
+        g_layers[target + 2] = (uint32_t)(bound >> 32);
+    }
+}
+
+// --- 層と結ぶ量を溢れまで引く(T-1240 の 7 の 5。溢れを使う世界の層)---
+// 溢れを使う変種(MR_WIDE_CELLS)のセルは、インラインの 8 種が埋まっていると残りの成分が溢れ(領域・面・セルの範囲)にある。
+// 層は物質で結ぶので、インラインに無い物質の量は溢れから引く(CPU の LoadWideNestCellLayers は上限の無い形のセルと結ぶ)。
+// 溢れを使わない変種は溢れを読まない(MrLayerAfterWrite と同じ式・同じコード)。
+
+// 層と結ぶセルの溢れの在り処(area = MR_NO_PAGE は溢れを読まない)
+struct LayerTail {
+    uint32_t area;
+    uint32_t side;
+    uint32_t index;
+};
+
+LayerTail NoLayerTail() {
+    LayerTail tail;
+    tail.area = MR_NO_PAGE;
+    tail.side = 0;
+    tail.index = 0;
+
+    return tail;
+}
+
+#ifdef MR_WIDE_CELLS
+// 頁(か端数の枠の領域)area のセル index の今の面の溢れ
+LayerTail PageLayerTail(uint32_t area, uint32_t index) {
+    LayerTail tail;
+    tail.area = area;
+    tail.side = WideCurrentSide(area);
+    tail.index = index;
+
+    return tail;
+}
+
+// 一様な枠 slot の値の溢れ(今の面のセル 0 の範囲。観察の枠は持たない。T-0312・T-0384)
+LayerTail UniformLayerTail(uint32_t slot) {
+    if (slot >= g_worldBlocks)
+        return NoLayerTail();
+
+    return PageLayerTail(WideUniformArea(slot), 0);
+}
+
+// 溢れの在り処 tail の物質 species の量(無ければ 0)
+uint64_t LayerTailAmountOf(LayerTail tail, uint32_t species) {
+    uint64_t amount = 0;
+    const uint2 range = WideRange(tail.area, tail.side, tail.index);
+    for (uint32_t entry = range.x; entry < range.y; ++entry) {
+        const uint32_t word = MrWideEntryWord(entry);
+        if (g_treeWords[WideWord(tail.area, tail.side, word)] == species)
+            amount = FX_U64(g_treeWords[WideWord(tail.area, tail.side, word + 2)],
+                            g_treeWords[WideWord(tail.area, tail.side, word + 1)]);
+    }
+
+    return amount;
+}
+#endif
+
+// セル cell(溢れは tail)の物質 species の量(無ければ 0)
+uint64_t LayerAmountOf(RxCell cell, LayerTail tail, uint32_t species) {
+    uint64_t amount = 0;
+    bool found = false;
+    FX_UNROLL
+    for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i) {
+        if (i < cell.speciesCount && cell.species[i] == species) {
+            amount = cell.amounts[i];
+            found = true;
+        }
+    }
+#ifdef MR_WIDE_CELLS
+    if (!found && cell.speciesCount == RX_MAX_CELL_SPECIES && tail.area != MR_NO_PAGE)
+        amount = LayerTailAmountOf(tail, species);
+#endif
+
+    return amount;
+}
+
+// MrLayerAfterWrite の溢れまで引く版: 層 = min(前の層, 今の量)。0 の層は 0 のまま(溢れを引かない)
+uint64_t LayerAfterWriteAt(RxCell cell, LayerTail tail, uint32_t species, uint64_t layer) {
+#ifdef MR_WIDE_CELLS
+    if (((uint32_t)layer | (uint32_t)(layer >> 32)) == 0)
+        return 0;
+
+    const uint64_t amount = LayerAmountOf(cell, tail, species);
+
+    return MrLayerLess(amount, layer) ? amount : layer;
+#else
+    return MrLayerAfterWrite(cell, species, layer);
+#endif
+}
+
+// BoundLayerOf の溢れまで引く版
+uint64_t BoundLayerOfAt(uint32_t base, uint32_t species, RxCell cell, LayerTail tail) {
+    uint64_t raw = 0;
+    FX_UNROLL
+    for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES; ++k) {
+        const uint32_t address = base + (k * MR_LAYER_ENTRY_WORDS);
+        const bool nonzero = (g_layers[address + 1] | g_layers[address + 2]) != 0;
+        if (g_layers[address] == species && nonzero)
+            raw = FX_U64(g_layers[address + 2], g_layers[address + 1]);
+    }
+
+    return LayerAfterWriteAt(cell, tail, species, raw);
+}
+
+// WriteBoundLayers の溢れまで引く版(from と to は同じでもよい)
+void WriteBoundLayersAt(uint32_t from, RxCell cell, LayerTail tail, uint32_t to) {
+    FX_UNROLL
+    for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES; ++k) {
+        const uint32_t source = from + (k * MR_LAYER_ENTRY_WORDS);
+        const uint32_t species = g_layers[source];
+        const uint64_t bound = LayerAfterWriteAt(cell, tail, species,
+                                                 FX_U64(g_layers[source + 2], g_layers[source + 1]));
         const uint32_t target = to + (k * MR_LAYER_ENTRY_WORDS);
         g_layers[target] = species;
         g_layers[target + 1] = (uint32_t)bound;

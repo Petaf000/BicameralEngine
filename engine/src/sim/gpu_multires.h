@@ -79,6 +79,17 @@ namespace bicameral::sim {
         // layerPages = 0 の GPU には写さない(RecordUpload が false。粒の印を知らないと結果が変わる。D-428)
         uint32_t layerPages = 0;
 
+        // 登録した欄のうち配り手の欄・この刻みだけの欄(T-1252 段 2。ADR-0500 の 3・ADR-0532)の、欄ごとの欄の頁の数と値の数の和の上限。
+        // 0 = 持たない(載せる欄がある世界は RecordUpload が false。GPU が欄を知らないまま木を動かすと結果が CPU と変わる。D-428)。
+        // 置き場は層の置き場の後ろ(u4 の同じバッファ。並びは common/multires_field_pages.hlsli の「欄の区画」)。RecordUpload が写し、Read が戻す。
+        // 木の段の要求の処理(割り当て・細かくする鎖・粗くする・解放。TreeSettle の一様のままの判定)は区画を読み書きし、CPU と
+        // 頁の番号までビット一致(T-1252 段 2 の 4 本目。試験 gpu_field_region)。欄の頁が尽きたら細かく/粗くする要求を断る(GPU だけ。数える)。
+        // まだの所(T-1252 の段 2 の残り): 影の鎖(RecordRefineShadow・引き戻し)・畳む(RecordFoldPages)・広げる(TreeExpand)・集めて書く段は
+        // 区画を読まない = 載せる欄のある世界でそれらを通すと配り手の欄が CPU と変わる(使い手が無い間の途中の形)。
+        // 保存量の配り手の欄(粗くする余りの帳簿)・相の層の配り手の欄(セルを読む。T-1231)は写さない(RecordUpload が false)
+        uint32_t fieldPages = 0;
+        uint32_t fieldValues = 0;  // 載せる欄の値の数の和の上限(0 = state_field の SF_MAX_COMPONENTS)
+
         // 作ったルート署名・パイプライン・Work Graph のプログラムを使い回す置き場(T-0427。無ければ毎回作る)。同じデバイスで
         // 何度も作る所(試験の場面ごと)用。使い回すのはコンパイルの結果だけで、裏のメモリとバッファはこの GpuMultires が持つ。
         // 作る時に使うだけで覚えない
@@ -209,6 +220,10 @@ namespace bicameral::sim {
         // 層の置き場のバイト数(層の頁を持たなければ 0。T-1221)
         [[nodiscard]] uint64_t LayerBytes() const;
         [[nodiscard]] uint32_t LayerStoreWords() const;  // 層の置き場の語の数(一様の枠の層まで。T-1240)
+        // u4 の外の置き場(層の置き場 + 欄の区画。T-1252)を持つか・欄の区画の始まりの語・置き場の語の数
+        [[nodiscard]] bool HasExternalStore() const { return m_layerCapacity > 0 || m_fieldPages > 0; }
+        [[nodiscard]] uint32_t FieldRegionStart() const;
+        [[nodiscard]] uint32_t ExternalStoreWords() const;
 
         // 伝導の段を Work Graph で投げるか(計測で切り替える。conductionGraph で作っていなければ true にできず false を返す)
         [[nodiscard]] bool UseConductionGraph(bool use);
@@ -331,8 +346,18 @@ namespace bicameral::sim {
         void RecordWideDeferred(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
         void RecordWideBig(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
         void StampStage(ID3D12GraphicsCommandList10* list);
-        // 層を合わせる段(T-1221。層の頁を持たなければ何もしない): u4 に層の置き場を結び、層の頁のセルの層を付け替える
-        void RecordLayerReconcile(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
+        // 層を合わせる段(T-1221。層の頁を持たなければ何もしない): u4 に層の置き場を結び、層の頁のセルの層を付け替える。
+        // afterStep(刻みの段の後)で、層を使う世界で反応が粒を生む表なら、刻む前の写しと比べて生まれた粒を層に足す段(T-1323)
+        void RecordLayerReconcile(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                  bool afterStep = false);
+        // 刻む前のセルを写す(層を使う世界で反応が粒を生む表だけ。T-1323)
+        void RecordGrainSnapshot(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
+        // 刻む前のセルの写し(u1 と同じ大きさ)を、要る世界で初めて写す時に作る
+        [[nodiscard]] bool EnsureGrainSnapshot();
+
+        // 層を使う世界の粒の印のある物質を、表の規則が生むか(生むなら生まれた粒を層に足す段を通す。T-1322・T-1323)
+        [[nodiscard]] bool ProducesGrain(const MultiresNest& nest) const;
+
         // 外のバッファの口(u4・u5)と定数の結び先(T-1240: 木の段の間は u4 に層の置き場を結ぶ)
         struct ExternalBinding {
             std::array<D3D12_GPU_VIRTUAL_ADDRESS, 2> views{};
@@ -430,12 +455,25 @@ namespace bicameral::sim {
         std::unique_ptr<GpuMultiresImplicit> m_implicit;
 
         // --- セルの成分ごとの層の量(T-1221。GpuMultiresOptions::layerPages。並びは common/multires_layers.hlsli)---
-        uint32_t m_layerCapacity = 0;  // 層の頁の数(0 = 層を持たない)
-        uint32_t m_layerUsed = 0;      // 写した時に使った層の頁の数(0 なら層を合わせる段を投げない)
+        uint32_t m_layerCapacity = 0;            // 層の頁の数(0 = 層を持たない)
+        std::vector<uint8_t> m_producedSpecies;  // [物質] 表の規則の生成物なら 1(層を使う世界の断り。T-1322)
+        uint32_t m_layerUsed = 0;                // 写した時に使った層の頁の数(0 なら層を合わせる段を投げない)
         ComPtr<ID3D12PipelineState> m_layerPipeline;
+        // 層を使う世界で反応が粒を生む表(T-1323): 刻む前のセルの写し(u5)・写す段・生まれた粒を層に足す段
+        bool m_grainBorn = false;
+        ComPtr<ID3D12Resource> m_grainBefore;
+        ComPtr<ID3D12PipelineState> m_grainSnapshotPipeline;
+        ComPtr<ID3D12PipelineState> m_grainReconcilePipeline;
+
+        // u4 の外の置き場(層の置き場 + 欄の区画。層か欄を持つ世界だけ)
         ComPtr<ID3D12Resource> m_layerBuffer;
         ComPtr<ID3D12Resource> m_layerUpload;
         ComPtr<ID3D12Resource> m_layerReadback;
+
+        // --- 配り手の欄・この刻みだけの欄の区画(T-1252 段 2。GpuMultiresOptions::fieldPages)---
+        uint32_t m_fieldPages = 0;   // 欄ごとの欄の頁の数(0 = 持たない)
+        uint32_t m_fieldValues = 0;  // 載せる欄の値の数の和の上限
+        uint32_t m_fieldCount = 0;   // 写した時に載せた欄の数(g_external3)
 
         // --- 計測 ---
         ComPtr<ID3D12QueryHeap> m_timestamps;

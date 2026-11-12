@@ -154,6 +154,7 @@ add_library(bicameral_sim STATIC
   src/sim/gpu_cascade_light.cpp  # 世界の中の光: 距離ごとの段の GPU(T-0959・ADR-0432)
   src/sim/gpu_multires.cpp
   src/sim/gpu_multires_layers.cpp  # 層の置き場の像を GPU へ写す・戻す(T-1221)
+  src/sim/gpu_multires_fields.cpp  # 登録した欄の疎な頁の置き場の像を GPU へ写す・戻す(T-1252 段 2)
   src/sim/gpu_implicit.cpp
   src/sim/gpu_implicit_build.cpp
   src/sim/gpu_implicit_levels.cpp

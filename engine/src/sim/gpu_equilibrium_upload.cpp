@@ -143,7 +143,9 @@ namespace bicameral::sim {
         // V は cyclesPerRecord 回ずつ積む(cycles 回は部品の RecordSolve を cycles ÷ cyclesPerRecord 回)
         const uint32_t perRecord = std::max(options.cyclesPerRecord, 1u);
         auto equilibrium = GpuEquilibrium::Create(
-            device, grid, {.solver = {.method = ImplicitMethod::Multigrid, .cycles = perRecord}});
+            device, grid,
+            {.solver = {
+                 .method = ImplicitMethod::Multigrid, .cycles = perRecord, .coarsestSweeps = options.coarsestSweeps}});
         if (!equilibrium)
             return std::unexpected(equilibrium.error());
 

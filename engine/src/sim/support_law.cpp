@@ -1328,7 +1328,8 @@ namespace bicameral::sim {
     // φ の勾配 f)の直線の内挿で、どちらの向きでも 6M/s = 2 (f_high − f_low)(同じ大きさの面の 6M/dx = 1.5 (f_high − f_low) と同じ形)。
     // ずれを面の点で運ぶ形(③・④)は、ずれの項の f が両端で同じ(腕 s と s/2)なので M に入らない(面の点で回りが 0)。
     // 軸の項の φ の勾配(粗い側の端を面の位置へずらす剛体の動き)は梁の曲げではないので入れない(④ の 3 つの節の伸びの項も同じ)。
-    // 対(④。T-1191): ずれの負の項は細かいセルが受ける力として足し(β が全部なら対の 2 つの面のずれの力は同じ)、伸びの 3 つの節の項は自分の分を足す
+    // 対(④。T-1191): ずれの負の項・伸びの 3 つの節の項(L・U の 2 つ)・歪みの差の項は、自分の細かいセルが受ける力の全部を足す(T-1326。
+    // 3 次元の MixedForces と同じ。β が全部なら対の 2 つの面のずれの力は同じ・対の 2 つの面の和 = 粗いセルが受ける力)
     SupportFaceForces SupportLaw::MixedForces(size_t first, uint32_t axis) const {
         const uint32_t along = axis == 0 ? SUPPORT_X : SUPPORT_UP;
         const uint32_t across = axis == 0 ? SUPPORT_UP : SUPPORT_X;
@@ -1374,14 +1375,20 @@ namespace bicameral::sim {
             turnHigh += bendShare * faceBend.gradientHigh[SUPPORT_TURN];
             forces.energyPj -= SpringWork(bendForce, TermProjection(bendTerm)) / 2;
 
-            // 伸びの 3 つの節の項(nodes の 0 = 粗いセル・1 = 自分の細かいセル)
-            const TripleTerm& triple = m_tripleTerms[pair.firstTriple + (group.upper ? 1 : 0)];
-            const int64_t projection = TripleProjection(triple);
-            const int64_t tripleForce = Flow(triple.coefficient, projection);
-            const Gradient& highGradient = fineHigh ? triple.gradients[1] : triple.gradients[0];
-            forces.axialMn += tripleForce * highGradient[along];
-            forces.shearMn += tripleForce * highGradient[across];
-            forces.energyPj += SpringWork(tripleForce, projection);
+            // 伸びの 3 つの節の項(L・U の 2 つ。nodes の 0 = 粗いセル・1 = その項の細かいセル・2 = 対の相手)。自分の細かいセルが
+            // 受ける力の全部 = 自分の項の節 1 の分 + 相手の項の節 2 の分(T-1326。3 次元の MixedForces と同じ読み = 対の 2 つの面の和が
+            // 粗いセルの受ける力)。エネルギーは自分の項
+            for (uint32_t t = 0; t < 2; ++t) {
+                const bool ownTriple = t == (group.upper ? 1u : 0u);
+                const TripleTerm& triple = m_tripleTerms[pair.firstTriple + t];
+                const int64_t projection = TripleProjection(triple);
+                const int64_t tripleForce = Flow(triple.coefficient, projection);
+                const Gradient& fineGradient = triple.gradients[ownTriple ? 1 : 2];
+                forces.axialMn += toFace * tripleForce * fineGradient[along];
+                forces.shearMn += toFace * tripleForce * fineGradient[across];
+                if (ownTriple)
+                    forces.energyPj += SpringWork(tripleForce, projection);
+            }
 
             // 対の歪みの差の項(T-1278): 自分の細かいセルが受ける力を面が運ぶ(ずれの負の項と同じ読み。エネルギーは 2 つの面で半分ずつ)。
             // 曲げは自分の細かいセルの回りの力を曲げの項の力に直して曲げの項と同じ両端の勾配で回りへ

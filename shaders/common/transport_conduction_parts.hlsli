@@ -73,6 +73,60 @@ FX_FN PlFaceFlow TxPartFaceFlow(PlPartSide self, PlPartSide other, int32_t condu
     return flow;
 }
 
+// --- 陰の系の部分の組の面(CPU の multires_implicit_conduction.cpp と GPU の木の系を作る段が同じ値を使う。T-1230 段 2 ②・③)---------
+// 組 1 本: 系の係数の G の側 = min(PlSlotConductance(重なり))(頭打ちなし。系の係数はこれに × HC_LIMIT_PER_CONDUCTANCE × 4^kf)と、
+// 安全網で陽に戻す時の流れ = 陽の部分の道の組の値(TxPartPairFlow。上限を重なりで縮める。★8・ImplicitFace::explicitFlow)。
+// conductance = 0 なら面を作らない(重なり 0 か片側の値 0)
+struct TxPartPair {
+    uint64_t conductance;
+    int64_t explicitFlow;
+    uint32_t selfPart;   // PL_PART_*(系の節の選び)
+    uint32_t otherPart;  // PL_PART_*
+};
+
+// 組 4 つ。順は 下どうし・上どうし・下 × 上・上 × 下(陽の TxPartFaceFlow と同じ。系の面の順は安全網の足し算で効く)。
+// 構造体の配列を動的な添字で読まないので名前の付いた欄に持つ(T-0397)
+struct TxPartPairs {
+    TxPartPair lowerLower;
+    TxPartPair upperUpper;
+    TxPartPair lowerUpper;
+    TxPartPair upperLower;
+};
+
+FX_FN TxPartPair TxMakePartPair(PlSideSlot self, PlSideSlot other, uint32_t overlapQ16, int32_t conductionLevel,
+                                uint32_t otherGap) {
+    TxPartPair pair;
+    pair.conductance = 0;
+    pair.explicitFlow = 0;
+    pair.selfPart = self.part;
+    pair.otherPart = other.part;
+    if (overlapQ16 == 0)
+        return pair;
+
+    const uint32_t selfConductance = PlSlotConductance(self, overlapQ16);
+    const uint32_t otherConductance = PlSlotConductance(other, overlapQ16);
+    pair.conductance = selfConductance < otherConductance ? selfConductance : otherConductance;
+    if (pair.conductance == 0)
+        return pair;
+
+    pair.explicitFlow = TxPartPairFlow(self, other, overlapQ16, conductionLevel, otherGap, 0);
+
+    return pair;
+}
+
+// 自分の片側 self と相手の片側 other(違うレベルなら TxPartSideOnRow で細かい面の段へ写した後)の組 4 つ。otherGap = レベルの差(同じレベル・世界の端は 0)
+FX_FN TxPartPairs TxPartPairsOf(PlPartSide self, PlPartSide other, int32_t conductionLevel, uint32_t otherGap) {
+    const PlPairOverlaps overlaps = PlPairOverlapsOf(self, other);
+
+    TxPartPairs pairs;
+    pairs.lowerLower = TxMakePartPair(self.lower, other.lower, overlaps.lowerLower, conductionLevel, otherGap);
+    pairs.upperUpper = TxMakePartPair(self.upper, other.upper, overlaps.upperUpper, conductionLevel, otherGap);
+    pairs.lowerUpper = TxMakePartPair(self.lower, other.upper, overlaps.lowerUpper, conductionLevel, otherGap);
+    pairs.upperLower = TxMakePartPair(self.upper, other.lower, overlaps.upperLower, conductionLevel, otherGap);
+
+    return pairs;
+}
+
 // 粗いセルの横の片側を、細かい面が覆う段 row(0〜2^gap − 1)の上へ写す(段の中の層の高さ = clamp(h × 2^d − row, 0, 1))。
 // 段が全部層なら層の部分 1 つ・全部気体なら気体の部分 1 つ。部分 1 つの片側(混ざらないセル・下/上の面)はそのまま
 FX_FN PlPartSide TxPartSideOnRow(PlPartSide coarse, uint32_t gap, uint32_t row) {
@@ -157,10 +211,14 @@ FX_FN TxCellParts TxMakeCellParts(PlParts parts, PlLayer layer) {
 
 FX_FN PlPartSide TxCellPartSide(TxCellParts parts, uint32_t face) {
     const uint32_t kind = TxPartSideKind(face);
+    // HLSL の ?: は構造体を返せないので if で
     if (kind == TX_PART_SIDE_BOTTOM)
         return parts.bottom;
 
-    return kind == TX_PART_SIDE_TOP ? parts.top : parts.lateral;
+    if (kind == TX_PART_SIDE_TOP)
+        return parts.top;
+
+    return parts.lateral;
 }
 
 // 混ざらないセルの片側(見立ての熱から。PlWholeSlot と同じ値: 熱容量の上限 = MrThermal の capacityLimit)
@@ -174,6 +232,14 @@ FX_FN PlPartSide TxWholePartSide(MrThermal thermal) {
     slot.pad = 0;
 
     return PlSingleSide(slot);
+}
+
+// セルの面 face の片側: 混ざったセルは部分の見立てから・混ざらないセルは見立ての熱から(HLSL の ?: は構造体を返せないので if で)
+FX_FN PlPartSide TxFacePartSide(TxCellParts parts, MrThermal thermal, uint32_t face) {
+    if (parts.mixed != 0)
+        return TxCellPartSide(parts, face);
+
+    return TxWholePartSide(thermal);
 }
 
 // --- 当てる段(伝導・混ざったセルのある世界のセル 1 つの 6 面。TxFlowCell と同じ 1 流す → 3 当てる → 5 帳簿 → 6 起こす)-------------
@@ -206,8 +272,7 @@ FX_FN bool TxFlowConductionCell(TxConduction kind, World world, uint32_t slot, M
         } else {
             const TxCellParts otherParts = world.Parts(neighbor.slot, neighbor.index);
             otherMixed = otherParts.mixed;
-            otherSide = otherMixed != 0 ? TxCellPartSide(otherParts, face ^ 1u)
-                                        : TxWholePartSide(world.View(neighbor.slot, neighbor.index).thermal);
+            otherSide = TxFacePartSide(otherParts, world.View(neighbor.slot, neighbor.index).thermal, face ^ 1u);
             if (neighbor.kind == MR_NEIGHBOR_COARSER) {
                 gap = neighbor.gap;
                 repeatShift = 2 * (side.shift - kind.SubcycleShift(world.Level(neighbor.slot)));
@@ -223,9 +288,8 @@ FX_FN bool TxFlowConductionCell(TxConduction kind, World world, uint32_t slot, M
         if (selfParts.mixed == 0 && otherMixed == 0)
             flow.total = TxSideFaceFlow(kind, world, side, neighbor);
         else
-            flow = TxPartFaceFlow(selfParts.mixed != 0 ? TxCellPartSide(selfParts, face)
-                                                       : TxWholePartSide(world.View(slot, index).thermal),
-                                  otherSide, conductionLevel, gap, repeatShift);
+            flow = TxPartFaceFlow(TxFacePartSide(selfParts, world.View(slot, index).thermal, face), otherSide,
+                                  conductionLevel, gap, repeatShift);
 
         // --- 3 当てる・5 帳簿(同じレベル・世界の端は自分の分だけ)---
         if (neighbor.kind == MR_NEIGHBOR_EDGE) {

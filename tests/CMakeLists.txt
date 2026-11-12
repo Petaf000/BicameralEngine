@@ -925,6 +925,14 @@ bicameral_add_gpu_test(gpu_phase_layer_test)  # 凝縮相と気体が混ざる�
 target_link_libraries(gpu_phase_layer_test PRIVATE bicameral_sim)
 bicameral_add_gpu_test_case(gpu_phase_layer gpu_phase_layer_test gpu --queue compute)
 bicameral_add_gpu_test_case(gpu_phase_layer_warp gpu_phase_layer_test warp --warp --queue compute)
+bicameral_add_gpu_test(gpu_field_gather_test)  # 集めて書く段の GPU と CPU の欄の頁の像のビット一致(T-1252 段 2)
+target_link_libraries(gpu_field_gather_test PRIVATE bicameral_sim)
+bicameral_add_gpu_test_case(gpu_field_gather gpu_field_gather_test gpu --queue compute)
+bicameral_add_gpu_test_case(gpu_field_gather_warp gpu_field_gather_test warp --warp --queue compute)
+bicameral_add_gpu_test(gpu_field_region_test)  # GPU の世界の欄の区画(u4 の層の置き場の後ろ)を写す・戻す・欄の無い世界はビット一致(T-1252 段 2)
+target_link_libraries(gpu_field_region_test PRIVATE bicameral_sim)
+bicameral_add_gpu_test_case(gpu_field_region gpu_field_region_test gpu --queue compute)
+bicameral_add_gpu_test_case(gpu_field_region_warp gpu_field_region_test warp --warp --queue compute)
 
 bicameral_add_gpu_test(gpu_tree_refine_placement_test)  # 木を細かくする段のセルの中身の置かれ方の GPU と CPU のビット一致(T-1188)
 target_link_libraries(gpu_tree_refine_placement_test PRIVATE bicameral_sim)
@@ -981,7 +989,7 @@ set_tests_properties(gpu_time_step_event PROPERTIES FIXTURES_REQUIRED time_step_
 bicameral_add_gpu_test_case(gpu_time_step_event_cost gpu_time_step_span_test gpu --queue compute --no-gbv --continuous
                             --spans ${CMAKE_CURRENT_BINARY_DIR}/time_step_events.bin)
 set_tests_properties(gpu_time_step_event_cost PROPERTIES FIXTURES_REQUIRED time_step_events)
-# 刻みを選ぶ段(窓・隣の差 1 段)の GPU 版と CPU のビット一致(T-1112)。入力と CPU の答えは time_step_tree_test の choose-dump が火事から書く
+# 刻みを選ぶ段(窓・隣の差 1 段・既定の境の面の扱い)の GPU 版と CPU のビット一致(T-1112・T-1273)。入力と CPU の答えは time_step_tree_test の choose-dump が火事から書く
 # (1 刻みずつと一気にで詰めた歩の記録が出来事ごとにビット一致も見る)。計測は job.py run -Preset release -Exe gpu_time_step_choose_test -- --choices <ファイル> --no-gbv --measure
 bicameral_add_gpu_test(gpu_time_step_choose_test)
 target_link_libraries(gpu_time_step_choose_test PRIVATE bicameral_sim)
@@ -990,12 +998,14 @@ set_tests_properties(time_step_choose_dump PROPERTIES TIMEOUT 900 FIXTURES_SETUP
 bicameral_add_gpu_test_case(gpu_time_step_choose gpu_time_step_choose_test gpu --queue compute --no-gbv
                             --choices ${CMAKE_CURRENT_BINARY_DIR}/time_step_choices.bin)
 set_tests_properties(gpu_time_step_choose PROPERTIES FIXTURES_REQUIRED time_step_choices)
-# 境の面の案 (c)(面の結びつきの数で隣の差 0 段。T-1271・ADR-0507。既定は None のまま)の表を持つ刻みを選ぶ段の GPU 版と CPU のビット一致
-add_test(NAME time_step_choose_dump_coupling COMMAND time_step_tree_test choose-dump shape=fine every=16 border=c0 dump=${CMAKE_CURRENT_BINARY_DIR}/time_step_choices_coupling.bin)
-set_tests_properties(time_step_choose_dump_coupling PROPERTIES TIMEOUT 900 FIXTURES_SETUP time_step_choices_coupling)
-bicameral_add_gpu_test_case(gpu_time_step_choose_coupling gpu_time_step_choose_test gpu --queue compute --no-gbv
-                            --choices ${CMAKE_CURRENT_BINARY_DIR}/time_step_choices_coupling.bin)
-set_tests_properties(gpu_time_step_choose_coupling PROPERTIES FIXTURES_REQUIRED time_step_choices_coupling)
+# 上の組は既定の境の面の扱い = 案 (c)(面の結びつきの数で隣の差 0 段の表を持つ。T-1271・ADR-0507・T-1273 で既定に)。
+# 前の既定 None(表を持たない・隣の差 1 段だけ)は border=none で選べるまま残すので、その道の GPU 版と CPU のビット一致も見る
+# (border=c0 の組は既定と同じ中身になったので、この None の組に置き換えた。T-1273)
+add_test(NAME time_step_choose_dump_none COMMAND time_step_tree_test choose-dump shape=fine every=16 border=none dump=${CMAKE_CURRENT_BINARY_DIR}/time_step_choices_none.bin)
+set_tests_properties(time_step_choose_dump_none PROPERTIES TIMEOUT 900 FIXTURES_SETUP time_step_choices_none)
+bicameral_add_gpu_test_case(gpu_time_step_choose_none gpu_time_step_choose_test gpu --queue compute --no-gbv
+                            --choices ${CMAKE_CURRENT_BINARY_DIR}/time_step_choices_none.bin)
+set_tests_properties(gpu_time_step_choose_none PROPERTIES FIXTURES_REQUIRED time_step_choices_none)
 # 同じ・池(静かな夜。結びつきの強い物で隣の差 0 段が効く)
 add_test(NAME time_step_choose_dump_coupling_night COMMAND time_step_tree_test choose-dump shape=fine scene=night every=16 border=c0 dump=${CMAKE_CURRENT_BINARY_DIR}/time_step_choices_coupling_night.bin)
 set_tests_properties(time_step_choose_dump_coupling_night PROPERTIES TIMEOUT 900 FIXTURES_SETUP time_step_choices_coupling_night)
@@ -1367,6 +1377,7 @@ foreach(_name IN ITEMS
     gpu_conduct_bench gpu_implicit_box_bench gpu_place_bench blank_world_test gpu_probe_blank_test gpu_probe_gas_test
     gpu_probe_liquid_test world_layout_test play_metric_test
     gpu_play_metric_test gpu_radiation_cost_test environment_package_test multires_graded_test placement_refine_test
-    tree_refine_placement_test gpu_phase_layer_test gpu_tree_refine_placement_test case_b_r3_test)
+    tree_refine_placement_test gpu_phase_layer_test gpu_tree_refine_placement_test case_b_r3_test gpu_field_gather_test
+    gpu_field_region_test)
   target_link_libraries(${_name} PRIVATE bicameral_test_reaction_table)
 endforeach()

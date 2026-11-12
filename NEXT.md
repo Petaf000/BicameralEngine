@@ -1,5 +1,20 @@
 # NEXT.md — 次にやること(上から順に)
 
+**2026-11-12 本体の作業役(27 回目・13:45 の巡目の 5 本目): t-1252-tree-gpu-2・t-1321-shell-mg-rules(T-1321 打ち切り)・t-1252-tree-gpu-3・t-1083-conductance-cost(文書だけ)を main へ(試験・push。結果は HANDOFF 27 回目)。**
+**次のチャットがまず入れるもの**: runner/ready に来た印を来た順に(wt2 t-1240-wide-layers-2 は multires_tree.hlsl の TreeSettle・CoarsenRequest で t-1252-tree-gpu-3 と衝突の見込み = 両方残す)。
+**作業中(各 wt)**: wt2 T-1240 の 7 の 5 の続き / wt4 T-1346 → T-1347 / wt5 T-1350(1 刻みを段ごとの Dispatch に)/ wt6 T-1252 段 2 の残り(畳む/広げる/集めて書く・通しの試験)→ T-1230 段 2 ③ の残り。T-1331 のコードは T-1349 案 2 / T-1350 待ち(T-1321 は打ち切り)。
+残る判断待ち: Q93 ②・Q157・Q148・T-1331 の【エンジン】(仮 = 移す)・T-1321 の根から出る【エンジン】の問い(仕上げの答えを変えるか・D-677。司令塔が作る)。次の番号は **D-696・ADR-0479・Q188**(本体)。
+
+**2026-11-12 本体の作業役(26 回目・13:45 の巡目の 4 本目): t-1320-shell-trim・t-1328-grid-emit-bits・t-1326-mixed-shear-2d・t-1252-tree-gpu(registry-owner-gpu を含む)・t-1323-grain-layers-born-gpu・t-1324-coarsen-layer-round-up を main へ(試験・push。結果は HANDOFF 26 回目)。**
+**次のチャットがまず入れるもの**: wt6 t-1252-tree-gpu-2 76786922(GPU の世界の欄の区画・印の試験は HANDOFF 26 回目)→ 作業中に来た印。
+**作業中(各 wt。runner/assign-2026-11-12.md の 13:45 の巡目)**: wt2 T-1324 の後の続き / wt3 T-1321(研究・① 赤黒の上限の件も)/ wt4 T-1083 → T-1084 / wt5 T-1350(1 刻みを段ごとの Dispatch に)/ wt6 T-1252 段 2 の残り → T-1230 段 2 ③ の残り。T-1331 のコードは T-1321 待ち。
+残る判断待ち: Q93 ②・Q157・Q148・T-1331 の【エンジン】(止まった燃える物の層を地面に固定した格子へ帳簿で移すか・仮 = 移す)。次の番号は **D-696・ADR-0479・Q188**(本体)。
+
+**2026-11-12 本体の作業役(25 回目・claude/50 の再開): t-1322(t-1338 を含む)・t-1325・t-1230-gpu-parts・t-1337・t-1273 を main へ(試験・push。結果は HANDOFF 25 回目)。**
+**次のチャットがまず入れるもの(runner/ready・来た順・どれも既定の切り替えではない)**: t-1320-shell-trim(wt5)→ t-1252-registry-owner-gpu(wt6)→ t-1328-grid-emit-bits(wt4・文書だけ)→ t-1326-mixed-shear-2d(wt3)→ t-1252-tree-gpu(wt6・registry-owner-gpu を含む)→ t-1323-grain-layers-born-gpu(wt2)。
+**作業中(各 wt。runner/assign-2026-11-12.md の 13:45 の巡目)**: wt2 T-1323 → T-1324 / wt3 T-1326 → T-1321 / wt4 T-1328 → time_step_tree の延びの測り / wt5 T-1331(段 2)/ wt6 T-1252 段 2 → T-1230 段 2 ③ の残り。
+残る判断待ち: Q93 ②・Q157・Q148。次の番号は **D-696・ADR-0479・Q188**(本体)。
+
 **2026-11-12 本体の作業役(24 回目・この司令塔のチャットの締め): t-1305・t-1230-implicit-parts・t-1230-implicit-gpu・t-1228-rc-sources・t-1314・t-1320-shell-scale・t-1332・t-1295 を main へ(試験・push。結果は HANDOFF 24 回目)。**
 **次のチャットがまず入れるもの(runner/ready・来た順・既定の切り替えなので 1 本ずつ・その都度試験)**: t-1338-grain-layers-default(wt2)→ t-1337-coarse-sweeps-2(wt4)→ t-1322-grain-layers-born(wt2・t-1338 を含む = 代わりにこれ 1 本でよい)→ t-1273-step-gap-default(wt4・t-1337 を含む)→ t-1325-face-cut-3d(wt3・t-1295 の上)→ t-1230-gpu-parts(wt6・段 2 ③ の 1 段目・implicit-gpu の上)。既定の切り替え(t-1338・t-1337・t-1273)は 1 本ずつ。
 **作業中(各 wt。claude/49 の引き継ぎを見よ)**: wt2 t-1240-wide-layers-2 / wt3 T-1325 → T-1321 / wt4 T-1273・T-1328 / wt5 t-1320-shell-trim(段 1)/ wt6 T-1230 段 2 ③ GPU。

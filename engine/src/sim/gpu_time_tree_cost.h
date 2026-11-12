@@ -36,6 +36,8 @@ namespace bicameral::sim {
         uint32_t heatBatchSolves = 512;
         uint32_t maxHeatBatches = 64;
         uint32_t rounds = 8;  // 6 つの時間を測る回(最小を採る)
+        // V の最も粗い段の掃き出しの回数(時間を飛ばす試作と同じ。Q180・T-1337)
+        uint32_t coarsestSweeps = TimeTreeSetup{}.coarsestSweeps;
         // 刻みを選ぶ段を測る箱の木の辺(単位 = セル。16 = 4,096 単位 = 1 区画・32 = 32,768 単位 = 8 区画)。0 = 測らない(既定の値のまま)
         uint32_t chooseSmallSide = 16;
         uint32_t chooseLargeSide = 32;

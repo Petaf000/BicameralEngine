@@ -1,6 +1,48 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-11-12(本体の作業役 24 回目・claude/48 の再開の巡目の締め。前は 23 回目)
+最終更新: 2026-11-12(本体の作業役 27 回目・claude/50 の再開の巡目。前は 26 回目)
+
+## この仕事でしたこと(2026-11-12・本体の作業役・27 回目: runner/ready の印 4 本のマージ・試験・push・gpu_object_shell_flow を main で)
+- **入れた(--no-ff・来た順・どれも既定の切り替えではない・衝突なし)**: wt6 t-1252-tree-gpu-2 76786922(6424e26d・push 済み)/ wt3 t-1321-shell-mg-rules f7cbdd90(d784c9f7・push 済み。T-1321 研究の打ち切り = 今の規則のまま・調べる口だけ・既定 0)/
+  wt6 t-1252-tree-gpu-3 2562770e(GPU の木の段が欄の区画を読み書き・ADR-0532 の 6)/ wt4 t-1083-conductance-cost 975e7d81(文書だけ。T-1083・T-1084 Done 仮)。
+- **試験(release・警告 0・RTX 3070 Ti)**: tree-gpu-2 の後 = CPU 11 本(field_owner・field_storage・multires・multires_layers・tree_refine_placement・float_check 系 5・dxil_alloca_check)+ GPU 11 本(gpu_field_region〔HW・WARP〕・gpu_multires・gpu_multires_layers〔HW・WARP〕・gpu_lab_box・gpu_field_gather〔HW・WARP〕・gpu_tree_refine_placement〔HW・WARP〕・gpu_object_shell_flow〔HW。T-1320 段 1 が入った main で 1 回 = 割り当ての 2〕)合格・archmap --check OK /
+  t-1321 の後 = object_shell(1028 秒)・float_check 系 5・dxil_alloca_check・gpu_object_shell_flow(HW 120 秒)合格 / tree-gpu-3 + t-1083 の後 = CPU 9 本(field_owner・tree_refine_placement・multires_layers・float_check 系 5・dxil_alloca_check)+ GPU 8 本(gpu_multires・gpu_multires_layers〔HW・WARP〕・gpu_lab_box・gpu_field_region〔HW・WARP〕・gpu_tree_refine_placement〔HW・WARP〕)合格・archmap --check OK。
+- **記録**: ROADMAP(T-1252 段 2 の 3 本目・4 本目・T-1321 Done = 打ち切り・T-1083・T-1084 Done・T-1346 / T-1347 の行〔wt4 が作業中〕)・ADR-0454 の 4(割り算は 128bit ÷ 64bit 最大 4 回 + 整数の平方根。「1〜2 回」は数え違い)・NEXT。印 4 本を done/ へ。
+- **司令塔へ(T-1321 の根)**: 物の殻の流れで収まるまでの赤黒は多重格子の誤差ではなく、整数の式の動かない点へ寄せる仕上げで決まる(箱の差し渡しで増える = T-1349 の上限 1024 と同じ根)。残る道は T-1349 案 2 + T-1350(段ごとの Dispatch)か、仕上げの答えを変える設計の変更(D-677 に触れる → 【エンジン】の問いは司令塔が作る。T-1321 のチケット)。
+- **流していない**: gpu_object_shell_flow_warp(wt5 の T-1350 の後)・gpu_field_gather 以外の WARP の重い組・support_fracture_* 6 本(巡目の約束)。
+- **気を付けること(次の本体)**: wt2 の t-1240-wide-layers-2 は multires_tree.hlsl の TreeSettle・CoarsenRequest の数行で t-1252-tree-gpu-3 と文字で衝突する見込み(両方残す)。
+- 次の番号は **D-696・ADR-0479・Q188**(本体)。
+
+## この仕事でしたこと(2026-11-12・本体の作業役・26 回目: runner/ready の印 6 本〔registry-owner-gpu は tree-gpu に含めて〕+ t-1324 のマージ・試験・push)
+- **入れた(--no-ff・来た順・どれも既定の切り替えではない = まとめて 1 回のビルドと試験)**: wt5 t-1320-shell-trim 364c2091(9b374214。perf.md の末尾の衝突は両方残した)/ wt4 t-1328-grid-emit-bits c0649ffa(文書だけ)/
+  wt3 t-1326-mixed-shear-2d e4bdc8e4 / wt6 t-1252-tree-gpu 267c46c1(t-1252-registry-owner-gpu を含む。その印は「t-1252-tree-gpu に含めて入れた」)/ wt2 t-1323-grain-layers-born-gpu 7ab60f93(50a6cad6。perf.md の末尾と shaders/CMakeLists.txt の T-1252 段 2・T-1323 のシェーダーの行の衝突は両方残した)/
+  wt2 t-1324-coarsen-layer-round-up e6d20ffb(司令塔の便りで足した。起点はまだ push していなかった 50a6cad6)。
+- **試験(release・警告 0・RTX 3070 Ti)**: CPU 28 本全部合格(object_shell・phase_layer_world・warm_start_save・support_law・support_3d・support_3d_mixed・support_mixed・support_mixed_pair_none・support_fracture_refine・support_cost〔t-1326 の後〕・multires・multires_state・field_storage・field_owner・placement_refine・tree_refine_placement・multires_sparse・multires_layers・multires_activity・multires_uniform・float_check 系 5・dxil_alloca_check・window_lab。t-1324 の後に multires_layers・world_layout・tree_refine_placement をもう 1 回)/ GPU 7 本全部合格(t-1324 の後の main で gpu_multires・gpu_multires_layers〔HW・WARP〕・gpu_lab_box・gpu_field_gather〔HW・WARP〕・gpu_tree_refine_placement)。main で流していない GPU: gpu_multires_uniform・gpu_tree_refine_placement_warp(wt2 が合格)・gpu_equilibrium_block HW/WARP(wt3 が同じコードで合格)・gpu_object_shell_flow(_warp)(wt5 が合格)。
+- **司令塔の受け取り(記録)**: ① ADR-0532 の 3 = CPU の配り手の欄の疎な頁を取る/返す順を、集めて書く段の形(要求の順に取る AllocateOwnerPages・要求の順に返す ReleaseAll)に揃えた。土台の共通部分の変更として受け取り(新しい口は足さない・値とハッシュは不変・変わるのは頁の番号と空きの並びだけ = 作り手から見た違いなし)。
+  ② 欄の置き場を結ぶ口は u5 ではなく u4 の層の置き場の後ろ(g_external2 = 始まりの語。wt2 の T-1323 が u5 に刻む前の写しを結ぶため・仮)。③ T-1328 は揺れで閉じた(コードは変えない)。time_step_tree は T-1273 の後 887 秒で延びていない(重なりと見た)ので新しいチケットに分けない。
+  ④ T-1349 の振り分け(仮): 赤黒が上限 1024 回で止まる件(層を作った直後の立ち上がり・答えが上限に依る = D-428 に触れる)は T-1321(箱の大きさによらない回数で縮む多重格子)へ・12 万ボクセルで止まる件(1 刻み 1 Dispatch が TDR に当たる)は T-1350(wt5)へ。
+- **記録**: ROADMAP(T-1320 段 1 済み・T-1331 Doing〔コードは T-1321 待ち〕・T-1349〔切り分け Done・直しは T-1321 / T-1350〕と T-1350 の行を足した・T-1328・T-1326・T-1323・T-1324 Done・T-1252 段 2 の 1〜2 段目・T-1083 / T-1084 は wt4 が作業中)・NEXT。印 6 本を done/ へ。
+- **入れていない印(次の本体へ)**: wt6 t-1252-tree-gpu-2 76786922(起点 50a6cad6・t-1252-tree-gpu の上・GPU の世界の欄の区画 = ADR-0532 の 5・g_external2/3)。GPU の順番待ちが 40 分になり 2 時間を超えるので入れていない。入れたら印の試験(gpu_field_region〔HW・WARP〕・gpu_multires・gpu_multires_layers〔HW・WARP〕・gpu_lab_box・field_owner・dxil_alloca_check・gpu_tree_refine_placement〔HW・WARP〕・gpu_field_gather)。t-1324 と gpu_multires の層の置き場で重なる(gpu_multires.{h,cpp}・tests/CMakeLists.txt)。
+- **流していない**: gpu_object_shell_flow_warp(wt5 が同じコードで 498 秒合格)・time_step_* 系(今回のブランチは触っていない)・support_fracture_* 6 本(巡目の約束)。
+- **運転メモ**: CPU 26 本は 1719 秒(ほかの作業ツリーと重なって support_mixed 系が 256〜297 秒)。window_lab は GPU の組として別に順番待ちで流れる。GPU の順番待ちが 2399 秒(wt5 の gpu_object_shell_flow_warp の後ろに全作業ツリーが並んだ)。
+- 次の番号は **D-696・ADR-0479・Q188**(本体)。
+
+## この仕事でしたこと(2026-11-12・本体の作業役・25 回目: runner/ready の印 6 本〔t-1338 は t-1322 に含めて〕のマージ・試験・push)
+- ★ claude/50 の反映は 41632264(D-694 = T-1320 の予算〔燃える物 1000 個で層の流れ 10 ms/刻み 以下〕で確定・D-695 = Q187 を閉じた〔支えは今は 2 次元のまま・T-1339 の時に 3 次元へ〕)。
+- **入れた(push 済み e76e02a1)**: t-1322-grain-layers-born c707f3a7(t-1338 を含む → bc039a14・T-1322 のチケットに司令塔の受け取りを写した 457b4789)/ t-1325-face-cut-3d 463cb02a(bfcd5dc4)/ t-1230-gpu-parts 72556152(e76e02a1)。
+  試験(release 警告 0・RTX 3070 Ti): CPU 26 本(multires 系 5・world_layout・environment_package・phase_layer 系 5・placement_refine・tree_refine_placement・multires_implicit・support_law・support_3d・support_3d_mixed・support_mixed・support_cost・float_check 系 5・dxil_alloca_check)/
+  GPU 7 本(gpu_multires_layers〔HW・WARP〕・gpu_tree_refine_placement〔HW・WARP〕・gpu_lab_box・gpu_phase_layer〔HW・WARP〕)全部合格。印 4 本(t-1338 は t-1322 に含めた)を done/ へ。
+- **既定の切り替え 2 本(1 本ずつ・その都度試験)**: t-1337-coarse-sweeps-2 6c6bf0d4(bdbdbdfc。perf.md の末尾の衝突は両方残した)→ release 警告 0・CPU time_step_span_dump・time_step_event_merge・time_step_choose_dump 系 6 +
+  GPU gpu_time_step_span・gpu_time_step_event・gpu_time_step_choose 系 6(固定の CPU の dump も一緒に流れる = 16 本)合格 → t-1273-step-gap-default 3029d7d4(d8b36685。perf.md の衝突は main の版を残した)→
+  release 警告 0・同じ組(choose は _none の組に置き換わった 16 本)+ CPU time_step_tree 合格 → push。印 2 本を done/ へ。time_step_tree は t-1337 の時は流していない(t-1273 の後で 1 回)。
+- **チケットの 2 枚**: T-1337・T-1273 は本体の版(ROADMAP が指す名前)と作業役の版の 2 枚になっていた → 作業役の中身を本体の名前へまとめ、作業役の名前のファイルを消した(f56dab43)。
+- **記録**: ROADMAP(T-1338・T-1322・T-1337・T-1273・T-1325 Done・T-1230 段 2 ③ の 1 段目・新しい行 T-1322・T-1323・T-1324・T-1112 の古い行を Done に〔司令塔の追記〕)・NEXT。
+- **入れていない印(runner/ready・来た順・次の本体へ)**: t-1320-shell-trim(wt5 364c2091・T-1320 段 1・試験の結果は変えない削り)→ t-1252-registry-owner-gpu(wt6 3a3dbf94)→ t-1328-grid-emit-bits(wt4 39c483eb・文書だけ = T-1328 は揺れ・コードは変えない・Done 仮)→
+  t-1326-mixed-shear-2d(wt3 e4bdc8e4・面の力の読みだけ・ハッシュ同じ)→ t-1252-tree-gpu(wt6 267c46c1・t-1252-registry-owner-gpu を含む = 代わりにこれ 1 本でよい)→ t-1323-grain-layers-born-gpu(wt2・後から来た・印を読む)。どれも既定の切り替えではない(印の自己申告)のでまとめて 1 回のビルドと試験でよい。
+  気を付けること: docs/perf.md の末尾(t-1320・t-1328 = 両方残す)・t-1328 は perf.md の 2026-11-12 の T-1228 の行に触る(印を読む)・t-1252-tree-gpu の ADR-0532 の 3 は司令塔の受け取り済み(15:10)。
+- **運転メモ**: gpu_time_step_* を -Filter で選ぶと ctest が固定の CPU の dump(time_step_choose_dump_*・fire_4 は約 250 秒)も一緒に流す(CPU だけを先に流すと二重になる)。入れ物の再起動で 1 度止まった(14:55)。
+  device_bash の 1 回で git add と commit を続けて投げると add が投入されないことがあった(1 つずつ投げる)。
+- 次の番号は **D-696・ADR-0479・Q188**(本体)。
 
 ## この仕事でしたこと(2026-11-12・本体の作業役・24 回目: runner/ready の印 8 本のマージ・試験・push。入れ物の再起動の後、司令塔がこのチャットを締めた)
 - **マージ(--no-ff・来た順・既定を変えないものだけをまとめて 1 回のビルドと試験)**: wt2 t-1305-layer-request-cost e7a1de9a / wt6 t-1230-implicit-parts 72f39825 → t-1230-implicit-gpu bdfc31d5(★8)/

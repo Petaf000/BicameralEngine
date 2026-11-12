@@ -816,7 +816,7 @@ namespace bicameral::sim {
                               ordered.worldLayout.retiredCategories.end());  // 読まない分類(D-510。T-0724)
 
         // 層を書かなかった粒の知らせは、層を使う世界(environment.cell_layers)だけ警告に(使わない世界では層は舞う粒を分けない。T-1241)。
-        // 読み方が「全部が層」(UnwrittenGrainLayers::Settled)なら知らせは作られないので、どちらの読み方でもここは同じ
+        // 今の読み方「全部が層」(UnwrittenGrainLayers::Settled。T-1338)では知らせは作られず、ここは何も足さない((a) に戻した時の道)
         if (baked.environment.cellLayers)
             baked.warnings.insert(baked.warnings.end(), baked.worldLayout.unsettledGrainNotes.begin(),
                                   baked.worldLayout.unsettledGrainNotes.end());

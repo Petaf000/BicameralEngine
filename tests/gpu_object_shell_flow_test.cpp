@@ -25,7 +25,9 @@
 //         1 つの Dispatch の形と同じハッシュになるかも足した。--large-box: 紙 96 × 48・層 8 段(121,856 ボクセル)を 0 から決まった 1,024 回(上限)で
 //         2 刻み回して CPU とビット一致・一番長い Dispatch の時間を出す(HW だけ。WARP では数時間かかる)。
 //         --split auto|whole|split(測りの形を決める)・--split-sweeps N(分けた形の 1 つの Dispatch の赤黒の回数)。
-// 引数は gpu_test_options.h と --measure / --measure-only / --profile / --scale / --grow / --large-box / --threads N / --sweeps N / --rule N / --split / --split-sweeps。
+//   --mg-extra N(T-1321 の調べ。研究): 多重格子の規則(4 の bit)で、② の後に V 字を N 回重ねる(CPU の pressureMultigridCycles = 2 + N・
+//         GPU の g_pressureMode の 8〜11 bit)。比べと測りの両方に効く。既定 0 = 今の規則。
+// 引数は gpu_test_options.h と --measure / --measure-only / --profile / --scale / --grow / --large-box / --threads N / --sweeps N / --rule N / --mg-extra N / --split / --split-only / --split-sweeps。
 #include <cstdlib>
 #include <cstring>
 #include <optional>
@@ -375,6 +377,10 @@ namespace {
         uint32_t dispatchesPerTick = 0;
     };
 
+    // 重ねる V 字の数の置き場(g_pressureMode の 8〜11 bit。shaders の OH_PRESSURE_MG_EXTRA_*。T-1321)
+    constexpr uint32_t MG_EXTRA_SHIFT = 8;
+    constexpr uint32_t MG_EXTRA_MASK = 15;
+
     // 1 刻みを段ごとの Dispatch に分けるか。自動 = 1 つの Dispatch の形で、一番大きい箱が上限まで回すと GROUP_VOXEL_SWEEPS を超える時
     bool UsesSplit(const Gpu& gpuState) {
         if (gpuState.split != SplitMode::Auto)
@@ -403,6 +409,7 @@ namespace {
         flow.pressureUntilQuiet = (rule.mode & 1u) != 0;
         flow.pressureWarmStart = (rule.mode & 2u) != 0;
         flow.pressureMultigrid = (rule.mode & 4u) != 0;
+        flow.pressureMultigridCycles = 2 + ((rule.mode >> MG_EXTRA_SHIFT) & MG_EXTRA_MASK);
     }
 
     size_t StatsCount(size_t objects) {
@@ -701,8 +708,9 @@ namespace {
         const sim::BakedReactionTable& table;
         const test::OhTables& tables;
         const test::OhCpuTable& shared;
-        uint32_t measureSweeps;  // 測る時の「0 から決まった回数」の回数(切り分け。比べは 24 のまま)
-        std::string shader;      // シェーダー(--threads で変える。T-1223)
+        uint32_t measureSweeps;             // 測る時の「0 から決まった回数」の回数(切り分け。比べは 24 のまま)
+        std::string shader;                 // シェーダー(--threads で変える。T-1223)
+        uint32_t multigridExtraCycles = 0;  // --mg-extra N(T-1321。多重格子の規則で ② の後に重ねる V 字の数)
 
         // --- 測りの刻みの数(--grow-ticks。T-1349 の切り分け)---
         uint32_t warmTicks = WARM_TICKS;
@@ -716,6 +724,16 @@ namespace {
 
     const char* SplitName(const Gpu& gpuState) {
         return UsesSplit(gpuState) ? "段ごとの Dispatch" : "1 つの Dispatch";
+    }
+
+    // 多重格子の規則なら、重ねる V 字の数(--mg-extra)を mode に足す(T-1321。ほかの規則はそのまま)
+    PressureRule WithExtraCycles(const Context& context, const PressureRule& rule) {
+        if ((rule.mode & 4u) == 0 || context.multigridExtraCycles == 0)
+            return rule;
+
+        return {.name = rule.name,
+                .sweeps = rule.sweeps,
+                .mode = rule.mode | ((context.multigridExtraCycles & MG_EXTRA_MASK) << MG_EXTRA_SHIFT)};
     }
 
     // GPU の真実(ボクセル・セル・対の端数・面の運動量)のハッシュ(FNV-1a。回ごとに変わらないかを見る。T-1332)
@@ -754,7 +772,8 @@ namespace {
 
     // CPU と GPU を同じ場面から回して比べる。戻り値 = 最後の GPU の真実のハッシュ
     std::expected<uint64_t, std::string> RunCompare(const Context& context, const Shape& shape, bool sharedPotential,
-                                                    const PressureRule& rule, const CompareScene& scene = {}) {
+                                                    const PressureRule& baseRule, const CompareScene& scene = {}) {
+        const PressureRule rule = WithExtraCycles(context, baseRule);
         std::vector<test::OhWorld> variants;
         for (const int32_t shellMk : {HOT_SHELL_MK, 1200000, 1800000}) {
             auto one = MakePaper(context.table, context.shared, context.tables.gases, shape, shellMk);
@@ -927,8 +946,9 @@ namespace {
 
     // 戻り値 = 1 刻みの平均の GPU の ms。stageMask を全部でなくすると暖機の後だけ段を外す(結果は変わるので数え上げは見ない・書き出さない)
     std::expected<double, std::string> Measure(const Context& context, const Shape& shape, uint32_t copies,
-                                               bool sharedPotential, const PressureRule& rule,
+                                               bool sharedPotential, const PressureRule& baseRule,
                                                uint32_t stageMask = ALL_STAGES, uint32_t objectsPerCell = 1) {
+        const PressureRule rule = WithExtraCycles(context, baseRule);
         const auto one = MakePaper(context.table, context.shared, context.tables.gases, shape);
         if (!one)
             return std::unexpected("層を作れない");
@@ -1218,6 +1238,7 @@ namespace {
             false;  // --split-only: 比べを紙 24 列・層 2 段の 1 つの Dispatch と分けた形だけに(T-1350 の確かめ)
         SplitMode split = SplitMode::Auto;
         uint32_t splitSweeps = 0;
+        uint32_t multigridExtraCycles = 0;
         for (size_t i = 0; i < arguments.size(); ++i) {
             char* argument = arguments[i];
             const std::string_view text = argument;
@@ -1225,6 +1246,8 @@ namespace {
                 measureSweeps = static_cast<uint32_t>(std::strtoul(arguments[++i], nullptr, 10));
             } else if (text == "--rule" && i + 1 < arguments.size()) {
                 onlyRule = static_cast<int32_t>(std::strtol(arguments[++i], nullptr, 10));
+            } else if (text == "--mg-extra" && i + 1 < arguments.size()) {
+                multigridExtraCycles = static_cast<uint32_t>(std::strtoul(arguments[++i], nullptr, 10)) & MG_EXTRA_MASK;
             } else if (text == "--threads" && i + 1 < arguments.size()) {
                 threads = static_cast<uint32_t>(std::strtoul(arguments[++i], nullptr, 10));
             } else if (text == "--profile") {
@@ -1295,11 +1318,16 @@ namespace {
                               .measureSweeps = measureSweeps,
                               .shader = threads == 1024 ? std::string("sim/object_shell_flow.cso")
                                                         : std::format("sim/object_shell_flow_t{}.cso", threads),
+                              .multigridExtraCycles = multigridExtraCycles,
                               .warmTicks = warmTicks,
                               .measureTicks = measureTicks,
                               .split = split,
                               .splitSweeps = splitSweeps,
                               .warp = options->adapter == gpu::AdapterKind::Warp};
+        if (multigridExtraCycles != 0)
+            Log(Channel::Gpu, Level::Info, "多重格子の規則: ② の後に V 字を {} 回重ねる(V 字 {} 回。T-1321 の調べ)",
+                multigridExtraCycles, 2 + multigridExtraCycles);
+
         if (compare) {
             const std::array<Shape, 2> shapes = {Shape{"紙 24 列・層 2 段", 24, 3, 2},
                                                  Shape{"紙 24 列・層 4 段", 24, 3, 4}};

@@ -6,6 +6,7 @@
 // 書く前の成分と物質で結んで 層 = min(前の層, 新しい量) に付け替える(増えた分は残りへ)。層を書くのは StorePageCellWithLayers だけ。
 // 2 段目(T-1220。ADR-0489): 一様の枠の層(物質と層の組。読む時に今の一様の値と物質で結ぶ)・溢れの成分の層(付け替えは multires_wide_cell.cpp)・
 // 頁に広げる時に写す(FillPageFromUniform)・眠る判定の舞う粒(HasFloatingGrain)・要約と検査。
+// 層を使う世界の反応(T-1322。ADR-0489 の 3 (B)): 反応で増えた粒は層に足す(GrowGrainLayers。刻みの反応を書く所が呼ぶ)。
 #include <algorithm>
 
 #include "sim/multires_nest.h"
@@ -364,6 +365,66 @@ namespace bicameral::sim {
             }
 
             return false;
+        }
+
+        std::optional<std::vector<uint64_t>> GrowGrainLayers(const MultiresNest& nest, const RxWideCell& before,
+                                                             std::span<const uint64_t> layers,
+                                                             const RxWideCell& after) {
+            FX_ASSERT(nest.cellLayers.enabled && layers.size() == before.speciesCount);
+            const std::vector<uint8_t>& grain = nest.cellLayers.grain;
+            std::vector<uint64_t> bound(after.speciesCount, 0);
+            bool grew = false;
+            for (uint32_t i = 0; i < after.speciesCount; ++i) {
+                // --- 前のセルの同じ物質の量と層(無ければ 0)---
+                uint64_t amountBefore = 0;
+                uint64_t layerBefore = 0;
+                for (uint32_t j = 0; j < before.speciesCount; ++j) {
+                    if (before.species[j] != after.species[i])
+                        continue;
+
+                    amountBefore = before.amounts[j];
+                    layerBefore = layers[j];
+                }
+
+                // --- 増えた粒は層へ(前の層 ≤ 前の量なので 層 ≤ 量)。減った分は舞う側から先に ---
+                const bool isGrain = after.species[i] < grain.size() && grain[after.species[i]] != 0;
+                if (isGrain && after.amounts[i] > amountBefore) {
+                    bound[i] = layerBefore + (after.amounts[i] - amountBefore);
+                    grew = true;
+                } else {
+                    bound[i] = std::min(layerBefore, after.amounts[i]);
+                }
+            }
+
+            if (!grew)
+                return std::nullopt;
+
+            return bound;
+        }
+
+        MrCellLayers SettledGrainLayers(const MultiresNest& nest, const RxCell& cell) {
+            const std::vector<uint8_t>& grain = nest.cellLayers.grain;
+            MrCellLayers layers;
+            for (uint32_t i = 0; i < cell.speciesCount; ++i) {
+                if (cell.species[i] < grain.size() && grain[cell.species[i]] != 0)
+                    layers.amounts[i] = cell.amounts[i];
+            }
+
+            return layers;
+        }
+
+        bool StoreGrownGrainCell(MultiresNest& nest, uint32_t page, uint32_t index, const RxWideCell& after) {
+            if (!nest.cellLayers.enabled)
+                return false;
+
+            const RxWideCell before = LoadWidePageCell(nest, page, index);
+            const std::vector<uint64_t> layers = LoadWidePageCellLayers(nest, page, index);
+            const std::optional<std::vector<uint64_t>> grown = GrowGrainLayers(nest, before, layers, after);
+            if (!grown)
+                return false;
+
+            StoreWidePageCellWithLayers(nest, page, index, after, *grown);
+            return true;
         }
 
         uint64_t HashUniformLayers(uint64_t hash, const MultiresNest& nest, uint32_t slot, uint64_t address) {
