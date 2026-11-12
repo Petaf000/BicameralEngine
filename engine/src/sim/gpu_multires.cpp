@@ -1088,6 +1088,19 @@ namespace bicameral::sim {
             return false;
         }
 
+        // 木の段がまだ配れない配り手の欄(保存量 = 粗くする余りの帳簿・相の層 = セルを読む配り。T-1252 の残り・T-1231)は写さない(D-428)
+        for (const MultiresField& field : nest.fields) {
+            if (!GpuCarriesField(field) || !SfOwned(field.desc))
+                continue;
+
+            if (SfConserved(field.desc) || (field.desc.owner == state_field::SF_OWNER_PHASE_LAYER && !nest.wideCells)) {
+                Log(Channel::Gpu, Level::Error,
+                    "配り手の欄 {} は GPU の木の段がまだ配れない(保存量の余りの帳簿・相の層の配り。T-1252・T-1231)",
+                    field.name);
+                return false;
+            }
+        }
+
         std::vector<uint32_t> fieldWords;
         if (m_fieldPages > 0) {
             if (GpuCarriedFieldValues(nest) > m_fieldValues) {
@@ -1409,6 +1422,10 @@ namespace bicameral::sim {
                                   .levelsLeft = levelCount,
                                   .kind = MR_BLOCK_SHADOW,
                                   .depth = 0};
+        if (m_fieldCount >
+            0)  // 影の鎖は欄の区画を読まない(T-1252 の残り)。載せる欄のある世界では配り手の欄が CPU と変わる
+            Log(Channel::Gpu, Level::Error, "影の鎖は配り手の欄をまだ配らない(T-1252 段 2 の残り)");
+
         const ExternalBinding saved = BindLayers();  // 影の子の頁へ層を写す(T-1240)
         DispatchGraph(list, debugRing, EntryRefine, &record, sizeof(record));
         RestoreExternal(saved);
