@@ -1,6 +1,6 @@
 # T-1231 層のエネルギーを細かく/粗くする(T-1176 の熱容量の重みを部分ごとに。T-1211 から分けた)
 
-- Status: Todo(2026-10-29 wt4 が T-1211 から分けた。**T-1188〔Done〕・T-1230 の後。GPU は T-1252 段 2 の後**。形は ADR-0500 改訂の決定 1〔相の層の配り手〕)
+- Status: In Review(2026-11-13 wt6: GPU の木の段まで入った〔ブランチ t-1231-phase-layer-gpu・ADR-0537〕。司令塔の受け取り待ち = ADR-0537 の 1 の頁の取り方。前: 2026-10-29 wt4 が T-1211 から分けた。**T-1188〔Done〕・T-1230 の後。GPU は T-1252 段 2 の後**。形は ADR-0500 改訂の決定 1〔相の層の配り手〕)
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1〜2 回分
@@ -19,3 +19,15 @@
 ## 作業ログ
 - 2026-10-29 wt4: T-1211 から分けて作った。
 - 2026-10-30 wt6: CPU の配り(細かく = D-674 を部分ごとに 2 回・粗く = Σ 子の凝縮相 ÷ 8 の床)を T-1230 段 1 と 1 本で入れた(ブランチ t-1230-ec-field・ADR-0512 の 1・試験 phase_layer_tree)。残りは GPU(T-1252 段 2 の後)。
+- 2026-11-13 wt6(T-1252 段 2 の 8 本目): GPU の木の段に載せた(ADR-0537)。細かく = 置かれ方の後・親を覆う前にバリア 1 つ・t < 64 が子 8 つを j ごとに読み直して子のエネルギーと Ec /
+  粗く = 同じスレッドの result.cell から親の Ec / 溢れの世界は一般の配りのまま / RecordUpload は断らない。試験 gpu_field_region の 12(結果は下)。
+  **見つけたずれと直し(仮・司令塔の受け取り待ち)**: CPU は相の層の配りの最中に StorePage の EnsurePage で欄の頁を作っていた(凝縮相だけの子と気体だけの子
+  〔Ec 0・欄の頁なし〕を粗くすると混ざった親の Ec ≠ 0。満ちたセルを置かれ方で配ると混ざった子)。GPU は並べて走るので同じ番号で取れない →
+  相の層の欄だけ割り当ての段で控えめに取る規則に(CPU の AllocateOwnerPages・CoarsenNeedsOwnerPage と GPU の CarriedOwnerNeed を同じに。値・要約は変わらない。
+  増えるのは全部 0 の頁だけ)。土台の共通部分(欄の頁の取り方)の規則の変更なので印: 司令塔が受け取るか、割り当ての段がセルを読む案(退けた案)にするかを決める。
+  共通の述語(SfOwnerReadsCells のような配り手の性質)にするなら登録の側 = 司令塔へ。今は 2 か所で owner == SF_OWNER_PHASE_LAYER。
+  試験(release・警告 0・2026-11-13): CPU 31 本(phase_layer 系 6・field_owner・multires 系 20・tree_refine_placement・float_check 4・dxil_alloca_check)合格。
+  GPU: gpu_field_region(12 を含む)・_warp・gpu_field_gather・_warp・gpu_phase_layer・_warp・欄の無い世界の組 gpu_multires・_warp・gpu_multires_layers・_warp・gpu_lab_box 合格
+  gpu_tree_refine_placement・_warp も合格(GPU 13 本)。archmap --check OK。既定の答え・ハッシュは変えていない(相の層の欄の無い世界は分岐に入らない)。
+  完了条件の残り: 混ざったセルの無い木が今とビット一致 = 欄の無い世界の組で確かめた。PlRemixCondensedEnergy で直す所(完了条件 2 の後半)は反応の段の話で木の段には無い(CPU も木の段では呼ばない)。
+
