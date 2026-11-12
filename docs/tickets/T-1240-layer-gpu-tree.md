@@ -1,6 +1,6 @@
 # T-1240 GPU の層: 要求の処理(細かくする・粗くする・畳む・広げる)・一様の枠の層・溢れの成分の層
 
-- Status: Doing(7 の 4 まで済み。残りは溢れの世界〔7 の 5〕。T-1221 から分けた)
+- Status: Done(2026-11-12 wt2。7 の 5 まで。残りは T-1340〔溢れの世界で粒を生む表の層〕・T-1341〔溢れの世界の 9 段の鎖の食い違い〕に分けた。番号は仮)
 - 種類: 工学
 - PC: 必須(GPU)
 - 見積もり: チャット 2 回分(要求の処理 / 一様の枠と溢れ)
@@ -17,8 +17,8 @@ T-1221 の 1 段目は、層の頁を GPU に置き、刻みの段の後に層�
 - [x] 細かくする(子は親と同じ層 / 置かれ方で配る時は層を沈む側。T-1176・T-1188 の GPU の配りに乗せる)・粗くする(成分ごとに層の和 ÷ 8)・
       畳む(層まで一様な時だけ)・広げる(一様の枠の層を頁へ写す)。CPU とビット一致
 - [x] 一様の枠の層(MultiresCellStore::uniformLayers)を GPU に置く(T-1238 の形に合わせる)
-- [ ] 溢れを使う世界(wideCells)の溢れの成分の層(MultiresOverflowArea::layers。物質で結ぶ。溢れの段・WideRetry の後にも合わせる)
-- [ ] 試験: gpu_multires_layers に要求のある場面(本物の鎖・粗くする・畳む)・溢れの世界・WARP
+- [x] 溢れを使う世界(wideCells)の溢れの成分の層(MultiresOverflowArea::layers。物質で結ぶ。溢れの段・WideRetry の後にも合わせる)
+- [x] 試験: gpu_multires_layers に要求のある場面(本物の鎖・粗くする・畳む)・溢れの世界・WARP
 
 ## メモ・参考
 - T-1221 の形: shaders/common/multires_layers.hlsli(置き場の並び)・shaders/sim/multires_layers.hlsl(層を合わせる段。u4 に結ぶ)・
@@ -105,6 +105,10 @@ T-1221 の 1 段目は、層の頁を GPU に置き、刻みの段の後に層�
 - 2026-11-05 wt2(作業役 6): 層のある置かれ方の費用は T-1305 で直した(置かれ方の物質の口の数え直し。同じ回の層なしの 1.5〜1.7 倍)。
   7 の 5 の ①(写す像・戻す)を実装(t-1240-wide-layers-2。溢れの成分の層も物質で組に詰める・9 種以上は断る)。GPU の段(②③)はまだなので
   RecordUpload は溢れを使う世界の層をまだ断る。試験は gpu_multires_layers の像の場面に溢れの世界(頁・一様の枠・9 種以上で断る)。
+- 2026-11-12 wt2(4 本目): 7 の 5 の ②③④(t-1240-wide-layers-2)。層と結ぶ量を溢れまで引く道具 1 つ(LayerTail)で層を合わせる段・細かくする・
+  粗くする(T-1324 の切り上げも同じ)・広げる・一様の層の比べ(新しい変種 multires_tree_wide_settle)を溢れの世界に。粗くすると層の物質が 9 種以上なら
+  TreeResolve の溢れの変種が断って数える(D-689)。合格(rebase 前 main 50a6cad6・RTX 3070 Ti・release): gpu_multires_layers〔HW・WARP〕・gpu_multires・
+  gpu_multires_wide_*(6 組 + WARP)・multires_layers・dxil_alloca_check(graph_wide 51 → 41)。9 段の鎖は溢れの世界で層なしでも食い違う → T-1341。
 
 ## 7 の 3・4 の詰め(2026-11-05 wt2 作業役 4。t-1240-coarsen-layers)
 - **一様の枠の層の置き場 → 枠ごとに決まった場所(仮・ユーザー未確認)【エンジン】**: 置き場の最後に [枠 × 組 8 つ(物質・層の下位・上位)]。
