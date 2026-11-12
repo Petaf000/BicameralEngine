@@ -43,6 +43,10 @@ namespace bicameral::sim {
         constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
             .uavCount = UAV_COUNT, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = 4};
         constexpr uint32_t TREE_THREADS = 64;  // multires_tree.hlsl の TREE_THREADS
+        // 刻む前の写しの溢れの領域を写すグループ 1 つの語(multires_layers.hlsl の GRAIN_THREADS × GRAIN_TAIL_WORDS_PER_THREAD。T-1340)
+        constexpr uint32_t GRAIN_TAIL_GROUP_WORDS = 64 * 16;
+        static_assert(sizeof(RxCell) ==
+                      112);  // multires_layers.hlsl の GRAIN_CELL_BYTES(写しを生のバッファで読む。T-1340)
 
         enum Entry : uint8_t {
             EntryRefine,
@@ -526,11 +530,13 @@ namespace bicameral::sim {
 
             m_layerPipeline = std::move(*layers);
 
-            // 層を使う世界で反応が粒を生む表の段(T-1323)
+            // 層を使う世界で反応が粒を生む表の段(T-1323。溢れを使う世界は溢れの領域も写して溢れの成分まで比べる変種。T-1340)
             auto snapshot = LoadComputePipeline(device, m_rootSignature.Get(), options.pipelineCache,
-                                                "sim/multires_layers_grain_snapshot.cso");
+                                                options.wideCells ? "sim/multires_layers_grain_snapshot_wide.cso"
+                                                                  : "sim/multires_layers_grain_snapshot.cso");
             auto grown = LoadComputePipeline(device, m_rootSignature.Get(), options.pipelineCache,
-                                             "sim/multires_layers_grain_reconcile.cso");
+                                             options.wideCells ? "sim/multires_layers_grain_reconcile_wide.cso"
+                                                               : "sim/multires_layers_grain_reconcile.cso");
             if (!snapshot)
                 return std::unexpected(snapshot.error());
 
@@ -1079,14 +1085,8 @@ namespace bicameral::sim {
         }
 
         // 層を使う世界で反応が粒を生む表: CPU は生まれた粒を層に足す(T-1322。ADR-0489 の 3 (B))ので、GPU も刻む前のセルを写し、
-        // 刻みの後に比べて足す(T-1323)。写しは u1 と同じ大きさ(要る世界だけ作る)
+        // 刻みの後に比べて足す(T-1323)。写しは u1 と同じ大きさ + 溢れを使う世界は溢れの領域(T-1340。要る世界だけ作る)
         m_grainBorn = m_layerCapacity > 0 && nest.cellLayers.enabled && ProducesGrain(nest);
-        if (m_grainBorn && nest.wideCells) {
-            // 生まれた粒を層に足す段は刻む前の溢れを写さない(T-1340。溢れを使う世界の層は T-1240 の 7 の 5 で読める)
-            Log(Channel::Gpu, Level::Error, "溢れを使う世界で反応が粒を生む表の層はまだ GPU の段が足せない(T-1340)");
-            return false;
-        }
-
         if (m_grainBorn && !EnsureGrainSnapshot()) {
             Log(Channel::Gpu, Level::Error, "刻む前のセルの写し(層を使う世界で粒を生む表。T-1323)のバッファを作れない");
             return false;
@@ -1588,7 +1588,7 @@ namespace bicameral::sim {
 
         const ExternalBinding saved = BindLayers();
         if (grown)
-            m_externalViews[1] = m_grainBefore->GetGPUVirtualAddress();
+            BindGrainSnapshot();
 
         list->SetComputeRootSignature(m_rootSignature.Get());
         list->SetPipelineState(grown ? m_grainReconcilePipeline.Get() : m_layerPipeline.Get());
@@ -1604,13 +1604,36 @@ namespace bicameral::sim {
             return;
 
         const ExternalBinding saved = BindLayers();
-        m_externalViews[1] = m_grainBefore->GetGPUVirtualAddress();
+        BindGrainSnapshot();
         list->SetComputeRootSignature(m_rootSignature.Get());
         list->SetPipelineState(m_grainSnapshotPipeline.Get());
         BindRoot(list, debugRing);
-        list->Dispatch(std::max(1u, m_blockCapacity), 1, 1);
+        list->Dispatch(std::max(1u, m_blockCapacity) + GrainTailGroups(), 1, 1);  // 枠の後ろのグループは溢れの領域
         UavBarrier(list);
         RestoreExternal(saved);
+    }
+
+    // 刻む前の写しの溢れの領域の語の数(溢れを使う世界だけ。u6 の g_overflowBase から。T-1340)
+    uint32_t GpuMultires::GrainTailWords() const {
+        if (!m_wideCells)
+            return 0;
+
+        return static_cast<uint32_t>(MrWideAreaWords(static_cast<uint32_t>(PageCount()), m_wideChunks,
+                                                     m_capacity.worldBlocks, m_capacity.fractions));
+    }
+
+    uint32_t GpuMultires::GrainTailGroups() const {
+        return (GrainTailWords() + GRAIN_TAIL_GROUP_WORDS - 1) / GRAIN_TAIL_GROUP_WORDS;
+    }
+
+    // u5 に刻む前の写しを結ぶ。溢れを使う世界は g_external2 = 写しの溢れの領域の始まり(バイト。セルの後ろ)・
+    // g_external3 = その語の数(sim/multires_layers.hlsl。層の段は欄の区画を読まない)
+    void GpuMultires::BindGrainSnapshot() {
+        m_externalViews[1] = m_grainBefore->GetGPUVirtualAddress();
+        if (m_wideCells) {
+            m_constants.external[2] = static_cast<uint32_t>(BufferSizes()[BufferCells]);
+            m_constants.external[3] = GrainTailWords();
+        }
     }
 
     bool GpuMultires::EnsureGrainSnapshot() {
@@ -1621,7 +1644,8 @@ namespace bicameral::sim {
         if (FAILED(m_buffers[BufferCells]->GetDevice(IID_PPV_ARGS(&device))))
             return false;
 
-        m_grainBefore = gpu::CreateBuffer(device.Get(), BufferSizes()[BufferCells], gpu::BufferKind::UnorderedAccess);
+        const uint64_t bytes = BufferSizes()[BufferCells] + (uint64_t{GrainTailWords()} * sizeof(uint32_t));
+        m_grainBefore = gpu::CreateBuffer(device.Get(), bytes, gpu::BufferKind::UnorderedAccess);
 
         return m_grainBefore != nullptr;
     }
