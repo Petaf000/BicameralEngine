@@ -39,5 +39,6 @@
   紙 96 × 24: 13 ppm・1,158 ボクセル)。(a) の半分の上限の重なりはこの暴走の結果((c) の 1,500 K は引き金。式どおりの釣り合いは 0.195)。
   **直し(ADR-0534)**: 右辺は OhFlowPredictedSpeed(止めは右辺の桁あふれだけ = 256 ボクセル)。CPU・GPU 同じ。暖機 31 刻み: 一番薄い 0.17〜0.18・V 字の一番多い 5 / 5 / 6
   (3,168 / 10,080 / 29,952。前 9 / 14 / 32)・上限 0・平均 2.4 / 2.9 / 3.2 = T-1362 の合格(16 以下・差 3 以内)を解き方を変えずに満たす。FCG(2)(T-1364)は要らない。
-  release 警告 0・object_shell・float_check 5 本・dxil_alloca_check・gpu_object_shell_flow(HW 84 s)・archmap OK。ハッシュ: 期待の固定は無い。温めた直後の小刻みで答えが変わるので
+  release 警告 0・object_shell・float_check 5 本・dxil_alloca_check・gpu_object_shell_flow(HW 84 s)・_warp(476 s)・_large(322 s。前 77 s。重なりか未確認)・archmap OK。
+  GPU の暖機の一番多い 5 / 5 / 6・A4 層 4 / 6 段 5 / 5(前 13 / 19)・時間は前と同じ(docs/perf.md 2026-11-13)。ハッシュ: 期待の固定は無い。温めた直後の小刻みで答えが変わるので
   層の流れのある場面のハッシュは前と違う(理由 = 射影が慣性を全部見るようになった)。
