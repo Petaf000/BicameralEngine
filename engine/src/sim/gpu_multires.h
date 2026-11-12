@@ -39,6 +39,7 @@
 #include "gpu/pipeline_cache.h"
 #include "gpu/resources.h"
 #include "gpu/work_graph.h"
+#include "sim/multires_fields.h"
 #include "sim/multires_nest.h"
 #include "sim/reaction_table.h"
 
@@ -86,7 +87,7 @@ namespace bicameral::sim {
         // 頁の番号までビット一致(T-1252 段 2 の 4 本目。試験 gpu_field_region)。欄の頁が尽きたら細かく/粗くする要求を断る(GPU だけ。数える)。
         // 影の鎖(RecordRefineShadow・RecordPullBack)・畳む(RecordFoldPages)・広げる(刻みの TreeExpand)も区画を読み書きする(5 本目)。
         // 影・広げる段で欄の頁が尽きたら頁なしで数える(断れない。CPU とずれる = fieldPages を足りる数に)。
-        // まだの所(T-1252 の段 2 の残り): 集めて書く段は木の段に載っていない(使い手が無い間の途中の形)。
+        // 集めて書く段(RecordGather)も区画の欄へ書く(6 本目。書き手 = T-1227・T-1228 はまだ無い)。
         // 保存量の配り手の欄(粗くする余りの帳簿)・相の層の配り手の欄(セルを読む。T-1231)は写さない(RecordUpload が false)
         uint32_t fieldPages = 0;
         uint32_t fieldValues = 0;  // 載せる欄の値の数の和の上限(0 = state_field の SF_MAX_COMPONENTS)
@@ -173,6 +174,18 @@ namespace bicameral::sim {
         [[nodiscard]] uint32_t BlockCapacity() const { return m_blockCapacity; }
 
         static constexpr uint32_t REQUEST_UPLOAD_SLOTS = 16;
+
+        // --- 集めて書く段(T-1252 段 2 の 6 本目。ADR-0500 の 3・ADR-0532 の 8)---
+        // 載せた欄 field(CPU の登録の番号。配り手の欄かこの刻みだけの欄)へ、書き手が刻みの中で作業 work(u5 に結ぶ。並びは
+        // common/multires_field_pages.hlsli の「作業」= MfWorkWords(世界の枠の数, 作業のブロックの数, 値の数)。持ち主は書き手)に足した値を書く。
+        // CPU の GatherNestField と同じ順: 作業のある一様な枠を頁に広げ(TreeExpand・一様の値で埋める)、欄の頁を枠の順に取り
+        // (k 番目 = 空きの上から k 番目。頁の予算・容量が尽きた枠は書かずに作業に残す)、足して作業を 0 に、書いた枠をつつく(この刻みの種)。
+        // 刻みの段の後・木の段の前に呼ぶ。報告は RecordReadback の後に ReadGatherReport(field)。
+        // 載せていない欄・区画を持たない GPU・溢れを使う世界(一様の値の溢れを埋める段がまだ)は false
+        [[nodiscard]] bool RecordGather(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                        uint32_t field, D3D12_GPU_VIRTUAL_ADDRESS work);
+        // 最後の RecordGather の報告(RecordReadback の時の値。CPU の NestGatherReport と同じ数)
+        [[nodiscard]] std::optional<NestGatherReport> ReadGatherReport(uint32_t field) const;
 
         // --- 読み戻し ---
         void RecordReadback(ID3D12GraphicsCommandList10* list);
@@ -472,9 +485,15 @@ namespace bicameral::sim {
         ComPtr<ID3D12Resource> m_layerReadback;
 
         // --- 配り手の欄・この刻みだけの欄の区画(T-1252 段 2。GpuMultiresOptions::fieldPages)---
-        uint32_t m_fieldPages = 0;   // 欄ごとの欄の頁の数(0 = 持たない)
-        uint32_t m_fieldValues = 0;  // 載せる欄の値の数の和の上限
-        uint32_t m_fieldCount = 0;   // 写した時に載せた欄の数(g_external3)
+        uint32_t m_fieldPages = 0;              // 欄ごとの欄の頁の数(0 = 持たない)
+        uint32_t m_fieldValues = 0;             // 載せる欄の値の数の和の上限
+        uint32_t m_fieldCount = 0;              // 写した時に載せた欄の数(g_external3)
+        std::vector<uint32_t> m_carriedFields;  // 区画の欄の順 → CPU の登録の番号(写した時)
+        // 集めて書く段(区画を持ち、溢れを使わない世界だけ): 印・埋める・頁を取る・書く(multires_field_gather_tree.hlsl)
+        std::array<ComPtr<ID3D12PipelineState>, 4> m_gatherPipelines;
+        [[nodiscard]] std::optional<uint32_t> CarriedEntry(uint32_t field) const;
+        void RecordGatherPass(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing, uint32_t pass,
+                              uint32_t groupCount);
 
         // --- 計測 ---
         ComPtr<ID3D12QueryHeap> m_timestamps;

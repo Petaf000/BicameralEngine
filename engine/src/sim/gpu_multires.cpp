@@ -541,6 +541,21 @@ namespace bicameral::sim {
             m_grainReconcilePipeline = std::move(*grown);
         }
 
+        // 集めて書く段(欄の区画を持ち、溢れを使わない世界だけ。T-1252 段 2 の 6 本目)
+        if (options.fieldPages > 0 && !options.wideCells) {
+            constexpr std::array<const char*, 4> GATHER_SHADERS = {
+                "sim/multires_field_gather_tree_mark.cso", "sim/multires_field_gather_tree_fill.cso",
+                "sim/multires_field_gather_tree_assign.cso", "sim/multires_field_gather_tree_write.cso"};
+            for (uint32_t pass = 0; pass < GATHER_SHADERS.size(); ++pass) {
+                auto pipeline = LoadComputePipeline(device, m_rootSignature.Get(), options.pipelineCache,
+                                                    GATHER_SHADERS[pass]);
+                if (!pipeline)
+                    return std::unexpected(pipeline.error());
+
+                m_gatherPipelines[pass] = std::move(*pipeline);
+            }
+        }
+
         const gpu::CreationCost computeCost = computeTimer.Elapsed();
         Log(Channel::Gpu, Level::Info, "多重解像度: Compute のパイプラインの作成 {} ms(プロセスの CPU {} ms)",
             computeCost.wallMs, computeCost.processCpuMs);
@@ -1131,6 +1146,11 @@ namespace bicameral::sim {
         }
 
         m_fieldCount = carriedFields;
+        m_carriedFields.clear();
+        for (uint32_t field = 0; field < nest.fields.size(); ++field) {
+            if (GpuCarriesField(nest.fields[field]))
+                m_carriedFields.push_back(field);
+        }
 
         // --- 細かくする段の置かれ方(T-1188): CPU の木が物質の表を持つ世界(EnableRefineCellPlacement)だけ。溢れを使う世界は SAME ---
         //     置かれ方の段は別のプログラム(multires_graph_place)にある。使わない世界は軽いプログラムを通す(ADR-0499)。
@@ -1851,6 +1871,74 @@ namespace bicameral::sim {
         RestoreExternal(saved);
         if (m_layerCapacity > 0)
             BindRoot(list, debugRing);  // 続く段(パイプラインだけ替えて投げる所がある)へ元の結び先を
+    }
+
+    // --- 集めて書く段(T-1252 段 2 の 6 本目。ADR-0532 の 8。段は shaders/sim/multires_field_gather_tree.hlsl)---
+
+    std::optional<uint32_t> GpuMultires::CarriedEntry(uint32_t field) const {
+        const auto found = std::ranges::find(m_carriedFields, field);
+        if (found == m_carriedFields.end())
+            return std::nullopt;
+
+        return static_cast<uint32_t>(found - m_carriedFields.begin());
+    }
+
+    void GpuMultires::RecordGatherPass(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                       uint32_t pass, uint32_t groupCount) {
+        list->SetComputeRootSignature(m_rootSignature.Get());
+        list->SetPipelineState(m_gatherPipelines[pass].Get());
+        BindRoot(list, debugRing);
+        list->Dispatch(groupCount, 1, 1);
+        UavBarrier(list);
+        StampStage(list);
+    }
+
+    bool GpuMultires::RecordGather(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                   uint32_t field, D3D12_GPU_VIRTUAL_ADDRESS work) {
+        enum GatherPass : uint32_t { GatherMark, GatherFill, GatherAssign, GatherWrite };
+        const std::optional<uint32_t> entry = CarriedEntry(field);
+        if (!entry || work == 0 || m_wideCells || !m_gatherPipelines[GatherMark])
+            return false;
+
+        // --- u4 = 区画・u5 = 作業。g_external0 = 区画の欄の番号・g_external1 = 一様な枠に WANTED を付けるか ---
+        m_activityWrite = m_activityCurrent;  // 書いた枠はこの刻みの種へ(CPU の PokeBlock)
+        const ExternalBinding saved = BindLayers();
+        const std::array<uint32_t, 4> layers = m_constants.external;
+        const auto gatherConstants = [&](uint32_t wantUniform) {
+            m_constants.external = {*entry, wantUniform, FieldRegionStart(), m_fieldCount};
+        };
+        m_externalViews[1] = work;
+        const uint32_t groups = std::max(1u, m_capacity.worldBlocks);
+
+        // --- 一様な枠を頁に広げる(CPU の ExpandGatheredBlocks → ExpandWantedPages)→ 印を付け直す → 取る → 書く ---
+        gatherConstants(1);
+        RecordGatherPass(list, debugRing, GatherMark, groups);
+        m_constants.external = layers;
+        RecordTreePass(list, debugRing, PassExpand, 1);
+        gatherConstants(0);
+        RecordGatherPass(list, debugRing, GatherFill, groups);
+        RecordGatherPass(list, debugRing, GatherMark, groups);
+        RecordGatherPass(list, debugRing, GatherAssign, 1);
+        RecordGatherPass(list, debugRing, GatherWrite, groups);
+        RestoreExternal(saved);
+        BindRoot(list, debugRing);  // 続く段(パイプラインだけ替えて投げる所がある)へ元の結び先を
+
+        return true;
+    }
+
+    std::optional<NestGatherReport> GpuMultires::ReadGatherReport(uint32_t field) const {
+        const std::optional<uint32_t> entry = CarriedEntry(field);
+        if (!entry)
+            return std::nullopt;
+
+        std::vector<uint32_t> storeWords(ExternalStoreWords());
+        if (!gpu::ReadBuffer(m_layerReadback.Get(), std::as_writable_bytes(std::span(storeWords))))
+            return std::nullopt;
+
+        const auto region = std::span<const uint32_t>(storeWords).subspan(FieldRegionStart());
+        const uint32_t store = region[MfRegionTableAddress(*entry, MF_TABLE_STORE)];
+
+        return GpuTreeGatherReport(region.subspan(store, MF_HEADER_WORDS));
     }
 
     void GpuMultires::RecordExpandPages(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing) {

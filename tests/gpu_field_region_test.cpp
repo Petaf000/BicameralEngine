@@ -18,12 +18,15 @@
 //      広げた根は畳まれて欄の頁を返し、頁を持つ根は畳まれずに全部 0 のこの刻みだけの欄の頁だけを返す(CPU の ReleaseZeroPages)。
 //   9. 刻みの広げる段と畳む段: 一様な木箱の根(配り手の欄の一様の値を持つ)が刻みで頁に広がり(TreeExpand が欄の頁を取って一様の値で埋める)、
 //      燃え尽きて畳まれる(欄の頁を返す)までの活性の刻み(multires_uniform_scene の場面)を毎刻み CPU とビット一致。
-// 集めて書く段が区画を読むのは T-1252 の段 2 の残り。引数は gpu_test_options.h。
+//   10. 集めて書く段(T-1252 段 2 の 6 本目): 配り手の欄へ頁を持つ根・一様な根(広げてから)に足し、この刻みだけの欄へ予算 1 で足す
+//      (1 つは頁を取って書き、1 つは作業に残る)。置き場・要約・報告・作業の残り・種(書いた枠をつつく)が CPU の GatherNestField とビット一致。
+// 引数は gpu_test_options.h。
 #include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <expected>
 #include <format>
+#include <optional>
 #include <span>
 #include <string>
 #include <string_view>
@@ -31,9 +34,11 @@
 
 #include "core/log.h"
 #include "core/singleton.h"
+#include "gpu/com_ptr.h"
 #include "gpu/debug_ring.h"
 #include "gpu/device.h"
 #include "gpu/immediate_queue.h"
+#include "gpu/resources.h"
 #include "gpu_test_options.h"
 #include "multires_activity_scene.h"
 #include "multires_uniform_scene.h"
@@ -565,6 +570,152 @@ namespace {
         return {};
     }
 
+    // --- 10. 集めて書く段(T-1252 段 2 の 6 本目。GpuMultires::RecordGather)---
+
+    // 書き手の作業(GPU の作業の並び)を写す・読み戻すバッファ
+    struct GatherWorkBuffer {
+        ComPtr<ID3D12Resource> upload;
+        ComPtr<ID3D12Resource> buffer;
+        ComPtr<ID3D12Resource> readback;
+        size_t bytes = 0;
+    };
+
+    GatherWorkBuffer CreateGatherWork(ID3D12Device* device, std::span<const uint32_t> words) {
+        const auto bytes = std::as_bytes(words);
+        return {.upload = gpu::CreateFilledUpload(device, bytes),
+                .buffer = gpu::CreateBuffer(device, bytes.size(), gpu::BufferKind::UnorderedAccess),
+                .readback = gpu::CreateBuffer(device, bytes.size(), gpu::BufferKind::Readback),
+                .bytes = bytes.size()};
+    }
+
+    // 作業へ足す値(枠ごと・セルごとに違う。負の値も)
+    int64_t GatherValue(uint32_t slot, uint32_t index, uint32_t component) {
+        return (static_cast<int64_t>(index) * 11) - (static_cast<int64_t>(slot) * 3) +
+               (static_cast<int64_t>(component) * 100003) - 2500;
+    }
+
+    // 欄 field の作業: 一様な根を先に足す(作業のブロックの番号の順 ≠ 枠の順)
+    sim::NestGatherWork MakeRootsWork(const sim::MultiresNest& nest, uint32_t field, uint32_t paged, uint32_t uniform) {
+        sim::NestGatherWork work = sim::MakeNestGatherWork(nest, field);
+        for (const uint32_t slot : {uniform, paged}) {
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; index += 5) {
+                for (uint32_t c = 0; c < work.components; ++c)
+                    sim::AddNestGatherWork(work, slot, index, c, GatherValue(slot, index, c));
+            }
+        }
+
+        return work;
+    }
+
+    bool SameReport(const sim::NestGatherReport& a, const sim::NestGatherReport& b) {
+        return a.blocks == b.blocks && a.pagesTaken == b.pagesTaken && a.expanded == b.expanded &&
+               a.pageShortage == b.pageShortage && a.cellPageShortage == b.cellPageShortage;
+    }
+
+    std::string ReportText(const sim::NestGatherReport& report) {
+        return std::format("書いた {}・取った {}・広げた {}・欄の頁の不足 {}・セルの頁の不足 {}", report.blocks,
+                           report.pagesTaken, report.expanded, report.pageShortage, report.cellPageShortage);
+    }
+
+    // CPU の GatherNestField と GPU の RecordGather を 1 回ずつ。first なら写してから
+    std::expected<sim::NestGatherReport, std::string> GatherBoth(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                                 gpu::DebugRing& ring, sim::GpuMultires& gpu,
+                                                                 sim::MultiresNest& cpu, sim::MultiresNest& read,
+                                                                 sim::NestGatherWork work, bool first,
+                                                                 std::string_view where) {
+        sim::NestGatherWork gpuWork = work;
+        const std::vector<uint32_t> image = sim::MakeGpuGatherWorkImage(work);
+        const GatherWorkBuffer buffer = CreateGatherWork(device, image);
+        if (!buffer.upload || !buffer.buffer || !buffer.readback)
+            return std::unexpected(std::format("{}: 作業のバッファを作れない", where));
+
+        const sim::MultiresNest before = cpu;
+        const auto record = [&](ID3D12GraphicsCommandList10* list) {
+            if (first && !gpu.RecordUpload(list, before))
+                return false;
+
+            list->CopyBufferRegion(buffer.buffer.Get(), 0, buffer.upload.Get(), 0, buffer.bytes);
+            const D3D12_RESOURCE_BARRIER toUav = gpu::Transition(buffer.buffer.Get(), D3D12_RESOURCE_STATE_COPY_DEST,
+                                                                 D3D12_RESOURCE_STATE_UNORDERED_ACCESS);
+            list->ResourceBarrier(1, &toUav);
+            if (!gpu.RecordGather(list, ring.GpuAddress(), work.field, buffer.buffer->GetGPUVirtualAddress()))
+                return false;
+
+            gpu::RecordCopyToReadback(list, buffer.buffer.Get(), buffer.readback.Get());
+            return true;
+        };
+        if (auto ran = Execute(queue, ring, gpu, record, read); !ran)
+            return std::unexpected(std::format("{}: {}", where, ran.error()));
+
+        const sim::NestGatherReport cpuReport = sim::GatherNestField(cpu, work);
+        if (auto compared = CompareFields(cpu, read, where); !compared)
+            return std::unexpected(compared.error());
+
+        // --- 報告・作業の残り・種(書いた枠をつつく)---
+        const std::optional<sim::NestGatherReport> gpuReport = gpu.ReadGatherReport(work.field);
+        if (!gpuReport || !SameReport(cpuReport, *gpuReport))
+            return std::unexpected(std::format("{}: 報告が違う(CPU {} / GPU {})", where, ReportText(cpuReport),
+                                               gpuReport ? ReportText(*gpuReport) : "読めない"));
+
+        std::vector<uint32_t> words(image.size());
+        std::vector<uint32_t> results;
+        if (!gpu::ReadBuffer(buffer.readback.Get(), std::as_writable_bytes(std::span(words))))
+            return std::unexpected(std::format("{}: 作業を読み戻せない", where));
+
+        sim::ApplyGpuGatherWorkImage(gpuWork, words, results);
+        if (gpuWork.values != work.values)
+            return std::unexpected(std::format("{}: 作業の残りが違う", where));
+
+        const std::optional<sim::GpuMultires::ActivitySeeds> seeds = gpu.ReadSeeds();
+        std::vector<uint32_t> cpuSeeds;
+        for (uint32_t slot = 0; slot < cpu.capacity.worldBlocks; ++slot) {
+            if (cpu.seeds[slot] != 0)
+                cpuSeeds.push_back(slot);
+        }
+
+        if (!seeds || seeds->slots != cpuSeeds)
+            return std::unexpected(std::format("{}: 種(書いた枠をつつく)が違う", where));
+
+        return cpuReport;
+    }
+
+    std::expected<void, std::string> RunGather(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring,
+                                               const sim::BakedReactionTable& table) {
+        FieldWorld world = MakeFieldWorld(table);
+        sim::MultiresNest& cpu = world.nest;
+        const uint32_t paged = FindRealBlock(cpu, 0, false);
+        const uint32_t uniform = FindRealBlock(cpu, 0, true);
+        // この刻みだけの欄の頁の予算 = 1(2 つ目の根は書かずに作業に残る = 計器の誤り)
+        sim::SetNestFieldPageBudget(cpu, world.tick, 1);
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, RegionOptions(0));
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        // --- 配り手の欄: 頁を持つ根へ足す・一様な根は広げて(欄の頁を一様の値で埋める)から足す ---
+        sim::MultiresNest read = cpu;
+        auto owned = GatherBoth(device, queue, ring, *gpu, cpu, read, MakeRootsWork(cpu, world.owned, paged, uniform),
+                                true, "集めて書く(配り手の欄)");
+        if (!owned)
+            return std::unexpected(owned.error());
+
+        // --- この刻みだけの欄: 両方の根が欄の頁を取る所で予算が尽きる ---
+        auto tick = GatherBoth(device, queue, ring, *gpu, cpu, read, MakeRootsWork(cpu, world.tick, paged, uniform),
+                               false, "集めて書く(この刻みだけの欄)");
+        if (!tick)
+            return std::unexpected(tick.error());
+
+        if (owned->blocks != 2 || owned->expanded != 1 || owned->pagesTaken != 0 || tick->blocks != 1 ||
+            tick->pagesTaken != 1 || tick->pageShortage != 1 || MrIsUniform(cpu.blocks[uniform]))
+            return std::unexpected(
+                std::format("場面の確かめ: 広げる・頁を取る・予算が尽きる、になっていない(配り手 {} / この刻みだけ {})",
+                            ReportText(*owned), ReportText(*tick)));
+
+        Log(Channel::Gpu, Level::Info, "集めて書く: 配り手の欄({})・この刻みだけの欄({})で一致", ReportText(*owned),
+            ReportText(*tick));
+
+        return {};
+    }
+
     // --- 4. 区画を持たない GPU は断る ---
     std::expected<void, std::string> RunRefusal(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring,
                                                 const sim::BakedReactionTable& table) {
@@ -623,6 +774,8 @@ namespace {
             ran = RunFold(device->Get(), *queue, *ring, *table);
         if (ran)
             ran = RunUniformTicks(device->Get(), *queue, *ring, *table);
+        if (ran)
+            ran = RunGather(device->Get(), *queue, *ring, *table);
         if (!ran) {
             Log(Channel::Gpu, Level::Error, "gpu_field_region_test: FAILED ({})", ran.error());
             return 1;
@@ -633,7 +786,7 @@ namespace {
 
         Log(Channel::Gpu, Level::Info,
             "gpu_field_region_test: "
-            "OK(欄の区画を写して戻す・刻む・欄の無い世界・断り・木の段・影の鎖・畳む・広げるの配り手の欄で "
+            "OK(欄の区画を写して戻す・刻む・欄の無い世界・断り・木の段・影の鎖・畳む・広げる・集めて書くの配り手の欄で "
             "GPU と CPU がビット一致)");
 
         return 0;
