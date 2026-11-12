@@ -163,6 +163,24 @@ namespace bicameral::sim {
         // ブロックの欄は親の値に。親・世界の欄・世界の帳簿には触れない
         void PullBackShadow(MultiresNest& nest, uint32_t shadowSlot);
 
+        // --- 配り手の欄の頁を木の段の取り方で(T-1252 段 2。ADR-0532 の 3)---
+        // 要求の処理の中では、配り手の欄の疎な頁を「取る」は割り当ての段で要求の順に(GPU の TreeAllocate と同じ順)、
+        // 「返す」は解放の段で要求の順に(GPU の TreeRelease と同じ順)行う。頁が要るかは値を作る前に決める
+        // (細かくする鎖の子 = 親が欄の頁を持つ・粗くする親 = 子が欄の頁か 0 でない一様の値を持つ・広げる親の一様の値が 0 でない)。
+        // 全部 0 の頁ができてもよい(眠る判定の ReleaseZeroPages が返す)。値と状態の要約は変わらない(頁の番号と空きの並びだけ)。
+
+        // 配り手の欄 field(疎)がセルの頁 cellPage に欄の頁を持つか
+        [[nodiscard]] bool OwnerPageHeld(const MultiresNest& nest, uint32_t field, uint32_t cellPage);
+
+        // 一様な枠 slot の配り手の欄 field の一様の値に 0 でないものがあるか
+        [[nodiscard]] bool OwnerUniformNonZero(const MultiresNest& nest, uint32_t field, uint32_t slot);
+
+        // 配り手の欄 field(疎)のセルの頁 cellPage に欄の頁を取る(空きの後ろから・無ければ後ろに足す。0 で埋める)。持っていれば何もしない
+        void TakeOwnerPage(MultiresNest& nest, uint32_t field, uint32_t cellPage);
+
+        // セルの頁 cellPage の配り手の欄の頁を返す(解放の段が、返すセルの頁ごとに要求の順に呼ぶ)
+        void ReleaseOwnerPages(MultiresNest& nest, uint32_t cellPage);
+
     }  // namespace nest_fields
 
 }  // namespace bicameral::sim

@@ -8,6 +8,7 @@
 //   4. 集めて書く段: 足す順を入れ替えても欄の頁の像(頁の表まで)が同じ・一様な枠は広げてから書く・
 //      頁の予算が尽きると書かずに作業に残す(量を捨てない)
 #include <algorithm>
+#include <array>
 #include <cstdint>
 #include <span>
 #include <string_view>
@@ -306,6 +307,80 @@ namespace {
         Expect(RestoreNestState(nest, save) && TickOnlyFieldsClear(nest), "刻みだけ: 保存点に入らない(戻すと 0)");
     }
 
+    // --- 2b. 配り手の欄の頁の番号: 木の段の取り方(T-1252 段 2・ADR-0532 の 3)---
+    // 取るのは割り当ての段で許可した要求の順(空きの後ろから・無ければ後ろに足す)・返すのは解放の段で要求の順。GPU の木の段と同じ番号になる形
+
+    void Requests(MultiresNest& nest, uint32_t op, std::span<const std::array<int64_t, 3>> points) {
+        std::vector<MrRequest> requests;
+        for (const auto& point : points)
+            requests.push_back(MrMakeRequest(op, 1, point[0], point[1], point[2]));
+
+        SubmitRequests(nest, requests);
+        ProcessRequests(nest);
+    }
+
+    // 根 rootSlot の、レベル 1 の点 point を覆う子(無ければ MR_NO_BLOCK)
+    uint32_t ChildAt(const MultiresNest& nest, uint32_t rootSlot, const std::array<int64_t, 3>& point) {
+        const MrBlock& root = nest.blocks[rootSlot];
+
+        return root.children[MrOctantOfPoint(root, point[0], point[1], point[2], 1)];
+    }
+
+    void TestOwnerPageOrder(const BakedReactionTable& table) {
+        MultiresNest nest = MakeMultiresNest(test::MakeMultiresCapacity(table, 16, 0, 16));
+        const uint32_t owned = RegisterNestField(
+            nest, "owned",
+            SfMakeOwnerDesc(SF_PLACE_CELL, SF_TYPE_I64, SF_PHASE_NONE, CONSERVED, OWNER_COMPONENTS, SF_OWNER_TEST));
+        const std::vector<RxCell> air(MR_BLOCK_CELLS, test::MakeAirCell(table));
+        std::array<uint32_t, 3> roots{};
+        for (uint32_t r = 0; r < roots.size(); ++r) {
+            roots[r] = PlaceRootBlock(nest, int64_t{r} * 8, 0, 0, air);
+            Expect(ExpandNestPage(nest, roots[r]), "番号: 根を頁に広げられる");
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                for (uint32_t c = 0; c < OWNER_COMPONENTS; ++c)
+                    StoreNestField(nest, owned, roots[r], index, c, OwnerValue(index, c) + r);
+            }
+        }
+
+        const MultiresFieldStore& store = nest.fields[owned].store;
+        const std::array<std::array<int64_t, 3>, 3> points = {{{1, 1, 1}, {17, 1, 1}, {33, 1, 1}}};
+        const auto fieldPageOf = [&](uint32_t slot) {
+            return store.pageOf[nest.blocks[slot].page];
+        };
+
+        // 往復で欄の頁 3 を空きに(細かくした子の頁を、粗くした解放の段が返す)
+        Requests(nest, MR_REQUEST_REFINE, std::span(points).first(1));
+        Expect(fieldPageOf(ChildAt(nest, roots[0], points[0])) == 3, "番号: 細かくした子は欄の頁を後ろに足して取る");
+        Requests(nest, MR_REQUEST_COARSEN, std::span(points).first(1));
+        Expect(store.freePages == std::vector<uint32_t>{3}, "番号: 粗くすると子の欄の頁を解放の段で返す(空き = [3])");
+
+        // 1 回の処理で 3 つ細かくする: 要求の順に 空きの上(3)・後ろに足す(4・5)
+        Requests(nest, MR_REQUEST_REFINE, points);
+        bool ordered = store.freePages.empty();
+        for (uint32_t k = 0; k < points.size(); ++k) {
+            const uint32_t child = ChildAt(nest, roots[k], points[k]);
+            ordered = ordered && child != MR_NO_BLOCK && fieldPageOf(child) == 3 + k;
+        }
+
+        Expect(ordered, "番号: 1 回の処理の細かくする要求は要求の順に欄の頁を取る");
+
+        // 1 回の処理で 3 つ粗くする(順を入れ替えて): 親は頁を持つので取らない・返すのは要求の順(空き = [5, 3, 4])
+        const std::array<std::array<int64_t, 3>, 3> reversed = {points[2], points[0], points[1]};
+        Requests(nest, MR_REQUEST_COARSEN, reversed);
+        Expect(store.freePages == std::vector<uint32_t>{5, 3, 4},
+               "番号: 1 回の処理の粗くする要求は要求の順に欄の頁を返す");
+
+        bool back = true;
+        for (uint32_t r = 0; r < roots.size(); ++r) {
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                for (uint32_t c = 0; c < OWNER_COMPONENTS; ++c)
+                    back = back && LoadNestField(nest, owned, roots[r], index, c) == OwnerValue(index, c) + r;
+            }
+        }
+
+        Expect(back, "番号: 往復した後の値は親の値のまま(取り方を変えても値は同じ)");
+    }
+
     // --- 4. 集めて書く段 ---
 
     struct GatherWorld {
@@ -420,6 +495,7 @@ namespace {
 
         TestOwnerRoundTrip(*table);
         TestOwnerShadow(*table);
+        TestOwnerPageOrder(*table);
         TestTickOnly(*table);
         TestGather(*table);
 

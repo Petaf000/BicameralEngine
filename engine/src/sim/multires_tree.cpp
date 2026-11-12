@@ -331,6 +331,60 @@ namespace bicameral::sim {
             nest.counters[MR_COUNTER_FREE_PAGES] = freePages - grantedPages;
         }
 
+        // --- 3b. 配り手の欄の頁: 許可した要求の順に取る(GPU の TreeAllocate と同じ順。T-1252 段 2・ADR-0532 の 3)---
+
+        // 粗くする要求 i の親が配り手の欄 field の頁を要るか(親が頁を持つ枠になり・まだ欄の頁が無く・子か広げる親に 0 でない値がありうる)
+        bool CoarsenNeedsOwnerPage(MultiresNest& nest, uint32_t field, uint32_t i) {
+            const MrRequestState& state = nest.states[i];
+            const MrBlock& child = nest.blocks[state.target];
+            const MrBlock& parent = nest.blocks[child.parent];
+            const bool expanded = state.pageNeed != 0;
+            if (MrIsUniform(parent) && !expanded)
+                return false;
+
+            if (!expanded && nest_fields::OwnerPageHeld(nest, field, parent.page))
+                return false;
+
+            const bool childValues = MrIsUniform(child) ? nest_fields::OwnerUniformNonZero(nest, field, state.target)
+                                                        : nest_fields::OwnerPageHeld(nest, field, child.page);
+
+            return childValues || (expanded && nest_fields::OwnerUniformNonZero(nest, field, child.parent));
+        }
+
+        void AllocateOwnerPages(MultiresNest& nest, uint32_t count) {
+            for (uint32_t f = 0; f < nest.fields.size(); ++f) {
+                const MultiresField& field = nest.fields[f];
+                if (!SfOnCells(field.desc) || !SfOwned(field.desc) || !field.store.sparse)
+                    continue;
+
+                for (uint32_t i = 0; i < count; ++i) {
+                    const MrRequestState& state = nest.states[i];
+                    if (state.status != MR_STATUS_GRANTED)
+                        continue;
+
+                    // 細かくする: 頁を持つ親が欄の頁を持てば、鎖の子の全部に(子の値は親の値から配る)
+                    if (nest.requests[i].op == MR_REQUEST_REFINE) {
+                        const MrBlock& parent = nest.blocks[state.target];
+                        if (MrIsUniform(parent) || !nest_fields::OwnerPageHeld(nest, f, parent.page))
+                            continue;
+
+                        for (uint32_t depth = 0; depth < state.levels; ++depth)
+                            nest_fields::TakeOwnerPage(nest, f, PoppedPage(nest, state, depth));
+
+                        continue;
+                    }
+
+                    if (!CoarsenNeedsOwnerPage(nest, f, i))
+                        continue;
+
+                    const uint32_t parentPage = state.pageNeed != 0
+                                                    ? PoppedPage(nest, state, 0)
+                                                    : nest.blocks[nest.blocks[state.target].parent].page;
+                    nest_fields::TakeOwnerPage(nest, f, parentPage);
+                }
+            }
+        }
+
         // --- 4. 適用: 細かくする(1 段)---
 
         // 溢れを使う世界で、親の八分の一のセルと端数を子の頁・端数の枠へ溢れごと写す(T-0187)。
@@ -626,7 +680,8 @@ namespace bicameral::sim {
                 if (state.releasePage == MR_NO_PAGE)
                     continue;
 
-                nest_detail::ClearPageLayers(nest, state.releasePage);  // 次に使う所に古い層を残さない(T-1210)
+                nest_detail::ClearPageLayers(nest, state.releasePage);    // 次に使う所に古い層を残さない(T-1210)
+                nest_fields::ReleaseOwnerPages(nest, state.releasePage);  // 配り手の欄の頁も要求の順に(ADR-0532 の 3)
                 FreePageAt(nest, nest.counters[MR_COUNTER_FREE_PAGES]++) = state.releasePage;
             }
 
@@ -761,6 +816,7 @@ namespace bicameral::sim {
             Settle(nest, i);
 
         Allocate(nest, count);
+        AllocateOwnerPages(nest, count);
         nest_detail::SnapshotRefineHalos(nest, count);  // 隣の写しは刻みの前の木から(T-1189)
         for (uint32_t i = 0; i < count; ++i) {
             if (nest.states[i].status != MR_STATUS_GRANTED)
