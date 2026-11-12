@@ -261,6 +261,35 @@ namespace bicameral::sim {
                 work.carry[CarryKey(cell, face, band)] += amount;
         }
 
+        // 面の向こうが通さない帯(τ ≥ 32)は、光線が向こうのセルで全部止まる(RcPassBand)ので、歩かずに向こうへ直に当てる
+        // (T-1365 研究の形〔faceCoupling ≠ 0〕だけ。厚い物どうしの面が細い係数で放つ光線の費用を省く。量は光線の和と同じ・
+        // 照り返しの丸めだけ面ごとに 1 回)。当てた帯は 0 を返す
+        uint64_t DepositAcrossOpaque(TickWork& work, const Cell3& cell, uint32_t face, uint32_t band, uint64_t amount,
+                                     const rx::RcCellLight& across) {
+            const uint64_t depth = band == rx::LT_BAND_SHORT ? across.depthShortQ32 : across.depthLongQ32;
+            if (amount == 0 || depth < rx::RD_DEPTH_SATURATED_Q32)
+                return amount;
+
+            const CascadeGrid& grid = *work.grid;
+            Cell3 target = cell;
+            target[face >> 1] += (face & 1u) == 0 ? 1 : -1;
+            const size_t at = grid.IndexOf(target[0], target[1], target[2]);
+            const uint32_t reflectance = band == rx::LT_BAND_SHORT ? across.reflectanceShortQ16
+                                                                   : across.reflectanceLongQ16;
+            const uint64_t reflected = (amount * uint64_t{reflectance}) >> 16;  // 量 < 2^47
+            const uint64_t absorbed = amount - reflected;
+            CascadeTickResult& result = *work.result;
+            result.absorbed[(at * rx::LT_BANDS) + band] += absorbed;
+            result.ledger[band].absorbed += absorbed;
+            result.ledger[band].reflected += reflected;
+            if (reflected != 0) {
+                const uint32_t entered = rx::RcEnteredFace(face >> 1, (face & 1u) == 0 ? 1 : -1);
+                work.carry[CarryKey(at, entered, band)] += reflected;
+            }
+
+            return 0;
+        }
+
         // 熱で放つ面(セルから引く量)と、前の刻みに返された光を、(セル・面) ごとに 1 つの放つ面にまとめる
         SourceMap CollectSources(TickWork& work, const CascadeCarry& carry) {
             const CascadeGrid& grid = *work.grid;
@@ -284,7 +313,9 @@ namespace bicameral::sim {
                 const bool active = !work.params->thermalInSlots ||
                                     rx::RcEmitSlotActive(work.constants, cell[0], cell[1], cell[2]);
                 for (uint32_t face = 0; face < rx::RC_FACES; ++face) {
-                    const rx::RcBands bands = rx::RcMaskAcross(cellBands, LightAcross(grid, cell, face));
+                    const rx::RcCellLight across = LightAcross(grid, cell, face);
+                    const rx::RcBands bands = rx::RcCoupleAcross(cellBands, grid.lights[index], across,
+                                                                 work.params->faceCoupling);
                     if (bands.shortBand == 0 && bands.longBand == 0)
                         continue;
 
@@ -301,9 +332,19 @@ namespace bicameral::sim {
                         continue;
                     }
 
+                    rx::RcBands walked = bands;
+                    if (work.params->faceCoupling != rx::RC_FACE_CLIFF) {
+                        walked.shortBand = DepositAcrossOpaque(work, cell, face, rx::LT_BAND_SHORT, bands.shortBand,
+                                                               across);
+                        walked.longBand = DepositAcrossOpaque(work, cell, face, rx::LT_BAND_LONG, bands.longBand,
+                                                              across);
+                        if (walked.shortBand == 0 && walked.longBand == 0)
+                            continue;
+                    }
+
                     FaceSource& source = sources[(uint64_t{index} * rx::RC_FACES) + face];
-                    source.energyShort += bands.shortBand;
-                    source.energyLong += bands.longBand;
+                    source.energyShort += walked.shortBand;
+                    source.energyLong += walked.longBand;
                 }
             }
 

@@ -10,6 +10,7 @@
 //   lc=<セルロースの長い帯の光の a>・ls=<短い帯の a>(mm²/mol。RC の段が読む表の speciesLight。書かなければ表の値。T-1156)・
 //   expect=1 / expect=0(試験: 終わりに付けたセルの 2 つ先〔x+2〕の草が 1% 以上燃えた / 隣〔x+1〕の草が 1% も燃えていない。外れたら終了コード 1。T-1156)・
 //   watch=1(付けたセルと隣の熱の内訳を 0.25 秒ごとに出す: 温度・放射の段が当てた分の累計・残り〔伝導と反応と流れ〕の累計・草と O2。T-1156)
+//   face=<0〜2>(RC の段の面の受け渡しの形。CascadeParams::faceCoupling。0 = 既定の崖・1 = Rosseland・2 = 二流束。T-1365 研究)・
 //   seed=<向きの種>・sec=<上限の秒>(既定 60)・tall=<草の層の数>・trace=1(1 秒ごとの経過)
 //   gas=1(気体の区画: 川と両岸の上の空気 x 32〜51・y 4〜11・z 16〜47。T-0671 の場面の flow_regions と同じ。閉じた壁)・
 //   gz=<奥行き>(気体の区画の z の奥行き。既定 32。z = 32 を中に縮める。CPU の気体の段が重いので)・gh=<高さ>(既定 8)・
@@ -66,6 +67,7 @@ namespace {
         std::optional<uint32_t> lightLongCellulose;   // RC の長い帯の a(書かなければ表の値。T-1156)
         std::optional<uint32_t> lightShortCellulose;  // RC の短い帯の a(書かなければ表の値。T-1156)
         bool watch = false;                           // 付けたセルと隣の熱の内訳(T-1156)
+        uint32_t faceCoupling = 0;                    // RC の段の面の受け渡しの形(T-1365 研究。0 = 既定)
         std::optional<bool> expectSpread;             // 試験(T-1156): 燃え広がる / 広がらない
         uint64_t seed = 0;
         uint64_t seconds = 60;
@@ -82,6 +84,8 @@ namespace {
             condensedConductivityDivisor = 1;  // 凝縮相の熱伝導率を割る(20000 = 倍率を外す。砂は倍率が無いので割らない)
         std::array<GasBoundary, 3> gasBoundary = {GasBoundary::Wall, GasBoundary::Wall, GasBoundary::Wall};
     };
+
+    constexpr uint64_t GRASS_START_MICROMOLES = 1200000;  // 草の初めの量(world_cells.luau の 1.2 mol)
 
     struct Outcome {
         double farIgnitionSeconds = -1;
@@ -108,6 +112,8 @@ namespace {
         // --- T-1156 ---
         uint64_t nextGrass = 0;    // 終わりの付けたセルの隣(x+1)の草(µmol)
         uint64_t secondGrass = 0;  // 2 つ先(x+2)の草
+        std::array<double, 4> burnSeconds = {-1, -1, -1,
+                                             -1};  // x+1〜x+4 の草が 1% 減った時刻(0.1 秒ごとに見る。T-1365)
     };
 
     Setting ParseSetting(std::string_view text) {
@@ -145,6 +151,8 @@ namespace {
                     setting.expectSpread = value != 0;
                 else if (key == "watch")
                     setting.watch = value != 0;
+                else if (key == "face")
+                    setting.faceCoupling = static_cast<uint32_t>(value);
                 else if (key == "seed")
                     setting.seed = value;
                 else if (key == "sec")
@@ -432,6 +440,11 @@ namespace {
         if (!setting.cascade)
             reference.SetCascadeRadiation({.enabled = false});
         reference.KeepCascadeCellNet(setting.watch);
+        if (setting.faceCoupling != 0) {
+            ProbeCascadeOptions options = reference.CascadeRadiation();
+            options.params.faceCoupling = setting.faceCoupling;
+            reference.SetCascadeRadiation(options);
+        }
         std::array<WatchedCell, 5> watched = {WatchedCell{.name = "付けた", .x = 4, .y = GRASS_Y, .z = 32},
                                               WatchedCell{.name = "x+1", .x = 5, .y = GRASS_Y, .z = 32},
                                               WatchedCell{.name = "x+2", .x = 6, .y = GRASS_Y, .z = 32},
@@ -498,6 +511,14 @@ namespace {
                     PrintWatched(table, setting, tick + 1, cells, reference.Caches(tick + 1), watched);
             }
             pairs += reference.LastRadiationReport().pairs;
+            if ((tick + 1) % (TICKS_PER_SECOND / 10) == 0) {
+                const auto cells = reference.State(tick + 1);
+                for (uint32_t i = 0; i < outcome.burnSeconds.size(); ++i) {
+                    const uint64_t grass = AmountOf(table, cells[ProbeCellIndex(5 + i, GRASS_Y, 32)], "cellulose");
+                    if (outcome.burnSeconds[i] < 0 && grass * 100 < GRASS_START_MICROMOLES * 99)
+                        outcome.burnSeconds[i] = static_cast<double>(tick + 1) / TICKS_PER_SECOND;
+                }
+            }
             if (setting.gas && reference.LastGasReport().skippedCellOverflow)
                 ++outcome.gasSkippedTicks;
 
@@ -601,10 +622,12 @@ int main(int argc, char** argv) {
             outcome.frontHotSeconds, outcome.farPeakMk, outcome.riverPeakMk,
             static_cast<double>(outcome.vaporOverRiverPeak) * 1e-6, static_cast<double>(outcome.smokeHighPeak) * 1e-6,
             static_cast<unsigned long long>(outcome.gasSkippedTicks));
+        std::printf("    草が燃えた秒(T-1365): x+1 %5.1f・x+2 %5.1f・x+3 %5.1f・x+4 %5.1f\n", outcome.burnSeconds[0],
+                    outcome.burnSeconds[1], outcome.burnSeconds[2], outcome.burnSeconds[3]);
     }
 
-    // 試験(expect。T-1156): 草の初めの量は場面の 1.2 mol(world_cells.luau)
-    constexpr uint64_t GRASS_START = 1200000;
+    // 試験(expect。T-1156): 草の初めの量は場面の 1.2 mol(GRASS_START_MICROMOLES)
+    constexpr uint64_t GRASS_START = GRASS_START_MICROMOLES;
     int failures = 0;
     for (size_t i = 0; i < settings.size(); ++i) {
         if (!settings[i].expectSpread)

@@ -138,6 +138,57 @@ FX_FN RcBands RcMaskAcross(RcBands bands, RcCellLight across) {
     return masked;
 }
 
+// --- 面の受け渡しの形(T-1365 研究・ADR-0535 (b)。CPU リファレンスだけ。既定 0 = 上の RcMaskAcross の崖)---
+// セルを「面から温度 T で放つ塊」と見る形は、面の両側が光学的に厚い時、中の放射が拡散で運ぶ量(Rosseland: 4σΔ(T⁴) ÷ 3τ)の
+// 3τ/4 倍ほどを渡す。面から放つ量に係数 g(τ)(Q16)を掛けて τ に対して連続に細くする(放つ量を減らすだけなので保存はそのまま)。
+// τ = 面の両側の小さい方: 片側が透ける面は物の表面なので全部渡し、両側が厚い時だけ中の拡散になる。両側で同じ g なので、
+// 隣どうしの出入りは同じ温度で釣り合う(RcMaskAcross は片側だけ飽和の面で、飽和した側だけが放つ)
+FX_CONST uint32_t RC_FACE_CLIFF = 0;      // 向こうが τ ≥ 32 なら 0・未満なら全部(T-0877。既定)
+FX_CONST uint32_t RC_FACE_ROSSELAND = 1;  // g = min(1, 4 ÷ 3τ)
+FX_CONST uint32_t RC_FACE_TWO_FLUX = 2;   // g = 1 ÷ (1 + 3τ ÷ 4)
+// 係数の形が読む τ の上限(Q32 で 2^56 = τ 2^24)。RcCellLight にこの τ を入れても、τ ≥ 32 を飽和として読む所(RcPassBand・
+// RdAbsorptanceQ16・RcMaskAcross)は同じ値になる
+FX_CONST uint64_t RC_FACE_DEPTH_LIMIT_Q32 = FX_U64(0x01000000u, 0u);
+FX_CONST uint64_t RC_FACE_FOUR_THIRDS_Q16_NUMERATOR = FX_U64(0x00040000u, 0u);  // 2^50: 4 ÷ 3τ(Q16)= 2^50 ÷ 3τ(Q32)
+FX_CONST uint64_t RC_FACE_FOUR_Q32 = FX_U64(0x00000004u, 0u);                   // 2^34 = 4(Q32)
+
+// Σ a·n → τ(Q32。RC_FACE_DEPTH_LIMIT_Q32 で飽和)。RdOpticalDepthQ32 の 32 の飽和の代わり(和 < 2^64 なら積 < 2^97・商 < 2^59)
+FX_FN uint64_t RcFaceDepthQ32(FxU128 absorptionSum) {
+    if (absorptionSum.hi != 0)
+        return RC_FACE_DEPTH_LIMIT_Q32;
+
+    const uint64_t depth = FxShiftRightU128(FxMulU64Full(absorptionSum.lo, RD_DEPTH_RECIPROCAL), RD_DEPTH_SHIFT);
+
+    return depth < RC_FACE_DEPTH_LIMIT_Q32 ? depth : RC_FACE_DEPTH_LIMIT_Q32;
+}
+
+// 係数 g(Q16。0〜65536)。depthQ32 = 面の両側の小さい方の τ
+FX_FN uint64_t RcFaceCouplingQ16(uint32_t form, uint64_t depthQ32) {
+    const uint64_t threeDepth = depthQ32 * 3;  // < 2^58
+    if (form == RC_FACE_ROSSELAND)
+        return threeDepth <= RC_FACE_FOUR_Q32 ? (uint64_t)LT_ONE_Q16 : RC_FACE_FOUR_THIRDS_Q16_NUMERATOR / threeDepth;
+
+    return RC_FACE_FOUR_THIRDS_Q16_NUMERATOR / (RC_FACE_FOUR_Q32 + threeDepth);
+}
+
+FX_FN uint64_t RcCoupledBand(uint64_t amount, uint32_t form, uint64_t ownDepthQ32, uint64_t acrossDepthQ32) {
+    const uint64_t depth = ownDepthQ32 < acrossDepthQ32 ? ownDepthQ32 : acrossDepthQ32;
+
+    return FxShiftRightU128(FxMulU64Full(amount, RcFaceCouplingQ16(form, depth)), 16);
+}
+
+// 面から放つ量(form = RC_FACE_*。0 は RcMaskAcross とビット単位で同じ)
+FX_FN RcBands RcCoupleAcross(RcBands bands, RcCellLight own, RcCellLight across, uint32_t form) {
+    if (form == RC_FACE_CLIFF)
+        return RcMaskAcross(bands, across);
+
+    RcBands coupled;
+    coupled.shortBand = RcCoupledBand(bands.shortBand, form, own.depthShortQ32, across.depthShortQ32);
+    coupled.longBand = RcCoupledBand(bands.longBand, form, own.depthLongQ32, across.depthLongQ32);
+
+    return coupled;
+}
+
 FX_FN RcBands RcFaceEmission(uint32_t temperatureMk, RcCellLight light, RcCellLight across) {
     return RcMaskAcross(RcCellEmission(temperatureMk, light), across);
 }

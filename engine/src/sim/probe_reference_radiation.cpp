@@ -89,14 +89,18 @@ namespace bicameral::sim {
         const TableLights lights{.lights = &m_table->speciesLight};
         CascadeGrid grid;
         grid.size = {PROBE_GRID_SIZE, PROBE_GRID_SIZE, PROBE_GRID_SIZE};
+        // 面の受け渡しの形(T-1365 研究)は 32 で飽和させない τ を読む(τ ≥ 32 を飽和として読む所は同じ値)
+        const bool wideDepth = m_cascade.params.faceCoupling != rx::RC_FACE_CLIFF;
         grid.lights.resize(PROBE_CELL_COUNT);
         grid.temperatureMk.resize(PROBE_CELL_COUNT);
         for (uint32_t index = 0; index < PROBE_CELL_COUNT; ++index) {
             const rx::RxCell& cell = m_cells[currentBase + index];
             const rx::LtCellBand shortBand = rx::LtCellBandOf(lights, cell, rx::LT_BAND_SHORT);
             const rx::LtCellBand longBand = rx::LtCellBandOf(lights, cell, rx::LT_BAND_LONG);
-            grid.lights[index] = {.depthShortQ32 = rx::RdOpticalDepthQ32(shortBand.absorption),
-                                  .depthLongQ32 = rx::RdOpticalDepthQ32(longBand.absorption),
+            grid.lights[index] = {.depthShortQ32 = wideDepth ? rx::RcFaceDepthQ32(shortBand.absorption)
+                                                             : rx::RdOpticalDepthQ32(shortBand.absorption),
+                                  .depthLongQ32 = wideDepth ? rx::RcFaceDepthQ32(longBand.absorption)
+                                                            : rx::RdOpticalDepthQ32(longBand.absorption),
                                   .reflectanceShortQ16 = shortBand.reflectanceQ16,
                                   .reflectanceLongQ16 = longBand.reflectanceQ16};
             grid.temperatureMk[index] = m_caches[currentBase + index].temperature;  // 負は 0(熱のキャッシュの約束)
