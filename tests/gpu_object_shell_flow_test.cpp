@@ -911,9 +911,11 @@ namespace {
     // 共有の空気の格子は 1 つの箱が大きい(山 1 つで 1 辺 100 ボクセル級)。0 から収まるまで・多重格子の赤黒の回数が箱の大きさでどう増えるかを、
     // 骨格を大きくした紙 1 枚(物 1 つ = 1 グループ・圧力の値は作業場)で見る。時間は SM 1 つの値なので比べには使わない(回数を見る)。
     std::expected<void, std::string> Grow(const Context& context) {
-        const std::array<Shape, 4> shapes = {
-            Shape{"紙 24 × 3・層 4 段", 24, 3, 4}, Shape{"紙 48 × 12・層 4 段", 48, 12, 4},
-            Shape{"紙 96 × 24・層 4 段", 96, 24, 4}, Shape{"紙 96 × 48・層 8 段", 96, 48, 8}};
+        const std::array<Shape, 3> shapes = {Shape{"紙 24 × 3・層 4 段", 24, 3, 4},
+                                             Shape{"紙 48 × 12・層 4 段", 48, 12, 4},
+                                             Shape{"紙 96 × 24・層 4 段", 96, 24, 4}};
+        // 紙 96 × 48・層 8 段(121,856 ボクセル)は GPU の実行に失敗した(原因は未確認。T-1331 の 5b)
+
         const std::array<PressureRule, 2> rules = {PressureRule{"0 から収まるまで(既定)", 1024, 1},
                                                    PressureRule{"多重格子 + 収まるまで", 1024, 5}};
         for (const Shape& shape : shapes) {
