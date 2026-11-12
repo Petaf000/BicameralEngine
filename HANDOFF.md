@@ -2,6 +2,14 @@
 
 最終更新: 2026-11-12(本体の作業役 24 回目・claude/48 の再開の巡目の締め。前は 23 回目)
 
+## この仕事でしたこと(2026-11-12・本体の作業役・25 回目: runner/ready の印のマージ。途中の記録)
+- ★ claude/50 の反映は 41632264(D-694 = T-1320 の予算〔燃える物 1000 個で層の流れ 10 ms/刻み 以下〕で確定・D-695 = Q187 を閉じた〔支えは今は 2 次元のまま・T-1339 の時に 3 次元へ〕)。
+- **入れた(push 済み e76e02a1)**: t-1322-grain-layers-born c707f3a7(t-1338 を含む → bc039a14・T-1322 のチケットに司令塔の受け取りを写した 457b4789)/ t-1325-face-cut-3d 463cb02a(bfcd5dc4)/ t-1230-gpu-parts 72556152(e76e02a1)。
+  試験(release 警告 0・RTX 3070 Ti): CPU 26 本(multires 系 5・world_layout・environment_package・phase_layer 系 5・placement_refine・tree_refine_placement・multires_implicit・support_law・support_3d・support_3d_mixed・support_mixed・support_cost・float_check 系 5・dxil_alloca_check)/
+  GPU 7 本(gpu_multires_layers〔HW・WARP〕・gpu_tree_refine_placement〔HW・WARP〕・gpu_lab_box・gpu_phase_layer〔HW・WARP〕)全部合格。印 4 本(t-1338 は t-1322 に含めた)を done/ へ。
+- **作業中**: t-1337-coarse-sweeps-2 を main へ(bdbdbdfc・perf.md の末尾の衝突は両方残した・未 push)→ 試験 → t-1273-step-gap-default → 試験 → push。その次に t-1320-shell-trim(wt5・新しく来た印)。
+  T-1337 のチケットが 2 枚(本体の T-1337-coarse-sweeps-2.md と作業役の T-1337-coarsest-sweeps-default.md)。t-1273 を入れた後に作業役の中身を本体の名前の方へまとめる。
+
 ## この仕事でしたこと(2026-11-12・本体の作業役・24 回目: runner/ready の印 8 本のマージ・試験・push。入れ物の再起動の後、司令塔がこのチャットを締めた)
 - **マージ(--no-ff・来た順・既定を変えないものだけをまとめて 1 回のビルドと試験)**: wt2 t-1305-layer-request-cost e7a1de9a / wt6 t-1230-implicit-parts 72f39825 → t-1230-implicit-gpu bdfc31d5(★8)/
   wt4 t-1228-rc-sources 5d88e46c / wt5 t-1314-halo-covered b13ef882(multires_refine_place.hlsli は t-1305 と自動で合わさった)/ wt5 t-1320-shell-scale 49adda6d → t-1332-shell-exchange-order 47490fba / wt3 t-1295-face-forces-3d 01751a24。
