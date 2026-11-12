@@ -411,6 +411,10 @@ namespace {
         uint32_t multigridSmooth = 2;  // 調べるだけ(T-1321): 段ごとの前と後の赤黒の数
         uint32_t multigridCycles = 2;  // 調べるだけ(T-1321): V 字の回数(1 = ② を細かい段の赤黒だけで)
         int64_t quietTolerance = 0;    // 調べるだけ: 収まったとみなす 1 回の赤黒の値の変わりの上限
+        uint32_t
+            finish = 0;  // 調べるだけ(T-1343): 仕上げの候補(OhShellFlow::pressureFinish)・残差の線・今の規則と比べるか
+        uint32_t finishLineBits = 7;
+        bool finishCompare = false;
         std::ostream* dump = nullptr;  // 調べるだけ(T-1202): 圧力の問題の書き出し先と、何回に 1 回
         uint32_t dumpEvery = 0;
     };
@@ -423,6 +427,10 @@ namespace {
         uint64_t capped = 0;
         uint64_t multigridWork = 0;  // 多重格子の費用(細かい格子の赤黒 1 回 = 1000)
         uint64_t activeWork = 0;     // 収まるまでの赤黒を隣が変わったボクセルだけ回した時(同じ単位。T-1202)
+        uint64_t finishCycles = 0;   // 仕上げの候補(T-1343): V 字の回数の和・一番多い・上限に当たった・費用
+        uint32_t finishMost = 0;
+        uint64_t finishCapped = 0;
+        uint64_t finishWork = 0;
     };
 
     struct Burn {
@@ -499,6 +507,9 @@ namespace {
                                .pressureMultigrid = pressure.multigrid,
                                .pressureMultigridSmooth = pressure.multigridSmooth,
                                .pressureMultigridCycles = pressure.multigridCycles,
+                               .pressureFinish = pressure.finish,
+                               .pressureFinishLineBits = pressure.finishLineBits,
+                               .pressureFinishCompare = pressure.finishCompare,
                                .pressureQuietTolerance = pressure.quietTolerance,
                                .gapSweeps = pressure.gapSweeps,
                                .skeletonWalls = skeletonWalls,
@@ -547,7 +558,11 @@ namespace {
             const uint64_t cappedBefore = flow.pressureCapped;
             const uint64_t multigridBefore = flow.pressureMultigridWork;
             const uint64_t activeBefore = flow.pressureActiveWork;
+            const uint64_t finishCyclesBefore = flow.pressureFinishCycles;
+            const uint64_t finishCappedBefore = flow.pressureFinishCapped;
+            const uint64_t finishWorkBefore = flow.pressureFinishWork;
             flow.pressureMostSweeps = 0;
+            flow.pressureFinishMostCycles = 0;
             if (splits == 1) {
                 test::StepObjectHeat(shared, gases, world, lensOn, WORLD_SEED, tick);
                 if (mode == ShellMode::Flow)
@@ -571,6 +586,10 @@ namespace {
                 stats.capped += flow.pressureCapped - cappedBefore;
                 stats.multigridWork += flow.pressureMultigridWork - multigridBefore;
                 stats.activeWork += flow.pressureActiveWork - activeBefore;
+                stats.finishCycles += flow.pressureFinishCycles - finishCyclesBefore;
+                stats.finishMost = std::max(stats.finishMost, flow.pressureFinishMostCycles);
+                stats.finishCapped += flow.pressureFinishCapped - finishCappedBefore;
+                stats.finishWork += flow.pressureFinishWork - finishWorkBefore;
             }
 
             if (probe) {
@@ -753,6 +772,19 @@ namespace {
             }
 
             std::printf("\n");
+            if (burn.sweepStats[0].finishWork + burn.sweepStats[1].finishWork + burn.sweepStats[2].finishWork != 0) {
+                std::printf("  仕上げの候補(T-1343。V 字の平均 / 一番多い / 上限に当たった・費用 赤黒 N 回分):");
+                for (size_t phase = 0; phase < names.size(); ++phase) {
+                    const SweepStats& stats = burn.sweepStats[phase];
+                    const double solves = static_cast<double>(std::max<uint64_t>(stats.solves, 1));
+                    std::printf(" %s %.2f / %u / %llu・%.1f", names[phase],
+                                static_cast<double>(stats.finishCycles) / solves, stats.finishMost,
+                                static_cast<unsigned long long>(stats.finishCapped),
+                                static_cast<double>(stats.finishWork) / (1000.0 * solves));
+                }
+
+                std::printf("\n");
+            }
         }
 
         if (burn.gapReferenceQ16 != 0)
@@ -816,10 +848,19 @@ int main(int argc, char** argv) {
 
         // 調べるだけ(T-1202): 圧力の問題を書き出す(ファイル・何回に 1 回)
         std::ofstream dump;
-        if (argc >= 17) {
+        if (argc >= 17 && std::string_view(argv[15]) != "-") {
             dump.open(argv[15], std::ios::binary);
             pressure.dump = &dump;
             pressure.dumpEvery = static_cast<uint32_t>(std::atoi(argv[16]));
+        }
+
+        // 調べるだけ(T-1343)[仕上げの候補 = 候補 × 100 + 残差の線 × 10 + 今の規則と比べるか(1)。例 171 = (i)・線 7・比べる]
+        //   書き出しを使わない時は 15・16 番目を「- 0」に
+        if (argc >= 18) {
+            const auto rule = static_cast<uint32_t>(std::atoi(argv[17]));
+            pressure.finish = rule / 100;
+            pressure.finishLineBits = (rule / 10) % 10;
+            pressure.finishCompare = (rule % 10) != 0;
         }
 
         const uint32_t sweeps = pressure.sweeps;
@@ -836,9 +877,12 @@ int main(int argc, char** argv) {
                       pressure.untilQuiet ? "・収まるまで" : "・決まった回数",
                       pressure.warmStart ? "・温めた始まり" : "", pressure.multigrid ? "・多重格子" : "");
         Print(FUELS[fuelIndex].name, label, cellLevel, burn);
-        std::printf("  圧力: 収まったとみなす変わりの上限 %lld・多重格子 %s(V 字 %u 回・前後の赤黒 %u 回)\n",
-                    static_cast<long long>(pressure.quietTolerance), pressure.multigrid ? "あり" : "なし",
-                    pressure.multigridCycles, pressure.multigridSmooth);
+        std::printf(
+            "  圧力: 収まったとみなす変わりの上限 %lld・多重格子 %s(V 字 %u 回・前後の赤黒 %u 回)・仕上げ %u(線 "
+            "%u・比べ %s)\n",
+            static_cast<long long>(pressure.quietTolerance), pressure.multigrid ? "あり" : "なし",
+            pressure.multigridCycles, pressure.multigridSmooth, pressure.finish, pressure.finishLineBits,
+            pressure.finishCompare ? "あり" : "なし");
 
         return burn.conserved && !burn.failed ? 0 : 1;
     }
