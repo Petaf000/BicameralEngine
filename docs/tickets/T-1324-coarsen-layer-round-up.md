@@ -1,6 +1,6 @@
 # T-1324 層を使う世界で粗くする時の層の端数を舞う粒にしない(和 ÷ 8 の切り上げを量で抑える)
 
-- Status: Doing
+- Status: Done
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1 回分
@@ -12,11 +12,11 @@
 反するので、層を使う世界(cellLayers.enabled・GPU の MR_LAYER_FLAG_GRAIN)だけ 層 = min(和 ÷ 8 の切り上げ, 粗いセルの量) にする(司令塔の照らし 2026-11-12。新しい問いにしない)。
 
 ## 完了条件(チェックできる形で)
-- [ ] CPU: multires_tree.cpp の CoarsenLayers を層を使う世界だけ切り上げ
-- [ ] GPU: multires_graph.hlsl の WriteCoarsenedLayers を LayerGrainFloats() の時だけ切り上げ
-- [ ] 層を使わない世界はビット単位で同じ(gpu_multires_layers の既存の場面・multires_layers の既存の場面)
-- [ ] multires_layers の細かくする / 粗くするに層を使う世界の組(インライン・溢れ)・gpu_multires_layers の本物の鎖に層を使う世界の場面(CPU と HW/WARP がビット一致)
-- [ ] release 警告 0・archmap --check
+- [x] CPU: multires_tree.cpp の CoarsenLayers を層を使う世界だけ切り上げ
+- [x] GPU: multires_graph.hlsl の WriteCoarsenedLayers を LayerGrainFloats() の時だけ切り上げ
+- [x] 層を使わない世界はビット単位で同じ(gpu_multires_layers の既存の場面・multires_layers の既存の場面)
+- [x] multires_layers の細かくする / 粗くするに層を使う世界の組(インライン・溢れ)・gpu_multires_layers の本物の鎖に層を使う世界の場面(CPU と HW/WARP がビット一致)
+- [x] release 警告 0・archmap --check
 
 ## メモ・参考
 - 切り上げても min で量に抑えるので 0 ≤ 層 ≤ 量 は保つ。子が全部層(粒が全部積もった)なら親も全部層(量の整数部)。
@@ -24,3 +24,6 @@
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-11-12 wt2: チケットを作った。CPU(CoarsenLayers)と GPU(WriteCoarsenedLayers)に切り上げ・試験を足した(t-1324-coarsen-layer-round-up。t-1323 の上)。
+- 2026-11-12 wt2: release 警告 0・archmap --check・multires_layers(層を使う世界の細かくする / 粗くする インライン・溢れ = 期待は切り上げを量で抑えた値)・
+  dxil_alloca_check・world_layout・tree_refine_placement・gpu_multires_layers HW/WARP(本物の鎖・層を使う世界を足した)・gpu_multires_uniform・
+  gpu_tree_refine_placement HW/WARP 合格。層を使わない世界の既存の場面は変わらず(記録したハッシュの取り直しは無し)。Done。
