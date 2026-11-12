@@ -1,14 +1,15 @@
 // object_shell_flow.hlsl — 物の箱が囲む空気の層の流れ(D-667 の 2 段目・D-673・T-1143)を GPU で 1 刻み回す研究の形(T-1200)。
 // 式は shaders/common/object_heat.hlsli の「層の流れ」(OhFlowCellOf・OhFlowSpeed・OhFlowBuoyancy・OhFlowMoved ほか)で、
 // CPU リファレンス tests/object_flow_cpu.h(StepShellFlow)とビット単位で同じ。比べと費用は tests/gpu_object_shell_flow_test.cpp。
-// 形: 物 1 つ = 1 グループ。1 刻みの流れの小刻み × 〔見立て → 面 → 運動量を運ぶ・浮力 → 残り → 圧力の赤黒 × 回数 → 圧力の力積 → 出る割合 → 運ぶ・当てる → セルへ〕を
+// 形: 物 1 つ = 1 グループ。1 刻みの流れの小刻み × 〔見立て → 面 → 運動量を運ぶ・浮力 → 残り → 圧力の答え(多重格子を残差の線まで。T-1355)→ 圧力の力積 → 出る割合 → 運ぶ・当てる → セルへ〕を
 // グループの中の同期だけで回す(Dispatch とバリアは 1 刻みに 1 回)。1 つの Dispatch が長くなる箱(赤黒の上限まで回すと時間が箱 × 回数で伸び、
 // Windows の TDR 2 s に当たる。T-1349)は、同じ段を小刻みごとの Dispatch〔⓪〜④・解き始め / 赤黒を続きから n 回ずつ / ⑥〜⑨〕に分けて回す(g_split。T-1350)。
 // 分けても状態はどれも作業場(UAV)か、段の初めに作り直せる groupshared なので、値と順はビット単位で同じ。散らす書き方(CPU の面 → 両側)は集める書き方(ボクセル・面ごとに自分の分だけ)にした。
 // 整数の足し算なので順によらず同じ値になる。圧力の値は、箱が OH_SHELL_SHARED_VOXELS 以下なら groupshared に 32bit で(溢れたら g_stats[1] に数える)、
 // それより大きい箱は作業場(既定のヒープ)に 64bit で置く(g_sharedPotential)。
-// 圧力の反復(T-1201。g_pressureMode): 前の小刻みの圧力の値から解き始め(作業場の potential が層の状態として刻みをまたいで残る)、
-// 1 回の赤黒で値が 1 つも変わらなければ止める(上限 g_pressureSweeps)。止まるかはグループの groupshared の印で決めるので、全スレッドが同じ回数で抜ける。
+// 圧力の答え(g_pressureMode。既定 OH_PRESSURE_TO_LINE = T-1355・Q188 → 案 A): 毎小刻み 0 から多重格子の V 字を残差の線まで回して丸める(MgSolveToLine)。
+// 比べ・調べるだけの規則(T-1201): 整数の赤黒を 1 回で値が 1 つも変わらなくなるまで(上限 g_pressureSweeps。温めた始まりは作業場の potential から)。
+// 止まるかはどちらもグループの groupshared の印で決めるので、全スレッドが同じ回数で抜ける。
 // セルへの受け渡し(T-1332・ADR-0500 の集めて書く段): 物のグループはセルを読むだけ(刻みの初めに g_cellViews へ写し、小刻みごとの自分の分だけをそこへ当てる)、
 // セルへ渡す粗い量は物ごとの g_exchanges に貯める。刻みの終わりの OhShellApplyCells(セル 1 つ = 1 スレッド)が、セルごとに物の順(g_ranges = 登録の順)で
 // 足して 1 回だけ当てる。1 つのセルに物が何個あっても決定的で、CPU の StepShellFlows・ApplyShellFlowToCells とビット単位で同じ。
@@ -139,14 +140,12 @@ FX_CONST uint32_t OH_SHELL_SHARED_VOXELS = 7168;  // 28 KB(groupshared の上限
 FX_CONST uint32_t OH_SHELL_OUTSIDE = 0xFFFFFFFFu;
 FX_CONST uint32_t OH_PRESSURE_UNTIL_QUIET = 1;  // 1 回の赤黒で値が 1 つも変わらなければ止める
 FX_CONST uint32_t OH_PRESSURE_WARM_START = 2;   // 前の小刻みの圧力の値から解き始める
-FX_CONST uint32_t OH_PRESSURE_MULTIGRID = 4;    // 解き始めを多重格子で作る(T-1222。CPU の pressureMultigrid)
+// 答え = 多重格子を残差の線まで回して丸める(既定。T-1355。CPU の pressureFinish = 1。赤黒は回さない)
+FX_CONST uint32_t OH_PRESSURE_TO_LINE = 4;
 // 試験だけ: x が 3 の倍数のボクセルを 32bit に入らない時の道(64bit の欄)に回す(結果は同じ。両方の道を CPU と比べる。T-1320 段 1)
 FX_CONST uint32_t OH_PRESSURE_TEST_WIDE = 8;
 // 詰めた欄の weightMinusX がこの値なら、重みは g_voxelWork の 64bit の欄にある(重みの 0xFFFFFFFF もこちらへ回すので印と重ならない)
 FX_CONST uint32_t OH_PRESSURE_WIDE = 0xFFFFFFFFu;
-// 調べるだけ(T-1321。研究): ② の後に重ねる V 字の数(g_pressureMode の 8〜11 bit。0 = 既定の V 字 2 回。CPU の pressureMultigridCycles − 2)
-FX_CONST uint32_t OH_PRESSURE_MG_EXTRA_SHIFT = 8;
-FX_CONST uint32_t OH_PRESSURE_MG_EXTRA_MASK = 15;
 // 段の印(g_stageMask。測るだけ)
 FX_CONST uint32_t OH_STAGE_VOXELS = 1u << 0;    // ① ボクセルの見立て
 FX_CONST uint32_t OH_STAGE_FACES = 1u << 1;     // ② 面の質量・速さ・重み
@@ -197,6 +196,7 @@ groupshared uint32_t gs_limited;
 groupshared uint32_t gs_fastest;
 groupshared uint32_t gs_failed;
 groupshared uint32_t gs_overflow;
+groupshared uint32_t gs_beyondLine;  // 圧力の答え: 残差が線を超えたボクセルがあったか(T-1355)
 groupshared uint32_t
     gs_pressureMoved[3];  // 赤黒の回ごと(回 % 3)に、値が変わったボクセルがあったか(読む回・書く回・0 に戻す回を分ける)
 // 収まるまでの赤黒の「汚れた」印(T-1222 2 本目): 色ごとに、その色の並び(PressureColour の k)の 1 bit。
@@ -677,15 +677,19 @@ void PressureColour(ShellBox box, uint32_t thread, uint32_t colour, uint32_t slo
     }
 }
 
-// --- 圧力の多重格子の解き始め(T-1222。CPU リファレンス tests/object_flow_cpu.h の PressureMultigrid と同じ規則・ビット単位で同じ)---
-// ① 細かい単位(Ψ × 2^8)で V 字 1 回 → ② 動かない点の残りの幅の真ん中へ寄せて V 字をもう 1 回 → ③ Ψ = 四捨五入(値 ÷ 2^8)。
-// その後は今までと同じ赤黒を収まるまで(止める判定・上限も同じ)。段はすべて作業場 g_multigrid(物ごとに multigridBegin から、段 0 = 細かい格子・段 1.. = 粗い格子を続けて)。
+// --- 圧力の答え: 多重格子を残差の線まで(T-1355。CPU リファレンス tests/object_flow_cpu.h の PressureMultigridToLine と同じ規則・ビット単位で同じ)---
+// 0 から細かい単位(Ψ × 2^8)の V 字を、どのボクセルの残差も 重みの和 × 2^7(Ψ の半分)以下になるまで(上限 32 回)→ Ψ = 四捨五入(値 ÷ 2^8)。
+// 赤黒の仕上げは無い(T-1222〜T-1321 の「解き始め + 整数の赤黒を動かない点まで」を置き換えた。D-677 → Q188 の案 A)。
+// 段はすべて作業場 g_multigrid(物ごとに multigridBegin から、段 0 = 細かい格子・段 1.. = 粗い格子を続けて)。
 // 粗い段: 2 × 2 × 2 をまとめる(奇数の端は 1 つ)。一番粗い段はどの向きも 2 以下(赤黒 16 回)。段の大きさは箱の大きさから毎回数える(GetDimensions を使わない)。
 // 赤黒・残り・まとめる・戻すはグループの同期だけで回す(再帰を使わず、下りの回し → 一番粗い段 → 上りの回し)。
 // 2 本目: 段 0 の値は小さい箱なら groupshared に借りる(MgFineShared)・一番粗い段は 1 波で(MgCoarsestWave)・粗い段の重みは V 字 1 回目だけ作る。
 // T-1285: V 字の中の同期はグループの範囲(MgSync)。小さい段を全部 1 波で回す形・段 0 の丸写しをやめる形は測って採らなかった(runner/t1285/)。
 
-FX_CONST uint32_t OH_MG_FINE_BITS = 8;           // ① ② の細かい単位(Ψ × 2^8)
+FX_CONST uint32_t OH_MG_FINE_BITS = 8;           // 細かい単位(Ψ × 2^8)
+FX_CONST uint32_t OH_MG_LINE_BITS = 7;           // 残差の線 = 重みの和 << この数(7 = Ψ の半分)
+FX_CONST uint32_t OH_MG_MAX_CYCLES = 32;         // V 字の上限(当たったら数える。CPU の pressureFinishMaxCycles)
+FX_CONST uint32_t OH_MG_CAPPED = 0x80000000u;    // MgSolveToLine の戻り値の印: 上限に当たった
 FX_CONST int64_t OH_MG_FINE_SCALE = 16777216;    // 残り(Q16)を細かい単位の右辺に: 65536 × 2^8
 FX_CONST uint32_t OH_MG_SMOOTH_SWEEPS = 2;       // 段ごとの前と後の赤黒
 FX_CONST uint32_t OH_MG_COARSEST_SWEEPS = 16;    // 一番粗い段の赤黒
@@ -1097,17 +1101,48 @@ void MgPrepareFine(ShellBox box, uint32_t thread) {
     }
 }
 
-// ② 動かない点の残りの幅の真ん中へ寄せる: 右辺から 符号(値)×(重みの和 − 1)÷ 2(細かい単位)を引く
-void MgCenterRhs(ShellBox box, uint32_t thread) {
-    const uint32_t count = box.size.x * box.size.y * box.size.z;
-    for (uint32_t v = thread; v < count; v += OH_SHELL_THREADS) {
-        const OhShellMultigrid fine = g_multigrid[box.multigridBegin + v];
-        const uint64_t total = fine.total > 0 ? fine.total : (uint64_t)1;
-        const uint64_t middle = ((total - 1) >> 1) << OH_MG_FINE_BITS;
-        // 値 ≥ 0 なら − middle、負なら + middle(符号を付けて 32bit の 2 つで足す)
-        const int64_t shift = FxApplySign(middle, !MgNegative(MgValueAt(box.multigridBegin, v, MgFineShared(box))));
-        g_multigrid[box.multigridBegin + v].rhs = MgAddSplit(fine.rhs, shift);
+// 段 0 のボクセル v の |残差| が 重みの和 << OH_MG_LINE_BITS を超えるか。残差 = 右辺 + 隣の和 − 重みの和 × 値(CPU の MgWithinLine)。
+// 足し算と大きさ・比べは 32bit の 2 つで(64bit の引き算と同じ値どうしの比べを並べない: T-1078・T-1159)
+bool MgBeyondLine(ShellBox box, uint32_t v, bool onShared) {
+    const uint32_t begin = box.multigridBegin;
+    const OhShellMultigrid voxel = g_multigrid[begin + v];
+    const int64_t applied = (int64_t)voxel.total * MgValueAt(begin, v, onShared);
+    const int64_t neighbours = MgNeighbourSum(begin, box.size, MgCoord(box.size, v), voxel, onShared);
+    const uint64_t left = (uint64_t)MgAddSplit(MgAddSplit(voxel.rhs, neighbours), -applied);
+    uint32_t low = (uint32_t)(left & 0xFFFFFFFFull);
+    uint32_t high = (uint32_t)(left >> 32);
+    if ((high >> 31) != 0) {
+        // 負なら 2 の補数で大きさに(繰り上がりを手で)
+        low = ~low + 1u;
+        high = ~high + (low == 0 ? 1u : 0u);
     }
+
+    // `line` は HLSL の予約語なので limit
+    const uint64_t limit = (voxel.total > 0 ? voxel.total : (uint64_t)1) << OH_MG_LINE_BITS;
+    const uint32_t limitLow = (uint32_t)(limit & 0xFFFFFFFFull);
+    const uint32_t limitHigh = (uint32_t)(limit >> 32);
+
+    return high > limitHigh || (high == limitHigh && low > limitLow);
+}
+
+// どのボクセルの残差も線の内か(グループの全スレッドで呼ぶ。全スレッドが同じ答えを返す)
+bool MgWithinLine(ShellBox box, uint32_t thread) {
+    if (thread == 0)
+        gs_beyondLine = 0;
+
+    MgSync();
+    const uint32_t count = box.size.x * box.size.y * box.size.z;
+    const bool onShared = MgFineShared(box);
+    bool beyond = false;
+    for (uint32_t v = thread; v < count; v += OH_SHELL_THREADS)
+        beyond = beyond || MgBeyondLine(box, v, onShared);
+
+    if (beyond)
+        gs_beyondLine = 1;
+
+    MgSync();
+
+    return gs_beyondLine == 0;
 }
 
 // ③ Ψ = 四捨五入(値 ÷ 2^8。0 から遠い方へ)を圧力の値に
@@ -1129,23 +1164,31 @@ void MgFinishToPotential(ShellBox box, uint32_t thread) {
     }
 }
 
-// ① ② ③ の解き始め(グループの全スレッドで呼ぶ。前後に同期)
-void MgSolveStart(ShellBox box, uint32_t thread) {
+// 圧力の答え(グループの全スレッドで呼ぶ。前後に同期)。戻り値 = V 字の回数(上限に当たったら OH_MG_CAPPED も)。
+// 回数は状態だけで決まる(残差の比べは全部のボクセルの OR = 順に依らない)。粗い段の面の重みは 1 回目の V 字だけ作る
+uint32_t MgSolveToLine(ShellBox box, uint32_t thread) {
     MgPrepareFine(box, thread);
     MgSync();
-    MgCycle(box, thread, true);
-    MgCenterRhs(box, thread);
-    MgSync();
-    MgCycle(box, thread, false);
+    uint32_t cycles = 0;
+    uint32_t capped = 0;
+    for (uint32_t check = 0; check <= OH_MG_MAX_CYCLES; ++check) {
+        // 残差の印は MgWithinLine の 2 つ目の同期の後に全スレッドが読み、次に 0 に戻すのは V 字の中の同期の後
+        if (MgWithinLine(box, thread))
+            break;
 
-    // V 字を重ねる(T-1321 の調べ。回数はルート定数なのでグループの全スレッドが同じ回数を回す。既定は 0 回)
-    const uint32_t extraCycles = (g_pressureMode >> OH_PRESSURE_MG_EXTRA_SHIFT) & OH_PRESSURE_MG_EXTRA_MASK;
-    for (uint32_t cycle = 0; cycle < extraCycles; ++cycle) {
+        if (check == OH_MG_MAX_CYCLES) {
+            capped = OH_MG_CAPPED;
+            break;
+        }
+
+        MgCycle(box, thread, check == 0);
         MgSync();
-        MgCycle(box, thread, false);
+        ++cycles;
     }
 
     MgFinishToPotential(box, thread);
+
+    return cycles | capped;
 }
 
 // ⑥ 圧力の力積(ΔM = (Ψ_i − Ψ_j)× 基準の質量)→ 速さ。運動量の真実は壁なら 0
@@ -1389,9 +1432,9 @@ void ResetPressureMarks(uint32_t thread) {
     }
 }
 
-// ⓪ 〜 ④ と解き始め(グループの全スレッドで呼ぶ。終わりに同期)
-void SubstepPrepare(GpuShellTable table, GpuShellGases gases, ShellBox box, uint32_t thread, uint32_t objectIndex,
-                    uint64_t gravity) {
+// ⓪ 〜 ④ と圧力の答え(グループの全スレッドで呼ぶ。終わりに同期)。戻り値 = 線までの V 字の回数(MgSolveToLine。ほかの規則は 0)
+uint32_t SubstepPrepare(GpuShellTable table, GpuShellGases gases, ShellBox box, uint32_t thread, uint32_t objectIndex,
+                        uint64_t gravity) {
     if (thread == 0)
         PrepareCell(table, gases, g_cellViews[objectIndex]);
 
@@ -1414,18 +1457,22 @@ void SubstepPrepare(GpuShellTable table, GpuShellGases gases, ShellBox box, uint
         PrepareResidual(box, thread);
 
     AllMemoryBarrierWithGroupSync();
-    // 解き始めを多重格子で(T-1222。g_pressureMode はルート定数なのでグループの全スレッドが同じ道を通る)
-    if ((g_pressureMode & OH_PRESSURE_MULTIGRID) != 0 && (g_stageMask & OH_STAGE_PRESSURE) != 0) {
-        MgSolveStart(box, thread);
+    // 圧力の答え(T-1355。g_pressureMode はルート定数なのでグループの全スレッドが同じ道を通る)
+    uint32_t solved = 0;
+    if ((g_pressureMode & OH_PRESSURE_TO_LINE) != 0 && (g_stageMask & OH_STAGE_PRESSURE) != 0) {
+        solved = MgSolveToLine(box, thread);
         MgSync();
     }
+
+    return solved;
 }
 
 // ⑤ 圧力の赤黒を最大 count 回(収まるまでなら、1 回の赤黒で値が 1 つも変わらなければ止めて quiet)。戻り値 = 回した回数。
 // 圧力の値が groupshared なら、反復の間は groupshared の同期だけ(作業場の読みは反復の前に書いた値だけ)。
 // 回 sweep は印 sweep % 3 に書き、終わりの同期の後に全スレッドが読む。次の回の印は今 0 に戻す(最後に読まれたのは 2 回前)
 uint32_t PressureSweeps(ShellBox box, uint32_t thread, uint32_t count, out bool quiet) {
-    const bool untilQuiet = (g_pressureMode & OH_PRESSURE_UNTIL_QUIET) != 0;
+    const bool untilQuiet = (g_pressureMode & OH_PRESSURE_UNTIL_QUIET) != 0 &&
+                            (g_pressureMode & OH_PRESSURE_TO_LINE) == 0;
     const bool dirtyOnly = PressureSlots(box) <= OH_SHELL_DIRTY_WORDS * 32;
     uint32_t used = 0;
     quiet = false;
@@ -1513,8 +1560,10 @@ void FlowStages(GpuShellTable table, GpuShellGases gases, OhObject object, uint3
     const uint32_t phase = SplitPhase();
     const bool whole = phase == OH_SPLIT_WHOLE;
     const uint32_t scratch = SplitScratch(objectIndex);
-    const bool untilQuiet = (g_pressureMode & OH_PRESSURE_UNTIL_QUIET) != 0;
-    const uint32_t sweepLimit = (g_stageMask & OH_STAGE_PRESSURE) != 0 ? g_pressureSweeps : 0u;
+    // 線までの答え(既定)は赤黒を回さない。回数の数え上げの欄には V 字の回数と上限に当たった数を入れる(CPU と同じ。T-1355)
+    const bool toLine = (g_pressureMode & OH_PRESSURE_TO_LINE) != 0;
+    const bool untilQuiet = (g_pressureMode & OH_PRESSURE_UNTIL_QUIET) != 0 && !toLine;
+    const uint32_t sweepLimit = (g_stageMask & OH_STAGE_PRESSURE) != 0 && !toLine ? g_pressureSweeps : 0u;
     // 赤黒の続き(分けた形だけ。全スレッドが同じ値を読む。書くのは終わりの同期の後の 1 スレッドだけ)
     const uint32_t usedBefore = whole ? 0u : g_stats[scratch + 0];
     const bool quietBefore = !whole && g_stats[scratch + 1] != 0;
@@ -1545,10 +1594,18 @@ void FlowStages(GpuShellTable table, GpuShellGases gases, OhObject object, uint3
     uint32_t capped = 0;
     bool quiet = false;
     for (uint32_t substep = first; substep < last; ++substep) {
+        uint32_t solved = 0;
         if (doPrepare)
-            SubstepPrepare(table, gases, box, thread, objectIndex, gravity);
+            solved = SubstepPrepare(table, gases, box, thread, objectIndex, gravity);
         else if (thread == 0)
             PrepareCell(table, gases, g_cellViews[objectIndex]);
+
+        if (toLine && doPrepare) {
+            const uint32_t cycles = solved & ~OH_MG_CAPPED;
+            sweepsUsed += cycles;
+            mostSweeps = max(mostSweeps, cycles);
+            capped += (solved & OH_MG_CAPPED) != 0 ? 1u : 0u;
+        }
 
         if (doSweeps) {
             if (!whole) {
@@ -1588,13 +1645,14 @@ void FlowStages(GpuShellTable table, GpuShellGases gases, OhObject object, uint3
     InterlockedOr(g_stats[scratch + 2], GroupFailures(), failures);
     failures |= GroupFailures();
     if (phase == OH_SPLIT_PREPARE) {
-        g_stats[scratch + 0] = 0;
-        g_stats[scratch + 1] = 0;
+        // 線までの答えなら V 字の回数と「上限に当たらなかった」を、赤黒の続きと「収まった」の欄に(赤黒の段は回らない)
+        g_stats[scratch + 0] = sweepsUsed;
+        g_stats[scratch + 1] = toLine && capped == 0 ? 1u : 0u;
     } else if (phase == OH_SPLIT_SWEEPS) {
         g_stats[scratch + 0] = usedBefore + sweepsUsed;
         g_stats[scratch + 1] = quiet ? 1u : 0u;
     } else {
-        AddSweepStats(1, usedBefore, usedBefore, untilQuiet && !quietBefore ? 1u : 0u);
+        AddSweepStats(1, usedBefore, usedBefore, (untilQuiet || toLine) && !quietBefore ? 1u : 0u);
     }
 
     if (!tickEnds)

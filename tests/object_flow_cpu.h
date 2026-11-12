@@ -11,13 +11,12 @@
 // 骨格のボクセル: 既定は壁(骨格に面する面は運動量を持たず、骨格の気体の膨らみ・縮みだけが圧力の射影で出入りする = 吹き出す多孔の壁)。
 // skeletonWalls = false なら骨格の中も気体として流れる(気体の割合 = 凝縮相の体積を除いた分。比べ)。
 // 真実: 面の運動量(OhShellFlow::momentum。層を作った時に 0 = 止まった空気、返す時に捨てる)。運動のエネルギーは数えない(音より遅い極限)。
-// 圧力の反復(T-1201): 既定は毎小刻み 0 から解き始め(pressureWarmStart で前の小刻みの値から。層の状態)、1 回の赤黒で値が 1 つも変わらなければ止める
-//   (= 整数の反復の動かない点。上限 pressureSweeps)。収まって止まった時の値はその整数の式の答えそのもの(決まった回数で打ち切らない。D-428)。
-//   ★ ただし上限に当たった小刻みでは成り立っていない(T-1349 の ①): 上限 1,024 回で止まると、その時の値のまま次の段へ進む(数えるだけ =
-//   pressureCapped)。答えは上限の値に依る。1 万ボクセルを超える箱の、層を作った直後の立ち上がり(刻み 5〜11)で当たる。直すのは T-1321
-//   (箱の大きさによらない回数で縮む多重格子)。それまでは、上限に当たった解きの答えは「収まった時の答え」ではない。
-//   回数は状態だけで決まるので決定的(GPU も同じ規則。T-1201)。pressureUntilQuiet = false・pressureWarmStart = false で T-1200 までの形(0 から決まった回数)。
-//   pressureMultigrid(T-1202)で解き始めを多重格子で作る(PressureMultigrid。最後は同じ赤黒を収まるまで。収まるまでの赤黒の費用が 1/3〜1/9)。
+// 圧力の答え(T-1355・Q188 → 案 A。D-677 の「収まるまで解く」を置き換えた): 毎小刻み 0 から、細かい単位(Ψ × 2^8)の多重格子の V 字を
+//   「どのボクセルの残差も 重みの和 × 2^7(= Ψ の半分)以下」になるまで回し(回数は状態だけで決まる。上限 32 = 当たったら数える)、
+//   決まった規則(0 から遠い方へ四捨五入)で丸めた値(PressureMultigridToLine)。整数の赤黒の動かない点へ寄せる仕上げは無い。
+//   線を細かくしても答えが動かない(線 3〜8 で燃え広がりの速さが 0.3 % 以内。T-1343)= 収まった答えで、回数は箱の大きさ・層の数に依らず V 字 2〜3 回。
+//   比べ・調べるだけ(pressureFinish = 0): 整数の赤黒を 1 回で値が 1 つも変わらない点まで(T-1201。上限 pressureSweeps。上限に当たると答えが
+//   上限の値に依る = T-1349 の ①)・その解き始めを多重格子で作る形(pressureMultigrid。T-1202)・0 から決まった回数(T-1200 まで)。
 // 保存: 移すのは対の流れだけ(片側から引いた量を反対側に足す)なので、セル + ボクセル + 対の端数はビット単位で変わらない。
 #pragma once
 
@@ -61,10 +60,11 @@ namespace bicameral::test {
         // 既定なら答えとハッシュは今のまま
         uint32_t pressureMultigridSmooth = 2;
         uint32_t pressureMultigridCycles = 2;
-        // 調べるだけ(T-1343。研究・捨てる試作): 仕上げの規則。0 = 今(整数の赤黒を動かない点まで)/
-        // 1 = 細かい単位の V 字を残差の線まで回して丸める(赤黒の仕上げなし)/ 2 = 1 と同じ答えを丸めず細かい単位のまま力積に /
-        // 3 = 今の丸めの後に整数の残りを V 字 1 回で運んでから今の仕上げ。既定 0 なら答えとハッシュは今のまま
-        uint32_t pressureFinish = 0;
+        // 圧力の答えの規則(T-1355。既定 1): 1 = 細かい単位の V 字を残差の線まで回して丸める(赤黒の仕上げなし。この時の
+        // pressureSweepsUsed・pressureMostSweeps・pressureCapped は V 字の回数・上限 pressureFinishMaxCycles に当たった数)/
+        // 0 = 比べ・調べるだけ: 整数の赤黒を動かない点まで(上の pressureSweeps〜pressureMultigrid の規則)/
+        // 研究の残り(T-1343): 2 = 1 と同じ答えを丸めず細かい単位のまま力積に / 3 = 丸めの後に整数の残りを V 字 1 回で運んでから 0 の仕上げ
+        uint32_t pressureFinish = 1;
         uint32_t pressureFinishLineBits = 7;    // 残差の線 = 重みの和 << この数(細かい単位。7 = Ψ の半分)
         uint32_t pressureFinishMaxCycles = 32;  // 1・2 の V 字の上限(当たったら数える)
         bool pressureFinishCompare =
@@ -74,6 +74,11 @@ namespace bicameral::test {
         uint32_t pressureFinishMostCycles = 0;
         uint64_t pressureFinishCapped = 0;
         uint64_t pressureFinishWork = 0;
+        // 調べるだけ(T-1355。丸めの偏り。pressureFinishCompare の時): 線の答えの符号 ×(線の答え − 動かない点)の和(Ψ の単位)・
+        // 答えごとの「Ψ の符号 × 残差 ÷ 重みの和」の和(Ψ × 2^8 の単位。[0] = 線の答え・[1] = 動かない点)・数えたボクセル(Ψ ≠ 0)
+        int64_t biasLineMinusFixed = 0;
+        std::array<int64_t, 2> biasResidualQ8{};
+        std::array<uint64_t, 2> biasVoxels{};
         // 調べるだけ(T-1201): 「収まった」とみなす 1 回の赤黒の値の変わりの上限(0 = 1 つも変わらない。GPU は 0 だけ)
         int64_t pressureQuietTolerance = 0;
         uint64_t pressureMultigridWork = 0;
@@ -152,6 +157,46 @@ namespace bicameral::test {
                         flow.gapSpeedQ16 = std::max(flow.gapSpeedQ16, std::abs(earlySpeed - settledSpeed));
                         flow.gapReferenceQ16 = std::max(flow.gapReferenceQ16, std::abs(settledSpeed));
                     }
+                }
+            }
+        }
+    }
+
+    // 調べるだけ(T-1355。丸めの偏り): 整数の答え potential の「Ψ の符号 × 残差 ÷ 重みの和」の和(Ψ × 2^8 の単位)と数えたボクセル。
+    // 残差 = 残り × 65536 + 隣の重みつきの和 − 重みの和 × Ψ(赤黒 1 回の式の割る前と同じ単位)。動かない点なら各ボクセル [0, 1) か (−1, 0] の幅
+    inline void MeasureResidualBias(const OhFlowBox& box, const std::array<std::vector<uint64_t>, 3>& weight,
+                                    const std::vector<int64_t>& residual, const std::vector<int64_t>& potential,
+                                    int64_t& sumQ8, uint64_t& voxels) {
+        for (uint32_t z = 0; z < box.size[2]; ++z) {
+            for (uint32_t y = 0; y < box.size[1]; ++y) {
+                for (uint32_t x = 0; x < box.size[0]; ++x) {
+                    const uint32_t c[3] = {x, y, z};
+                    const size_t v = box.Voxel(c);
+                    if (potential[v] == 0)
+                        continue;
+
+                    int64_t sum = residual[v] * 65536;
+                    uint64_t total = 0;
+                    for (uint32_t a = 0; a < 3; ++a) {
+                        uint32_t plus[3] = {x, y, z};
+                        ++plus[a];
+                        const size_t minusFace = box.Face(a, c);
+                        const size_t plusFace = box.Face(a, plus);
+                        total += weight[a][minusFace] + weight[a][plusFace];
+                        if (c[a] > 0) {
+                            uint32_t m[3] = {x, y, z};
+                            --m[a];
+                            sum += static_cast<int64_t>(weight[a][minusFace]) * potential[box.Voxel(m)];
+                        }
+
+                        if (c[a] + 1 < box.size[a])
+                            sum += static_cast<int64_t>(weight[a][plusFace]) * potential[box.Voxel(plus)];
+                    }
+
+                    const int64_t left = sum - (static_cast<int64_t>(total) * potential[v]);
+                    const int64_t q8 = (left * 256) / static_cast<int64_t>(std::max<uint64_t>(total, 1));
+                    sumQ8 += potential[v] > 0 ? q8 : -q8;
+                    ++voxels;
                 }
             }
         }
@@ -742,8 +787,8 @@ namespace bicameral::test {
         const bool toLine = flow.pressureFinish == 1 || flow.pressureFinish == 2;
         std::vector<int64_t> finishAnswer;
         std::vector<int64_t> fineAnswer;
+        OhFinishCount counted;
         if (toLine) {
-            OhFinishCount counted;
             flow.pressureFinishWork += PressureMultigridToLine(
                 box, weight, residual, potential, fineAnswer, flow.pressureMultigridSmooth, flow.pressureFinishLineBits,
                 flow.pressureFinishMaxCycles, counted);
@@ -851,10 +896,17 @@ namespace bicameral::test {
             }
         }
 
-        // 比べ(T-1343): 今の規則の答え(potential)と仕上げの候補の答えの面の速さの差。流れには候補の答えを使う
+        // 比べ(T-1343): 動かない点の答え(potential)と線の答えの面の速さの差・丸めの偏り(T-1355)。流れには線の答えを使う
         if (toLine) {
-            if (flow.pressureFinishCompare)
+            if (flow.pressureFinishCompare) {
                 MeasurePressureGap(box, finishAnswer, potential, flow);
+                MeasureResidualBias(box, weight, residual, finishAnswer, flow.biasResidualQ8[0], flow.biasVoxels[0]);
+                MeasureResidualBias(box, weight, residual, potential, flow.biasResidualQ8[1], flow.biasVoxels[1]);
+                for (size_t v = 0; v < count; ++v) {
+                    const int64_t gap = finishAnswer[v] - potential[v];
+                    flow.biasLineMinusFixed += finishAnswer[v] > 0 ? gap : (finishAnswer[v] < 0 ? -gap : 0);
+                }
+            }
 
             potential = finishAnswer;
         }
@@ -862,12 +914,15 @@ namespace bicameral::test {
         if (flow.pressureWarmStart)
             flow.potential = potential;
 
+        // 回数の数え: 線の答えなら V 字の回数と上限(GPU の数え上げと同じ。T-1355)、でなければ赤黒の回数と上限
+        const uint32_t counts = toLine ? counted.cycles : used;
+        const bool capped = toLine ? counted.capped : flow.pressureUntilQuiet && !quiet;
         ++flow.pressureSolves;
-        flow.pressureSweepsUsed += used;
+        flow.pressureSweepsUsed += counts;
         flow.pressureActiveWork += (activeEvaluations * 1000) / count;
-        flow.pressureMostSweeps = std::max(flow.pressureMostSweeps, used);
-        flow.pressureCapped += flow.pressureUntilQuiet && !quiet ? 1u : 0u;
-        if (flow.pressureUntilQuiet && !quiet && flow.pressureSweeps >= 3) {
+        flow.pressureMostSweeps = std::max(flow.pressureMostSweeps, counts);
+        flow.pressureCapped += capped ? 1u : 0u;
+        if (!toLine && capped && flow.pressureSweeps >= 3) {
             flow.cappedLastMoved += movedCount;
             flow.cappedLastStep = std::max(flow.cappedLastStep, movedStep);
             flow.cappedCycle2 += lastTwo[(flow.pressureSweeps - 1) % 2] == potential ? 1u : 0u;
