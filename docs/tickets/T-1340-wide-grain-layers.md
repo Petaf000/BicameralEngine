@@ -74,4 +74,5 @@
 - 2026-11-13 wt2: 実装(上)。release 警告 0・dxil_alloca_check(新しい 2 つは 0)・float_check 系・archmap --check OK。
   gpu_multires_layers の結果は下の行。既定の答え・ハッシュは変えていない(溢れを使わない変種は同じ式。溢れの世界で粒を生まない表は段を通らない)。
   合格(release・RTX 3070 Ti): gpu_multires_layers〔HW 55 s。10 の 4 場面を含む〕・multires 系 17 本(CPU)。
-  gpu_multires_layers_warp・gpu_multires_wide_overflow・gpu_multires_wide_uniform は返す時に GPU の順番待ち(20261112-160409-test の続き。司令塔が結果を見る)。
+  gpu_multires_layers_warp〔823 s。上限 900 s に近い: T-1341 の時は 288 s。ほかの作業ツリーとの重なりは未確認。新しい 10 は 4 場面 × 12 刻み〕・
+  gpu_multires_wide_overflow〔50 s〕・gpu_multires_wide_uniform も合格。WARP の時間が重なりでないなら、10 を WARP で 1 場面に減らすか上限を上げる(司令塔)。
