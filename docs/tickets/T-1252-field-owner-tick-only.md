@@ -300,3 +300,7 @@
   試験(release 警告 0): gpu_field_region(HW 6 秒・新しい 10 を含む)・gpu_field_region_warp(48 秒)・gpu_field_gather(_warp)・field_owner・multires_sparse・float_check 5 本・dxil_alloca_check 合格・archmap --check OK。
   欄の無い世界: gpu_multires(_warp)・gpu_lab_box・gpu_tree_refine_placement(_warp)・gpu_multires_uniform・gpu_object_heat_nest 合格(既定の答え・ハッシュは変わらない)。
   器が尽きた時の約束を Q189(溢れの塊)と 1 つの芯にした検討を上に(司令塔の印)。残りは「段 2 の残り」1〜4。
+- 2026-11-13(wt6 作業役・段 2 の 7 本目): 保存量の配り手の欄の粗くする余りを GPU の世界の帳簿の列へ(区画の表に帳簿の列・ADR-0532 の 9)を t-1252-conserved-owner に。
+  試験(release 警告 0): gpu_field_region(HW 47 秒・新しい 11 を含む)・gpu_field_region_warp(46 秒)・gpu_field_gather(_warp)・field_owner・multires・multires_state・multires_sparse・
+  float_check 5 本・dxil_alloca_check 合格・archmap --check OK。欄の無い世界: gpu_multires(_warp)・gpu_multires_uniform・gpu_lab_box・gpu_tree_refine_placement(_warp)合格(既定の答え・ハッシュは変わらない)。
+  T-1231(相の層の配り)の GPU の設計の詰めを上に。残りは「段 2 の 6 本目」の「段 2 の残り」2〜4(相の層 = T-1231・器の約束・書き手)。
