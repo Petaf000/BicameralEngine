@@ -1,6 +1,15 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-11-12(本体の作業役 30 回目・22:30 の巡目のマージ。前は 29 回目)
+最終更新: 2026-11-13(本体の作業役 31 回目・22:30 の巡目の締めのマージ。前は 30 回目)
+
+## この仕事でしたこと(2026-11-13・本体の作業役・31 回目〔22:30 の巡目の締め: runner/ready の印のマージ・試験・push〕)
+- **入れた(--no-ff・来た順・どれも既定の切り替えではない・衝突なし)**: wt3 t-1362-mg-startup-cap aff05952(6f9cce58。T-1362 段 1 Done = 根は暖機の面の重みの濃淡・測りの口 --grow-dump だけ)/ wt4 t-1365-radiation-face-continuous 457cd300(00d1e1ab。T-1365 研究の区切り・CPU リファレンスだけの口 faceCoupling 既定 0・おすすめ = 形 2 二流束・T-1367 を分けた)/ wt6 t-1252-conserved-owner ace42c0d(6a0d04ac。T-1252 段 2 の 7 本目 = 保存量の配り手の欄・ADR-0532 の 9)/ wt5 t-1369-lab-box-tests 05bcdae1(f1e00fe2。T-1369・T-1370 Done = lab_box の DISABLED を外した・ctest probe_phase_checks を足した)/ wt2 t-1340-wide-grain-layers-2 06e5a31f(9e768da1。T-1340 Done = 溢れの世界で粒を生む表の層を GPU で・ADR-0533)。
+- **入れなかった**: wt5 t-1356-slope-touch-proto(研究・捨てる試作。印は runner/ready に残す)。
+- **記録**: ROADMAP(T-1252 段 2 の 7 本目・T-1362 段 1 Done〔行はチケット T-1362-mg-startup-cap.md を指す〕・T-1363〔研究・wt3 作業中〕・T-1364〔工学・濃淡が式どおりなら FCG(2)〕・T-1365 区切り・T-1367〔不具合・wt4 が次〕・T-1369 / T-1370 / T-1340 Done)・QUESTIONS(**Q191【エンジン】** = 立ち上がりの数刻みだけ上限 32 で進むのを許すか〔仮 = 案 1 根を先に〕・Q190 に T-1365 のおすすめ形 2・Q189 に T-1340 の仮)・NEXT。
+- **止めたままの試験(今)**: reaction_package_scene・gpu_probe_fire(T-1366)・probe_phase(場面の線。線を外した版 **probe_phase_checks は ctest に入った**〔1063 秒かかることがある〕)。**lab_box は T-1369 で外した**。
+- **試験(release・RTX 3070 Ti)**: 9e768da1 で release ビルド警告 0。GPU と CPU の試験の結果は下の追記。
+- **次の巡目の候補(司令塔)**: wt2 T-1340 の続き(gpu_multires_layers_warp 823 秒が上限 900 秒に近い件)/ wt3 T-1363 → T-1364 / wt4 T-1367 / wt6 T-1231 → 器の約束(Q189)→ T-1227 / T-1228 段 2 / wt5 空き = T-1366(木箱の炎)か T-1331 の土台の形の確定。
+- 次の番号は **D-701・ADR-0479・Q192**(本体。Q191 は使った)。
 
 ## この仕事でしたこと(2026-11-12・本体の作業役・30 回目〔22:30 の巡目: runner/ready の印のマージ・試験・push〕)
 - **入れた(--no-ff・来た順・既定の切り替えではない・衝突なし)**: wt2 t-1341-wide-chain-mismatch 55cd862d(ec62e73a。T-1341 Done = 根は溢れの塊の置き場〔既定 170 塊〕が尽きて GPU が頁を待たせた・試験 RunWideDeepChain だけ・エンジンのコードは不変)/ wt2 t-1340-wide-grain-layers 356e4bde(e7824edc。チケットの文書だけ = 設計の詰め)/ wt4 t-1156-fire-spread-rc 9818006a(937f2236。T-1156 Done = 草原の根は放射の面の崖 τ ≥ 32・測りの口 KeepCascadeCellNet と道具・試験 radiation_scene_spread だけ・シミュの法則は不変)/ wt5 t-1368-lab-probe-failures 01a78da0(文書だけ。T-1368 Done = lab_box・probe_phase の失敗 12 件の根の表・エンジンの不具合 0)/ **最後に 1 本で既定の切り替え** wt3 t-1355-shell-mg-answer 6ac739a4(21c3906b。T-1355 段 1 Done = 層の流れの圧力の答えを多重格子を残差の線まで回して丸めた値に〔D-696〕・ハッシュが変わった〔新しい値はチケット〕・1.2〜2.5 倍速い・T-1357 Done・T-1349 ① Done・残り T-1362 = 立ち上がりで V 字の上限 32 に当たる)/ wt6 t-1252-gather-tree 9e5441f8(T-1252 段 2 の 6 本目 = 集めて書く段を GPU の世界の木の段に・ADR-0532 の 8・既定の答えとハッシュ不変)。
@@ -429,7 +438,7 @@
 - **T-0691 を main へ**(t-0691-gas-stable を --no-ff)。燃える木箱(probe_gas)の負の熱の根: 塊は運動量を割合 F で、質量を移す物質量(MUSCL)で持って出るので、風上に残る運動のエネルギーが (1 − F) K を超え、
   その差(燃える木箱で F 0.7167・μ 0.7200、1 セル 4 J)が熱の列(ADR-0355)を通り抜けて熱を食っていた(全部「運ぶ側」。T-0814 の見込み 1)。
   熱の列の出ていく和にその差を足した(gas_reference.cpp の RestKineticExcess・gas_flow.hlsli の GfRestKineticExcess / GfKineticShare。ADR-0355 追記)。ふつうの流れでは列が効かないので値は変わらない。
-- **probe_gas の DISABLED を外した**(全部 OK: 燃える木箱 熱が負のセル 0・熱の重心 11324 ミリセル・露の 4 場面も 0)。止めたままは reaction_package_scene・lab_box・gpu_probe_fire(T-1113)・probe_phase(T-1110)。
+- **probe_gas の DISABLED を外した**(全部 OK: 燃える木箱 熱が負のセル 0・熱の重心 11324 ミリセル・露の 4 場面も 0)。止めたままは reaction_package_scene・lab_box・gpu_probe_fire(T-1113)・probe_phase(T-1110)。〔2026-11-13 の今: lab_box は T-1369 で外した・probe_phase_checks〔場面の線を外した版〕を ctest に足した。最新は 31 回目の節〕
 - 分けた: **T-1130**(力積の側で小刻みの中だけ熱が負・露の燃える木箱で 1 小刻み 4 セル)・**T-1131**(投影で燃える木箱を流すと区画のほぼ全部の熱が負。前からある見込み)。T-0814 は Done。
 - **wt4 の t-0813(GPU の熱の列。main へはまだ)をマージする時は GfRestKineticExcess も GPU の列へ**(無いと燃える木箱で CPU と一致しない。ROADMAP の T-0813 の行に注)。
 - 根から一つの芯で解く案(運動量も移す質量に比例して運ぶ)は、案 B の運動量の式(土台)を決める時に一緒に(ADR-0355 追記。司令塔へ)。
