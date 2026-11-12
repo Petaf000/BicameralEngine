@@ -10,6 +10,7 @@
 // 順番に依存しない理由: 解決と確定は要求ごとに自分の値だけを書き、取り合いは atomic の最小(小さい番号が勝つ)。
 // 割り当てと解放は 1 グループの累積和で、要求の順に枠を配る・積む(ADR-0016)。数える欄は足し算。
 #include "sim/multires_bindings.hlsli"
+#include "sim/multires_field_access.hlsli"  // 欄の区画(u4 の層の置き場の後ろ。配り手の欄の頁を取る・返す。T-1252)
 #include "sim/multires_layer_access.hlsli"  // 層の置き場(u4。頁を返す時に層の頁も返す。T-1240)
 #ifdef MR_WIDE_CELLS
 #include "sim/multires_wide_access.hlsli"
@@ -288,6 +289,10 @@ bool CoarsenKeepsUniformLayers(uint32_t childSlot, uint32_t parentSlot) {
         // 一様の値の層が違っても頁に広げる(同じ値の子 8 つの層の和 ÷ 8 = 子の層。T-1240)
         if (state.pageNeed == 0 && MrIsUniform(g_blocks[parent]) && !CoarsenKeepsUniformLayers(state.target, parent))
             state.pageNeed = 1;
+
+        // 載せた欄の値が違っても頁に広げる(CPU の CoarsenKeepsUniform。T-0711・T-1252)
+        if (state.pageNeed == 0 && MrIsUniform(g_blocks[parent]) && !CoarsenKeepsUniformCarried(state.target, parent))
+            state.pageNeed = 1;
     } else {
         // 一様な親の鎖は全部一様(頁なし)、頁を持つ親の鎖は全部頁を持つ(T-0102)
         state.blockNeed = state.levels;
@@ -329,6 +334,80 @@ uint32_t RequestLayerNeed(uint32_t i, MrRequestState state) {
         return 0;
 
     return childLayered || UniformHasLayers(target.parent) ? 1u : 0u;
+}
+
+// --- 3b. 配り手の欄の頁(T-1252 段 2。CPU の AllocateOwnerPages: 欄ごとに許可した要求の順に取る。ADR-0532 の 2・3)---
+
+// 要求 i(待ちのもの)の欄の頁が、載せた欄の全部で取れるか(要求の順の累積和 ≤ 取れる数。取れる数は容量だけで決める =
+// CPU の木の段は予算を見ない)。全部のスレッドが呼ぶ(中で 1 グループの累積和)
+bool CarriedPagesFit(uint32_t i, MrRequestState state, bool pending) {
+    bool fit = true;
+    const uint32_t count = CarriedFieldCount();
+    for (uint32_t f = 0; f < count; ++f) {
+        uint32_t need = 0;  // ?: は両側を読むので if で(待ちでない要求の枠を読まない)
+        if (pending && CarriedOwned(f))
+            need = CarriedOwnerNeed(f, i, state);
+
+        LayerInclusiveScan(i, need);
+        const uint32_t available = MfPagesAvailable(CarriedHeader(f, MF_HEADER_CAPACITY), 0u,
+                                                    CarriedHeader(f, MF_HEADER_FREE_COUNT),
+                                                    CarriedHeader(f, MF_HEADER_TOP));
+        fit = fit && gs_layerScan[i] <= available;
+        GroupMemoryBarrierWithGroupSync();  // 次の欄の累積和で gs_layerScan を書き直す前に全部が読み終える
+    }
+
+    return fit;
+}
+
+// 段の中で k 番目に取る欄の頁(空きのスタックの上から k 番目・その後は高さの上。?: は両側を読むので if で)
+uint32_t TakenCarriedPage(uint32_t field, uint32_t k, uint32_t freeCount, uint32_t top) {
+    if (MfTakesFreePage(k, freeCount))
+        return CarriedFreePage(field, MfFreePosition(k, freeCount));
+
+    return MfFreshPage(k, freeCount, top);
+}
+
+// 許可した要求 i の欄の頁を、欄ごとに要求の順の k 番目 = 空きのスタックの上から k 番目・その後は高さの上で取り、
+// セルの頁へ結んで 0 で埋める(CPU の TakeOwnerPage = EnsurePage)。全部のスレッドが呼ぶ
+void TakeCarriedPages(uint32_t i, MrRequestState state, bool granted) {
+    const uint32_t count = CarriedFieldCount();
+    for (uint32_t f = 0; f < count; ++f) {
+        uint32_t need = 0;
+        if (granted && CarriedOwned(f))
+            need = CarriedOwnerNeed(f, i, state);
+
+        const uint32_t freeCount = CarriedHeader(f, MF_HEADER_FREE_COUNT);
+        const uint32_t top = CarriedHeader(f, MF_HEADER_TOP);
+        LayerInclusiveScan(i, need);  // 中のバリアで、全部のスレッドが need を数え終えてから結ぶ
+        const uint32_t first = gs_layerScan[i] - need;
+        const uint32_t total = gs_layerScan[MR_MAX_REQUESTS - 1];
+        for (uint32_t d = 0; d < need; ++d) {
+            const uint32_t k = first + d;
+            SetCarriedPageOf(f, CarriedOwnerCellPage(i, state, d), TakenCarriedPage(f, k, freeCount, top));
+        }
+
+        // --- 取った頁を 0 に(グループで分けて書く。total はグループで一様)---
+        const uint32_t words = MR_BLOCK_CELLS * CarriedComponents(f) * 2u;
+        for (uint32_t n = 0; n < total; ++n) {
+            const uint32_t base = CarriedValueAddress(f, TakenCarriedPage(f, n, freeCount, top), 0, 0);
+            for (uint32_t word = i; word < words; word += MR_MAX_REQUESTS)
+                g_layers[base + word] = 0;
+        }
+
+        DeviceMemoryBarrierWithGroupSync();  // 全部が空きの数・高さ・空きのスタックを読み終えてから書き直す
+        if (i == 0 && total > 0) {
+            const uint32_t fromFree = total < freeCount ? total : freeCount;
+            g_layers[CarriedStoreBase(f) + MF_HEADER_FREE_COUNT] = freeCount - fromFree;
+            g_layers[CarriedStoreBase(f) + MF_HEADER_TOP] = top + (total - fromFree);
+        }
+
+        DeviceMemoryBarrierWithGroupSync();
+    }
+}
+
+// 欄の頁が尽きて断った要求を数える(計器。GPU だけ。CPU は上限が無い)
+void CountCarriedShortage() {
+    InterlockedAdd(g_layers[CarriedStoreBase(0) + MF_HEADER_TREE_SHORTAGE], 1u);
 }
 
 void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot, uint32_t levels) {
@@ -376,9 +455,15 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
     const uint32_t pageSum = gs_pageScan[i];
     const uint32_t layerSum = gs_layerScan[i];
     const bool fits = pending && blockSum <= freeBlocks && fractionSum <= freeFractions && pageSum <= freePages;
-    const bool granted = fits && layerSum <= freeLayers;
-    if (fits && !granted)
+    const bool layersFit = fits && layerSum <= freeLayers;
+    if (fits && !layersFit)
         CountLayerShortage(1);
+
+    // 配り手の欄の頁が尽きたら細かくしない・粗くしない(GPU だけ。層の頁と同じ扱い = 仮。T-1252)
+    const bool carriedFit = CarriedPagesFit(i, state, pending);
+    const bool granted = layersFit && carriedFit;
+    if (layersFit && !carriedFit)
+        CountCarriedShortage();
 
     if (i < count && layerCapacity > 0) {
         const bool layered = granted && layerNeed > 0;
@@ -402,6 +487,8 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
 
     if (i < count)
         g_states[i] = state;
+
+    TakeCarriedPages(i, state, granted);  // 許可の後に要求の順に(state.pageBase で取ったセルの頁が分かる)
 
     // --- GPU の入力の一覧(並びは結果に関係しない)---
     const bool refine = granted && g_requests[i].op == MR_REQUEST_REFINE;
@@ -438,9 +525,32 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
                      MR_GRAPH_INPUT_COARSEN_RECORDS, 4);
 }
 
-    // --- 5. 解放(1 グループ): 返す枠を要求の順に積む・取り合いの印を消す・数える ---
+// --- 5. 解放(1 グループ): 返す枠を要求の順に積む・取り合いの印を消す・数える ---
 
-    [numthreads(MR_MAX_REQUESTS, 1, 1)] void TreeRelease(uint32_t i : SV_GroupIndex) {
+// 1 グループで、スレッド i の返すセルの頁 page(返さないなら MR_NO_PAGE)の載せた欄の頁を、欄ごとに要求の順に空きのスタックへ積む
+// (CPU の ReleasePage: 頁の中身は消さない = 取る時に 0 で埋める)。全部のスレッドが呼ぶ
+void ReleaseCarriedPages(uint32_t i, uint32_t page) {
+    const uint32_t count = CarriedFieldCount();
+    for (uint32_t f = 0; f < count; ++f) {
+        const uint32_t fieldPage = CarriedPageOf(f, page);
+        const bool give = fieldPage != MF_NO_PAGE;
+        const uint32_t freeCount = CarriedHeader(f, MF_HEADER_FREE_COUNT);
+        LayerInclusiveScan(i, give ? 1u : 0u);
+        const uint32_t total = gs_layerScan[MR_MAX_REQUESTS - 1];
+        if (give) {
+            SetCarriedFreePage(f, freeCount + gs_layerScan[i] - 1, fieldPage);
+            SetCarriedPageOf(f, page, MF_NO_PAGE);
+        }
+
+        DeviceMemoryBarrierWithGroupSync();
+        if (i == 0 && total > 0)
+            g_layers[CarriedStoreBase(f) + MF_HEADER_FREE_COUNT] = freeCount + total;
+
+        DeviceMemoryBarrierWithGroupSync();
+    }
+}
+
+[numthreads(MR_MAX_REQUESTS, 1, 1)] void TreeRelease(uint32_t i : SV_GroupIndex) {
     const uint32_t count = RequestCount();
     const uint32_t topBlocks = g_counters[MR_COUNTER_FREE_BLOCKS];
     const uint32_t topFractions = g_counters[MR_COUNTER_FREE_FRACTIONS];
@@ -487,6 +597,9 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
     if (LayerCapacity() > 0)
         ReleaseLayerPages(i, pageRelease != 0 ? state.releasePage : MR_NO_PAGE);
 
+    // 返す頁の載せた欄の頁も要求の順に返す(CPU の ReleaseAll の ReleaseOwnerPages と、Coarsen が返すこの刻みだけの欄の頁。T-1252)
+    ReleaseCarriedPages(i, pageRelease != 0 ? state.releasePage : MR_NO_PAGE);
+
     GroupMemoryBarrierWithGroupSync();
     if (i != 0)
         return;
@@ -504,9 +617,9 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
     g_counters[MR_COUNTER_REQUESTS] = 0;
 }
 
-// --- 6. 索引の作り直し(印がある時だけ)---
+    // --- 6. 索引の作り直し(印がある時だけ)---
 
-[numthreads(TREE_THREADS, 1, 1)] void TreeClearIndex(uint3 dispatchThreadId : SV_DispatchThreadID) {
+    [numthreads(TREE_THREADS, 1, 1)] void TreeClearIndex(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const uint32_t i = dispatchThreadId.x;
     if (g_counters[MR_COUNTER_REBUILD_INDEX] == 0 || i >= g_indexEntries)
         return;
@@ -514,7 +627,7 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
     g_treeWords[TreeIndexAddress(i)] = MR_INDEX_EMPTY;
 }
 
-    [numthreads(TREE_THREADS, 1, 1)] void TreeFillIndex(uint3 dispatchThreadId : SV_DispatchThreadID) {
+[numthreads(TREE_THREADS, 1, 1)] void TreeFillIndex(uint3 dispatchThreadId : SV_DispatchThreadID) {
     const uint32_t slot = dispatchThreadId.x;
     if (g_counters[MR_COUNTER_REBUILD_INDEX] == 0 || slot >= g_worldBlocks)
         return;
@@ -522,7 +635,6 @@ void StoreRefineRecord(uint32_t position, uint32_t request, uint32_t parentSlot,
     if (g_blocks[slot].kind == MR_BLOCK_REAL)
         IndexInsert(slot);
 }
-
 // --- 7. 頁に広げる(刻んだ後。1 グループ。T-0102。multires_nest.cpp の ExpandWantedPages)---
 // 刻む段が MR_PAGE_WANTED を付けた世界のブロックに、枠の順で頁の空きのスタックの上から頁を配り、一覧(MR_GRAPH_INPUT_EXPAND_*)に書く。
 // 頁が足りなければ一様に戻して数え、活性の一覧(u13 = 次の刻みの種)に足す。埋めて刻むのは StepExpanded / ExpandStepNode
