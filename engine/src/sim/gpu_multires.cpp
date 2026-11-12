@@ -1114,14 +1114,13 @@ namespace bicameral::sim {
             return false;
         }
 
-        // 木の段がまだ配れない配り手の欄(保存量 = 粗くする余りの帳簿・相の層 = セルを読む配り。T-1252 の残り・T-1231)は写さない(D-428)
+        // 木の段がまだ配れない配り手の欄(相の層 = セルを読む配り。T-1231)は写さない(D-428)
         for (const MultiresField& field : nest.fields) {
             if (!GpuCarriesField(field) || !SfOwned(field.desc))
                 continue;
 
-            if (SfConserved(field.desc) || (field.desc.owner == state_field::SF_OWNER_PHASE_LAYER && !nest.wideCells)) {
-                Log(Channel::Gpu, Level::Error,
-                    "配り手の欄 {} は GPU の木の段がまだ配れない(保存量の余りの帳簿・相の層の配り。T-1252・T-1231)",
+            if (field.desc.owner == state_field::SF_OWNER_PHASE_LAYER && !nest.wideCells) {
+                Log(Channel::Gpu, Level::Error, "配り手の欄 {} は GPU の木の段がまだ配れない(相の層の配り。T-1231)",
                     field.name);
                 return false;
             }

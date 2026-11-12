@@ -922,7 +922,8 @@ void WriteCoarsenOctantLayers(MrBlock child, uint32_t childSlot, MrBlock parent,
 // --- 配り手の欄のセルの配りの口(粗くする。CPU の ExpandPage の配り手の欄の分と CoarsenOwners。T-1252 段 2)---
 // 1 スレッド = 親の八分の一のセル t。広げる親は八分の一の外のセルを一様の値で(覆われたセルは 0)埋める。
 // 八分の一は子 8 つを SfOwnerCoarsen で(一様のままの親は値が親の値と同じ = TreeSettle が見た)。
-// 親の欄の頁は割り当ての段が取ってある(子に 0 でない値がありうる時)。保存量の配り手の欄の余りの帳簿はまだ(GPU の世界は写さない)。
+// 親の欄の頁は割り当ての段が取ってある(子に 0 でない値がありうる時)。保存量の配り手の欄は余り(子の段の単位)を世界の帳簿の
+// 「粗くした端数・出」の列へ(CPU の CoarsenOwners の AddFieldRemainder。一様のままの親でも足す = 余りは 0。atomic の足し算なので順によらない)。
 // 相の層の配り(セルを読む)はまだ(T-1231)
 void CoarsenCarriedFields(MrBlock child, uint32_t childSlot, MrBlock parent, uint32_t parentSlot, uint32_t parentPage,
                           bool expandParent, uint32_t octant, uint32_t t) {
@@ -933,6 +934,7 @@ void CoarsenCarriedFields(MrBlock child, uint32_t childSlot, MrBlock parent, uin
 
         const uint32_t owner = CarriedOwner(f);
         const uint32_t components = CarriedComponents(f);
+        const uint32_t ledgerColumn = CarriedLedgerColumn(f);
         const bool paged = expandParent || !MrIsUniform(parent);
         const uint32_t parentField = paged ? CarriedPageOf(f, parentPage) : MF_NO_PAGE;
 
@@ -957,6 +959,10 @@ void CoarsenCarriedFields(MrBlock child, uint32_t childSlot, MrBlock parent, uin
                 family.values[j] = LoadCarriedCell(f, child, childSlot, MrChildCell(t, j), c);
 
             const SfCoarsenSum sum = SfOwnerCoarsen(owner, family);
+            if (ledgerColumn != MF_NO_LEDGER_COLUMN)
+                AddWorldLedgerUnits(WlSlot(WL_REASON_COARSEN_REMAINDER, WL_DIRECTION_OUT), child.level,
+                                    ledgerColumn + c, (uint64_t)SfCoarsenRemainder(sum));
+
             if (paged)
                 StoreCarriedPage(f, parentField, index, c, SfCoarsenValue(sum));
         }
