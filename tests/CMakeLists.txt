@@ -134,6 +134,10 @@ target_compile_definitions(radiation_scene_measure PRIVATE
 add_dependencies(radiation_scene_measure bicameral_data)
 add_test(NAME radiation_scene COMMAND radiation_scene_measure)
 set_tests_properties(radiation_scene PROPERTIES TIMEOUT 3000)
+# T-1156: 既定の熱の放射の段(RC)で草が燃え広がる(草の長い帯の τ が 1 セルで 32 未満 = 面が隠れない)/ 表の値(τ 52.8 = 飽和)では
+# 隣の面が隠れて広がらない、の両方。CPU だけ・2 秒(RC の CPU は 64³ で約 0.85 s/刻み。2 つをスレッドで並べて約 2 分)
+add_test(NAME radiation_scene_spread COMMAND radiation_scene_measure "rad=0,sec=2,lc=6000000,expect=1" "rad=0,sec=2,expect=0")
+set_tests_properties(radiation_scene_spread PROPERTIES TIMEOUT 1200)
 add_executable(environment_package_test environment_package_test.cpp)  # 世界の環境の値(分類 environment。T-0400・ADR-0176)
 target_link_libraries(environment_package_test PRIVATE bicameral_reaction_script bicameral_core)
 target_compile_definitions(environment_package_test PRIVATE

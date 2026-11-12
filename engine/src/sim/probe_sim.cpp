@@ -1850,6 +1850,7 @@ namespace bicameral::sim {
 
         // (1d) 放射(段を入れた時だけ。T-0585・ADR-0263): 液体の後・伝導と反応の前(段の順: コマンド → 物理の熱 → 気体 → 液体 → 放射 → 伝導と反応)
         m_cascadeReport = {};
+        m_cascadeCellNet.clear();
         if (m_radiation)
             StepRadiation(tick, currentBase, seeds);
         else if (m_cascade.enabled)

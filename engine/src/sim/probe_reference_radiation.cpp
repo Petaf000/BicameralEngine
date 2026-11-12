@@ -128,6 +128,8 @@ namespace bicameral::sim {
         }
 
         // --- セルへ当てる(丸めの端数は帳簿へ)---
+        if (m_cascadeKeepNet)
+            m_cascadeCellNet.assign(PROBE_CELL_COUNT, 0);
         for (uint32_t index = 0; index < PROBE_CELL_COUNT; ++index) {
             int64_t net = 0;
             for (size_t side = 0; side < sideCount; ++side) {
@@ -146,6 +148,9 @@ namespace bicameral::sim {
             m_cascadeReport.rounding += net - (milliJoules * (int64_t{1} << rx::RC_ENERGY_SHIFT));
             if (milliJoules == 0)
                 continue;
+
+            if (m_cascadeKeepNet)
+                m_cascadeCellNet[index] = milliJoules;
 
             rx::RxCell& cell = m_cells[currentBase + index];
             cell.energy += milliJoules;
