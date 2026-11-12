@@ -1,7 +1,7 @@
 # NEXT.md — 次にやること(上から順に)
 
 **2026-11-12 本体の作業役(25 回目・claude/50 の再開): t-1322(t-1338 を含む)・t-1325・t-1230-gpu-parts・t-1337・t-1273 を main へ(試験・push。結果は HANDOFF 25 回目)。**
-**次のチャットがまず入れるもの(runner/ready・来た順・どれも既定の切り替えではない)**: t-1320-shell-trim(wt5)→ t-1252-registry-owner-gpu(wt6)→ t-1328-grid-emit-bits(wt4・文書だけ)→ t-1326-mixed-shear-2d(wt3)→ t-1252-tree-gpu(wt6・registry-owner-gpu を含む)。
+**次のチャットがまず入れるもの(runner/ready・来た順・どれも既定の切り替えではない)**: t-1320-shell-trim(wt5)→ t-1252-registry-owner-gpu(wt6)→ t-1328-grid-emit-bits(wt4・文書だけ)→ t-1326-mixed-shear-2d(wt3)→ t-1252-tree-gpu(wt6・registry-owner-gpu を含む)→ t-1323-grain-layers-born-gpu(wt2)。
 **作業中(各 wt。runner/assign-2026-11-12.md の 13:45 の巡目)**: wt2 T-1323 → T-1324 / wt3 T-1326 → T-1321 / wt4 T-1328 → time_step_tree の延びの測り / wt5 T-1331(段 2)/ wt6 T-1252 段 2 → T-1230 段 2 ③ の残り。
 残る判断待ち: Q93 ②・Q157・Q148。次の番号は **D-696・ADR-0479・Q188**(本体)。
 
