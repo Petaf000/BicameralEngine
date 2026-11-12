@@ -23,6 +23,9 @@ gpu_multires_near_fold(畳んだ頁 0)は、どれも **T-1066(21ceb6e0・2026-1
    (気体 5000・凝縮相 20000。物質の相で分ける)を掛ける。試験のパッケージ(combustion_test)と既定の試験の表は変えない。
 2. 解き方(陰解法の系・多重格子・GPU の段・許容差つきの畳み)を確かめる試験はこの表で回す: gpu_multires_implicit・_tree・_build・
    _conduction(全部)・multires_implicit_tree・gpu_multires_conduction の --near-fold。
+   - 追記(2026-11-13 T-1369): lab_box_test の TestRefinedHeatSpeed(細かくした箱の熱の広がり。陰解法・小刻み・陰解法なしの比べ)もこの表で回す。
+     現実の伝導率では薄い空気の基準が 6 で、2 段までの実験の箱に頭打ちが起きない(T-1368 L5・L6)。この表では基準 0(空気 1)で、
+     陰解法 0.665・小刻み 0.674 が理論 0.686 の 5 % の中・陰解法なし 0.047(T-1369 の測り)。
 3. 計測の側にも空の刻みの確かめを足す(SegFault ではなく理由を返す)。
 
 ## 理由

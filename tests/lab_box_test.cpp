@@ -342,11 +342,10 @@ namespace {
         // --- 刻み SWAP_TICK の始めに速い表へ: その前は替えない時と同じ、後は違う ---
         // 現実の伝導率(D-637)では火を付けたセルから燃え広がらず、刻み SWAP_TICK には燃えている所が無い(T-1368 L2)。
         // 替わり目に、まだ燃えていない木のセルを燃え始めの温度(燃焼が孔の O2 で頭打ちにならない所)にし、替えない側にも同じコマンドを流す
-        // (gpu_lab_box_test の SWAP_IGNITE_CELL と同じ)。そのセルも熱分解の暴走で数十刻みのうちにセルロースを使い切るので、
-        // セルロースは替わり目の COMPARE_TICKS 後に比べる
+        // (gpu_lab_box_test の SWAP_IGNITE_CELL と同じ)。そのセルは熱分解の暴走で 10 刻みほどでどちらの表でもセルロースを使い切り、
+        // 刻み RUN_TICKS には同じ量になるので、セルロースは替えた刻みの終わり(ハッシュを比べるのと同じ刻み)で比べる(T-1369)
         constexpr LabCellPosition SWAP_IGNITE_CELL = {.x = 4, .y = 3, .z = 3};
         constexpr uint32_t WARM_IGNITE_MILLIKELVIN = 600000;
-        constexpr uint64_t COMPARE_TICKS = 10;
         const Command warm = MakeLabTemperatureCommand(SWAP_TICK, 10, SWAP_IGNITE_CELL, WARM_IGNITE_MILLIKELVIN);
         std::vector<Command> plainCommands = MakeFireCommands(materials);
         plainCommands.push_back(warm);
@@ -361,7 +360,7 @@ namespace {
             for (uint64_t tick = 0; tick < RUN_TICKS; ++tick) {
                 StepLabBox(nest, tick < SWAP_TICK ? table : later, tick, CommandsOf(list, tick));
                 hashes.push_back(HashWholeNest(nest));
-                if (tick == SWAP_TICK + COMPARE_TICKS)
+                if (tick == SWAP_TICK)
                     celluloseAtCompare = TotalOf(nest, cellulose);
             }
 
@@ -374,9 +373,9 @@ namespace {
         const std::vector<uint64_t> plainHashes = run(table, plainCommands, plain, plainCellulose);
         const std::vector<uint64_t> swappedHashes = run(*faster, commands, swapped, swappedCellulose);
 
-        std::printf("lab_box_test: 刻み %llu で表を替えた: %llu 刻み後のセルロース %llu µmol(替えない時 %llu)\n",
-                    static_cast<unsigned long long>(SWAP_TICK), static_cast<unsigned long long>(COMPARE_TICKS),
-                    static_cast<unsigned long long>(swappedCellulose), static_cast<unsigned long long>(plainCellulose));
+        std::printf("lab_box_test: 刻み %llu で表を替えた: その刻みの終わりのセルロース %llu µmol(替えない時 %llu)\n",
+                    static_cast<unsigned long long>(SWAP_TICK), static_cast<unsigned long long>(swappedCellulose),
+                    static_cast<unsigned long long>(plainCellulose));
         EXPECT(std::ranges::equal(std::span(swappedHashes).first(SWAP_TICK), std::span(plainHashes).first(SWAP_TICK)));
         EXPECT(swappedHashes[SWAP_TICK] != plainHashes[SWAP_TICK]);
         EXPECT(swappedCellulose < plainCellulose);
