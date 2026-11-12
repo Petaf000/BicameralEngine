@@ -4,7 +4,7 @@
 // 集めて書く段の作業(NestGatherWork)も GPU の作業の並びに写す・戻す(shaders/sim/multires_field_gather.hlsl が読み書きする)。
 // GPU の世界(sim/gpu_multires)には、配り手の欄・この刻みだけの欄を「欄の区画」(u4 の層の置き場の後ろ。並びは multires_field_pages.hlsli)
 // として写す・戻す(MakeGpuFieldRegion・ApplyGpuFieldRegion。一様の値まで)。
-// まだの所(T-1252 の段 2 の残り): 密の欄・一般の欄・木の段(粗く・細かく・集めて書く)が区画を読み書きすること。
+// 区画は木の段(粗く・細かく・影・畳む・広げる・集めて書く)が読み書きする。まだの所: 密の欄・一般の欄。
 #pragma once
 
 #include <cstdint>
@@ -29,6 +29,10 @@ namespace bicameral::sim {
 
     // 像の集めて書く段の報告(CPU の NestGatherReport の形。expanded は「触った一様な枠」= 木の段が広げる数・cellPageShortage は 0)
     [[nodiscard]] NestGatherReport GpuFieldGatherReport(std::span<const uint32_t> words);
+
+    // GPU の世界の集めて書く段(GpuMultires::RecordGather)の報告(置き場の頭 words。CPU の NestGatherReport と同じ数:
+    // expanded = 頁に広げた一様な枠・cellPageShortage = 頁が足りず一様のまま残った触った枠)
+    [[nodiscard]] NestGatherReport GpuTreeGatherReport(std::span<const uint32_t> words);
 
     // GPU の世界が区画に載せる欄か(セル・面の欄で、配り手の欄かこの刻みだけの欄)
     [[nodiscard]] bool GpuCarriesField(const MultiresField& field);

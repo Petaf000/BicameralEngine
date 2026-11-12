@@ -50,6 +50,7 @@ FX_CONST uint32_t MF_HEADER_SHORTAGE = 8;  // 欄の頁が尽きて書かなか�
 FX_CONST uint32_t MF_HEADER_WANTED = 9;    // 触った一様な枠(頁に広げてから書く。木の段の TreeExpand が広げる)
 FX_CONST uint32_t MF_HEADER_TREE_SHORTAGE =
     10;  // 木の段で欄の頁が尽きて断った要求の数(GPU だけの計器。欄 0 の頭に足す。CPU は上限が無い)
+FX_CONST uint32_t MF_HEADER_EXPANDED = 11;  // GPU の世界の集めて書く段が頁に広げた一様な枠(expanded。RecordGather)
 FX_CONST uint32_t MF_HEADER_WORDS = 12;
 
 // --- 集めて書く段の枠ごとの結果 ---

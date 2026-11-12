@@ -165,6 +165,14 @@ namespace bicameral::sim {
                 .cellPageShortage = 0};
     }
 
+    NestGatherReport GpuTreeGatherReport(std::span<const uint32_t> words) {
+        return {.blocks = words[MF_HEADER_WRITTEN],
+                .pagesTaken = words[MF_HEADER_TAKEN],
+                .expanded = words[MF_HEADER_EXPANDED],
+                .pageShortage = words[MF_HEADER_SHORTAGE],
+                .cellPageShortage = words[MF_HEADER_WANTED]};
+    }
+
     std::vector<uint32_t> MakeGpuGatherWorkImage(const NestGatherWork& work) {
         const auto worldBlocks = static_cast<uint32_t>(work.blockOf.size());
         const auto workBlocks = static_cast<uint32_t>(work.slots.size());
