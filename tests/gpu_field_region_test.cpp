@@ -9,6 +9,7 @@
 //   4. 区画を持たない GPU(fieldPages = 0)は配り手の欄のある世界を写さない(RecordUpload が false。D-428)。
 // 木の段が区画を読み書きする(粗くする段・細かくする段・集めて書く段)のは T-1252 の段 2 の残り。引数は gpu_test_options.h。
 #include <cstdint>
+#include <cstring>
 #include <expected>
 #include <format>
 #include <span>
@@ -22,7 +23,7 @@
 #include "gpu/device.h"
 #include "gpu/immediate_queue.h"
 #include "gpu_test_options.h"
-#include "multires_test_scene.h"
+#include "multires_activity_scene.h"
 #include "reaction_test_table.h"
 #include "sim/gpu_multires.h"
 #include "sim/gpu_multires_fields.h"
@@ -51,7 +52,7 @@ namespace {
         return (static_cast<int64_t>(index) * 37) - (static_cast<int64_t>(component) * 1001) + 5;
     }
 
-    // 頁を持つ根(本物の場面の根のセル)と一様な根(空気)の 2 つ。配り手の欄は根の頁の全部のセルと一様な根の一様の値に書く
+    // 頁を持つ根(本物の場面の根のセル)と一様な根(反応しない空気)の 2 つ。配り手の欄は根の頁の全部のセルと一様な根の一様の値に書く
     FieldWorld MakeFieldWorld(const sim::BakedReactionTable& table) {
         FieldWorld world{
             .nest = sim::MakeMultiresNest(test::MakeMultiresCapacity(
@@ -64,7 +65,8 @@ namespace {
                                             SfMakeTickDesc(SF_PLACE_CELL, SF_TYPE_I64, SF_PHASE_NONE, 2));
 
         const uint32_t paged = sim::PlaceRootBlock(nest, 0, 0, 0, test::MakeMultiresRootCells(table));
-        const std::vector<RxCell> air(MR_BLOCK_CELLS, test::MakeMultiresRootCells(table)[0]);
+        // 一様な根は反応しない空気(刻みで広がらない。広げる段はまだ区画を読まない = 段 2 の残り)
+        const std::vector<RxCell> air(MR_BLOCK_CELLS, test::MakeAirCell(table));
         const uint32_t uniform = sim::PlaceRootBlock(nest, 8, 0, 0, air);
         if (!MrIsUniform(nest.blocks[paged])) {
             for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
@@ -84,8 +86,13 @@ namespace {
     // 載せる欄の置き場が同じか(頁の番号・空きのスタック・頁の値・一様の値まで)
     std::expected<void, std::string> CompareFields(const sim::MultiresNest& cpu, const sim::MultiresNest& read,
                                                    std::string_view where) {
-        if (sim::HashWholeNest(cpu) != sim::HashWholeNest(read))
-            return std::unexpected(std::format("{}: CPU と GPU の状態の要約が違う", where));
+        if (sim::HashWholeNest(cpu) != sim::HashWholeNest(read)) {
+            const bool cellsSame = cpu.blocks.size() == read.blocks.size() &&
+                                   std::memcmp(cpu.blocks.data(), read.blocks.data(),
+                                               cpu.blocks.size() * sizeof(MrBlock)) == 0;
+            return std::unexpected(
+                std::format("{}: CPU と GPU の状態の要約が違う(枠の見出し {})", where, cellsSame ? "同じ" : "違う"));
+        }
 
         for (uint32_t field = 0; field < cpu.fields.size(); ++field) {
             if (!sim::GpuCarriesField(cpu.fields[field]))

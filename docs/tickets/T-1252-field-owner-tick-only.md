@@ -107,6 +107,36 @@
   その時 u5 は T-1323 の写しなので、**欄の置き場は u4 の層の置き場の後ろに並べる**(1 つのバッファ。g_external2 = 欄の置き場の始まりの語)に変える方がよい(仮)。
   足す場所: T-1323 = 刻みの段の前後(写し・比べる段)/ この仕事 = Allocate・TreeRelease・CoarsenRequest(multires_graph.hlsl 811)・RefineLevel の層の配りの後・TreeExpand。同じ関数に足すのは RefineLevel と TreeExpand だけ(層の配りの後ろに欄の配り)。
 
+## 段 2 の 3 本目(2026-11-12 wt6 作業役。ブランチ t-1252-tree-gpu-2 = t-1252-tree-gpu の上)
+- **入った(司令塔の受け取り 15:55 の形 = u5 ではなく u4 の層の置き場の後ろ)**: GPU の世界の「欄の区画」。
+  並び(common/multires_field_pages.hlsli): [欄の数 N][表 × N × 4 語(CPU の登録の番号・配り手の番号・置き場の始まり・一様の値の始まり。区画の始まりからの語)]
+  [欄ごと: 置き場(ADR-0532 の 1 のまま)][一様の値 × 枠 × 値の数 × 2 語]。載せる欄 = セル・面の疎な欄のうち配り手の欄・この刻みだけの欄(GpuCarriesField)。
+  GpuMultiresOptions::fieldPages(欄ごとの欄の頁の数。0 = 持たない)・fieldValues(値の数の和の上限。0 = SF_MAX_COMPONENTS)。
+  バッファは層の置き場と同じ 1 本(m_layerBuffer。層か欄を持つ世界だけ作る)= 層の置き場 [0, LayerStoreWords) の後ろに区画(層を持たない世界は区画が 0 語目から)。
+  BindLayers: g_external2 = 区画の始まりの語(FieldRegionStart)・g_external3 = 載せた欄の数(0 = 区画を読まない)。ルート署名は変わらない(64/64)。
+  RecordUpload が区画を写す(MakeGpuFieldRegion)・Read が戻す(ApplyGpuFieldRegion。読み戻し先の nest が同じ欄を登録している時だけ)。
+  **区画を持たない GPU(fieldPages = 0)は載せる欄のある世界を写さない**(RecordUpload が false。D-428)。今の main で載せる欄を GPU に写す道は無い
+  (相の層の Ec = EnablePhaseLayerEnergy は CPU の試験だけ。grep 済み)= 既存の GPU の試験は影響なし。
+- **途中の形の注意**: 木の段(粗くする・細かくする・広げる・集めて書く・畳む)はまだ区画を読み書きしない。fieldPages > 0 で載せる欄のある世界に細かく/粗くする要求・畳む・広げるを通すと配り手の欄が CPU と変わる
+  (使い手が無い間だけの形。options のコメントに書いた)。
+- 試験 `gpu_field_region`(HW・WARP): 1 写して戻す(配り手の欄 3 値 = 頁を持つ根の全セル + 一様な根の一様の値・この刻みだけの欄 2 値)→ 置き場(pageOf・空き・頁・一様)と要約が同じ /
+  2 8 刻み(要求なし)で毎刻み CPU とビット一致 / 3 欄の無い世界で本物の鎖 70 刻み(区画あり・層の頁 0 と 16)毎刻み一致 / 4 区画を持たない GPU は断る。結果は作業ログ。
+
+### 段 2 の残り(次の作業役へ。この順。足す場所は読んで確かめた)
+1. **割り当ての段(multires_tree.hlsl の TreeAllocate・340 行あたり)**: 層の頁(RequestLayerNeed → LayerInclusiveScan → MrLayerRequestAddress に要求ごとの始まり)と同じ形で、
+   載せた欄ごとに「要求の欄の頁の数」(CPU の multires_tree.cpp の AllocateOwnerPages〔354 行〕と同じ規則: 細かく = 頁を持つ親が欄の頁を持てば鎖の段の数・
+   粗く = 親が頁を持つ枠になりまだ欄の頁が無く、子が欄の頁か 0 でない一様の値を持つか広げる親の一様の値が 0 でない)を要求の順のプレフィックス和で取る
+   (k 番目 = 空きのスタックの上から k 番目・その後は高さ + k − 空き = MfTakesFreePage / MfFreePosition / MfFreshPage)。欄の数は g_external3 の回し(各欄 1 回のスキャン)。
+   要求ごとの始まりの置き場が要る(区画に [欄 × MR_MAX_REQUESTS] を足すか、置き場の頭の後ろに。CPU は容量の上限が無い = GPU は尽きたら数える〔断らない。CPU と揃えるため容量を足りる数に〕)。
+   **注意**: 64bit の値を比べる所(子の値が 0 でないか)は下位・上位の 2 語の OR で(64bit の引き算と比べを並べない)。
+2. **粗くする段**: multires_graph.hlsl の CoarsenRequest(811 行あたり)の一般の段の後に SfOwnerCoarsen(owner の分かれ = T-0397。表の MF_TABLE_OWNER)。余りは帳簿の「粗くした端数・出」の列(CPU の CoarsenOwners)。
+3. **細かくする段**: RefineNode の層の配り(ChildLayerPage・CopyLayerCell。multires_graph.hlsl 146〜245 行)の後ろに欄の配り(SfOwnerRefineChild / SfOwnerRefineUniform・親の八分の一を 0 に)。
+   子の欄の頁は 1 の始まり − 1 − depth(層の MrLayerRequestAddress と同じ取り方)。影は RefineShadow・引き戻しは SfOwnerPullBackChild。
+4. **解放の段**: TreeRelease(443 行)の ReleaseLayerPages(488 行)の後ろに、返すセルの頁の欄の頁を要求の順に空きのスタックへ(CPU の ReleaseOwnerPages〔multires_fields.cpp 1126〕)。
+5. 畳む(TreeFold)・広げる(TreeExpand)・集めて書く段(multires_field_gather.hlsl を区画の置き場で)・SF_OWNER_PHASE_LAYER のセルを読む配り(T-1231)。
+6. 試験: gpu_field_region に field_owner の往復(細かく → 粗く・影)を足し、pageOf まで CPU とビット一致(HW・WARP)。gpu_multires・gpu_lab_box・gpu_tree_refine_placement・gpu_multires_layers は欄の無い世界。
+- wt2 の T-1323 との重なり: 1〜4 は T-1323 が触らない段(Allocate・CoarsenRequest・TreeRelease)。同じ関数は RefineNode の層の配りの後(3)と TreeExpand(5)だけ。u5 は T-1323 の写しのまま(この形は u5 を使わない)。
+
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-10-29(本体 16 回目・設計): ADR-0500 の改訂で作った。
 - 2026-10-29(本体 18 回目・段 1): 登録の印 2 つ・配り手の表(試験用 1 つ)・セルの配りの口(細かく/粗く・影)・集めて書く段・この刻みだけの読む口と境目の検査・SF_MAX_COMPONENTS 12 を CPU に。
