@@ -48,6 +48,11 @@ namespace bicameral::test {
         uint64_t pressureCapped = 0;
         // 解き始めを多重格子で作る(T-1202。最後は同じ赤黒を収まるまで)・その費用の和(細かい格子の赤黒 1 回 = 1000)
         bool pressureMultigrid = false;
+        // 調べるだけ(T-1321。研究): 多重格子の規則。段ごとの前と後の赤黒の数(既定 2 = OH_MG_SMOOTH_SWEEPS)と V 字の回数
+        // (2 = ① と ② の両方で V 字〔既定〕・1 = ② の寄せの後は V 字の代わりに細かい段の赤黒を 2 × 前後の数だけ・3 以上 = ② の後に V 字を重ねる)。
+        // 既定なら答えとハッシュは今のまま
+        uint32_t pressureMultigridSmooth = 2;
+        uint32_t pressureMultigridCycles = 2;
         // 調べるだけ(T-1201): 「収まった」とみなす 1 回の赤黒の値の変わりの上限(0 = 1 つも変わらない。GPU は 0 だけ)
         int64_t pressureQuietTolerance = 0;
         uint64_t pressureMultigridWork = 0;
@@ -345,8 +350,9 @@ namespace bicameral::test {
         }
     }
 
-    // V 字 1 回。戻り値 = 費用(細かい格子の赤黒 1 回 = 1000。粗い段は数の割合・残りを求めるのは赤黒 1 回・戻しは 0.5 回)
-    inline uint64_t MgCycle(OhMgLevel& level, uint64_t fineCount) {
+    // V 字 1 回。戻り値 = 費用(細かい格子の赤黒 1 回 = 1000。粗い段は数の割合・残りを求めるのは赤黒 1 回・戻しは 0.5 回)。
+    // smooth = 段ごとの前と後の赤黒の数(T-1321。既定 OH_MG_SMOOTH_SWEEPS)
+    inline uint64_t MgCycle(OhMgLevel& level, uint64_t fineCount, uint32_t smooth = OH_MG_SMOOTH_SWEEPS) {
         const uint64_t count = level.Count();
         const bool coarsest = level.size[0] <= 2 && level.size[1] <= 2 && level.size[2] <= 2;
         if (coarsest) {
@@ -356,21 +362,22 @@ namespace bicameral::test {
             return (OH_MG_COARSEST_SWEEPS * 1000 * count) / fineCount;
         }
 
-        for (uint32_t s = 0; s < OH_MG_SMOOTH_SWEEPS; ++s)
+        for (uint32_t s = 0; s < smooth; ++s)
             MgSweep(level);
 
         OhMgLevel coarse = MgCoarsen(level);
-        uint64_t work = MgCycle(coarse, fineCount);
+        uint64_t work = MgCycle(coarse, fineCount, smooth);
         MgProlongAdd(level, coarse);
-        for (uint32_t s = 0; s < OH_MG_SMOOTH_SWEEPS; ++s)
+        for (uint32_t s = 0; s < smooth; ++s)
             MgSweep(level);
 
-        return work + ((((2 * OH_MG_SMOOTH_SWEEPS) + 1) * 1000 * count) + (500 * count)) / fineCount;
+        return work + ((((2 * uint64_t{smooth}) + 1) * 1000 * count) + (500 * count)) / fineCount;
     }
 
-    // ① ② ③ の解き始め(戻り値 = 費用)
+    // ① ② ③ の解き始め(戻り値 = 費用)。smooth・cycles は OhShellFlow の pressureMultigridSmooth・pressureMultigridCycles(T-1321)
     inline uint64_t PressureMultigrid(const OhFlowBox& box, const std::array<std::vector<uint64_t>, 3>& weight,
-                                      const std::vector<int64_t>& residual, std::vector<int64_t>& potential) {
+                                      const std::vector<int64_t>& residual, std::vector<int64_t>& potential,
+                                      uint32_t smooth = OH_MG_SMOOTH_SWEEPS, uint32_t cycles = 2) {
         OhMgLevel fine;
         for (uint32_t a = 0; a < 3; ++a)
             fine.size[a] = box.size[a];
@@ -399,7 +406,7 @@ namespace bicameral::test {
         }
 
         // ①
-        uint64_t work = MgCycle(fine, count);
+        uint64_t work = MgCycle(fine, count, smooth);
 
         // ② 動かない点の残りの幅の真ん中へ寄せる
         for (size_t v = 0; v < count; ++v) {
@@ -407,7 +414,17 @@ namespace bicameral::test {
             fine.rhs[v] -= fine.value[v] >= 0 ? middle : -middle;
         }
 
-        work += MgCycle(fine, count);
+        if (cycles >= 2) {
+            // 3 回以上(T-1321 の調べ): 寄せた右辺のまま V 字を重ねる
+            for (uint32_t cycle = 1; cycle < cycles; ++cycle)
+                work += MgCycle(fine, count, smooth);
+        } else {
+            // V 字 1 回の規則(T-1321): 寄せは細かい段の赤黒だけで均す
+            for (uint32_t s = 0; s < 2 * smooth; ++s)
+                MgSweep(fine);
+
+            work += 2 * uint64_t{smooth} * 1000;
+        }
 
         // ③ 四捨五入(0 から遠い方へ)
         const int64_t halfUnit = int64_t{1} << (OH_MG_FINE_BITS - 1);
@@ -610,7 +627,8 @@ namespace bicameral::test {
             potential = flow.potential;
 
         if (flow.pressureMultigrid)
-            flow.pressureMultigridWork += PressureMultigrid(box, weight, residual, potential);
+            flow.pressureMultigridWork += PressureMultigrid(box, weight, residual, potential,
+                                                            flow.pressureMultigridSmooth, flow.pressureMultigridCycles);
 
         // 隣が変わったボクセル(数えるだけ。最初は全部)
         std::vector<uint8_t> dirty(count, 1);

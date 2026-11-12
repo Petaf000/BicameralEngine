@@ -408,6 +408,8 @@ namespace {
         bool warmStart = false;
         uint32_t gapSweeps = 0;        // 調べるだけ: 0 から解く時のこの回数と止まった時の面の速さの差
         bool multigrid = false;        // 解き始めを多重格子で作る(T-1202)
+        uint32_t multigridSmooth = 2;  // 調べるだけ(T-1321): 段ごとの前と後の赤黒の数
+        uint32_t multigridCycles = 2;  // 調べるだけ(T-1321): V 字の回数(1 = ② を細かい段の赤黒だけで)
         int64_t quietTolerance = 0;    // 調べるだけ: 収まったとみなす 1 回の赤黒の値の変わりの上限
         std::ostream* dump = nullptr;  // 調べるだけ(T-1202): 圧力の問題の書き出し先と、何回に 1 回
         uint32_t dumpEvery = 0;
@@ -495,6 +497,8 @@ namespace {
                                .pressureUntilQuiet = pressure.untilQuiet,
                                .pressureWarmStart = pressure.warmStart,
                                .pressureMultigrid = pressure.multigrid,
+                               .pressureMultigridSmooth = pressure.multigridSmooth,
+                               .pressureMultigridCycles = pressure.multigridCycles,
                                .pressureQuietTolerance = pressure.quietTolerance,
                                .gapSweeps = pressure.gapSweeps,
                                .skeletonWalls = skeletonWalls,
@@ -797,8 +801,15 @@ int main(int argc, char** argv) {
         if (argc >= 13)
             pressure.gapSweeps = static_cast<uint32_t>(std::atoi(argv[12]));
 
-        if (argc >= 14)
-            pressure.multigrid = std::atoi(argv[13]) != 0;
+        // [多重格子 0 = なし / 1 = あり(今の規則 = 22)/ 2 桁 = V 字の回数 × 10 + 段ごとの前と後の赤黒の数(T-1321。22・21・12・11)]
+        if (argc >= 14) {
+            const auto rule = static_cast<uint32_t>(std::atoi(argv[13]));
+            pressure.multigrid = rule != 0;
+            if (rule >= 10) {
+                pressure.multigridCycles = rule / 10;
+                pressure.multigridSmooth = rule % 10;
+            }
+        }
 
         if (argc >= 15)
             pressure.quietTolerance = std::atoi(argv[14]);
@@ -825,8 +836,9 @@ int main(int argc, char** argv) {
                       pressure.untilQuiet ? "・収まるまで" : "・決まった回数",
                       pressure.warmStart ? "・温めた始まり" : "", pressure.multigrid ? "・多重格子" : "");
         Print(FUELS[fuelIndex].name, label, cellLevel, burn);
-        std::printf("  圧力: 収まったとみなす変わりの上限 %lld・多重格子 %s\n",
-                    static_cast<long long>(pressure.quietTolerance), pressure.multigrid ? "あり" : "なし");
+        std::printf("  圧力: 収まったとみなす変わりの上限 %lld・多重格子 %s(V 字 %u 回・前後の赤黒 %u 回)\n",
+                    static_cast<long long>(pressure.quietTolerance), pressure.multigrid ? "あり" : "なし",
+                    pressure.multigridCycles, pressure.multigridSmooth);
 
         return burn.conserved && !burn.failed ? 0 : 1;
     }
