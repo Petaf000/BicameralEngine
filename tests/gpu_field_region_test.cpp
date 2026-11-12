@@ -23,6 +23,9 @@
 //   11. 保存量の配り手の欄(T-1252 段 2 の 7 本目): 5 の木の段を保存量の配り手の欄で。細かくした後に鎖の子の値を 8 で割り切れない値に変えて写し、
 //      粗くする余りが世界の帳簿の「粗くした端数・出」の列(NestFieldLedgerBase + NestConservedIndex)に CPU と同じ段・同じ列で載る。
 //      帳簿・置き場・要約が CPU とビット一致・保存の検査(ComputeConservedTotals)が粗くする前後で同じ。
+//   12. 相の層の配り手の欄(T-1231・ADR-0537): EnablePhaseLayerEnergy の世界(混ざったセル・水だけ・空気だけのセルの根)を 2 段の鎖で細かくし、
+//      1 段ずつ粗く戻す(置かれ方を使わない世界・使う世界)。もう 1 つは Ec の頁の無い根を細かくし、子のセルを水だけと空気だけに
+//      入れ替えてから粗くする(混ざらない子から混ざった親 = 割り当ての段が相の層の欄の頁を取る)。毎回置き場・要約が CPU とビット一致。
 // 引数は gpu_test_options.h。
 #include <algorithm>
 #include <cstdint>
@@ -45,6 +48,7 @@
 #include "gpu_test_options.h"
 #include "multires_activity_scene.h"
 #include "multires_uniform_scene.h"
+#include "phase_layer_scene.h"
 #include "reaction_test_table.h"
 #include "sim/gpu_multires.h"
 #include "sim/gpu_multires_fields.h"
@@ -771,6 +775,156 @@ namespace {
         return {};
     }
 
+    // --- 12. 相の層の配り手の欄(セルを読む配り)---
+
+    constexpr uint32_t PL_LAYER_MK = 280000;
+    constexpr uint32_t PL_GAS_MK = 320000;
+
+    struct PhaseCells {
+        RxCell mixed;
+        int64_t mixedCondensed = 0;
+        RxCell water;
+        RxCell air;
+    };
+
+    PhaseCells MakePhaseCells(const sim::BakedReactionTable& table) {
+        const std::vector<test::PlAmount> water = {{"water", 300000000}};
+        const std::vector<test::PlAmount> air = {{"nitrogen", test::PL_AIR_NITROGEN_MICROMOL},
+                                                 {"oxygen", test::PL_AIR_OXYGEN_MICROMOL}};
+        const int64_t layer = test::PlPartEnergyMicrojoules(table, water, PL_LAYER_MK) / 1000;
+        const int64_t gas = test::PlPartEnergyMicrojoules(table, air, PL_GAS_MK) / 1000;
+        std::vector<test::PlAmount> all = water;
+        all.insert(all.end(), air.begin(), air.end());
+
+        PhaseCells cells;
+        cells.mixed = test::MakePhaseLayerCell(table, all, layer + gas);
+        cells.mixedCondensed = layer;
+        cells.water = test::MakePhaseLayerCell(table, water, layer);
+        cells.air = test::MakePhaseLayerCell(table, air, gas);
+
+        return cells;
+    }
+
+    struct PhaseWorld {
+        sim::MultiresNest nest;
+        uint32_t field = sim::MULTIRES_NO_FIELD;
+        uint32_t root = MR_NO_BLOCK;
+    };
+
+    // 頁を持つ根 1 つ。mixedRoot なら 3 つに 1 つが混ざったセル(Ec を書く)・ほかは水だけと空気だけ、偽なら水だけと空気だけ(Ec の頁が無い)
+    PhaseWorld MakePhaseWorld(const sim::BakedReactionTable& table, bool placement, bool mixedRoot) {
+        PhaseWorld world{.nest = sim::MakeMultiresNest(test::MakeMultiresCapacity(table, 16, 4, 16))};
+        sim::MultiresNest& nest = world.nest;
+        world.field = sim::EnablePhaseLayerEnergy(nest, table);
+        if (placement)
+            sim::EnableRefineCellPlacement(nest, table);
+
+        const PhaseCells kinds = MakePhaseCells(table);
+        std::vector<RxCell> cells(MR_BLOCK_CELLS);
+        for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+            const uint32_t kind = mixedRoot ? index % 3 : 1 + (index % 2);
+            cells[index] = kind == 0 ? kinds.mixed : (kind == 1 ? kinds.water : kinds.air);
+        }
+
+        world.root = sim::PlaceRootBlock(nest, 0, 0, 0, cells);
+        static_cast<void>(sim::ExpandNestPage(nest, world.root));
+        for (uint32_t index = 0; mixedRoot && index < MR_BLOCK_CELLS; index += 3)
+            sim::StoreNestField(nest, world.field, world.root, index, 0, kinds.mixedCondensed + index);
+
+        return world;
+    }
+
+    bool AnyPhaseEnergy(const sim::MultiresNest& nest, uint32_t slot) {
+        for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+            if (sim::LoadNestPhaseLayerEnergy(nest, slot, index) != 0)
+                return true;
+        }
+
+        return false;
+    }
+
+    std::expected<void, std::string> RunPhaseChain(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                   gpu::DebugRing& ring, const sim::BakedReactionTable& table,
+                                                   bool placement) {
+        PhaseWorld world = MakePhaseWorld(table, placement, true);
+        if (MrIsUniform(world.nest.blocks[world.root]) || !AnyPhaseEnergy(world.nest, world.root))
+            return std::unexpected("場面の確かめ: 相の層の根が頁と Ec を持たない");
+
+        auto gpu = sim::GpuMultires::Create(device, table, world.nest.capacity, RegionOptions(0));
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        sim::MultiresNest read = world.nest;
+        const std::vector<MrRequest> rounds[] = {{ChainRequest(MR_REQUEST_REFINE, 2)},
+                                                 {ChainRequest(MR_REQUEST_COARSEN, 2)},
+                                                 {ChainRequest(MR_REQUEST_COARSEN, 1)}};
+        for (uint32_t round = 0; round < 3; ++round) {
+            if (auto both = ProcessBoth(queue, ring, *gpu, world.nest, read, rounds[round], round == 0,
+                                        std::format("相の層(置かれ方 {}){} 回目", placement, round));
+                !both)
+                return both;
+
+            const uint32_t chainChild = FindRealBlock(world.nest, 2, false);
+            if (round == 0 && (chainChild == MR_NO_BLOCK || !AnyPhaseEnergy(world.nest, chainChild)))
+                return std::unexpected("場面の確かめ: 細かくした鎖の子が Ec を持たない");
+        }
+
+        Log(Channel::Gpu, Level::Info, "相の層の配り手の欄(置かれ方 {}): 鎖 2 段を細かく → 粗く 2 回とも一致",
+            placement);
+
+        return {};
+    }
+
+    std::expected<void, std::string> RunPhaseRemix(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                   gpu::DebugRing& ring, const sim::BakedReactionTable& table) {
+        PhaseWorld world = MakePhaseWorld(table, true, false);
+        sim::MultiresNest& cpu = world.nest;
+        if (AnyPhaseEnergy(cpu, world.root) || sim::UsedNestFieldPages(cpu, world.field) != 0)
+            return std::unexpected("場面の確かめ: 混ざらない根が Ec の頁を持つ");
+
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, RegionOptions(0));
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        sim::MultiresNest read = cpu;
+        const std::vector<MrRequest> refine = {ChainRequest(MR_REQUEST_REFINE, 1)};
+        if (auto both = ProcessBoth(queue, ring, *gpu, cpu, read, refine, true, "相の層 混ざらない根を細かく"); !both)
+            return both;
+
+        // --- 子のセルを水だけと空気だけに入れ替える(親のセルごとの子 8 つに両方 = 粗くすると混ざった親)---
+        const uint32_t child = FindRealBlock(cpu, 1, false);
+        if (child == MR_NO_BLOCK)
+            return std::unexpected("場面の確かめ: 細かくした子が見つからない");
+
+        const PhaseCells kinds = MakePhaseCells(table);
+        for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
+            sim::StoreNestCell(cpu, child, index, (index % 2) == 0 ? kinds.water : kinds.air);
+
+        const std::vector<MrRequest> coarsen = {ChainRequest(MR_REQUEST_COARSEN, 1)};
+        if (auto both = ProcessBoth(queue, ring, *gpu, cpu, read, coarsen, true, "相の層 混ざった親へ粗く"); !both)
+            return both;
+
+        if (!AnyPhaseEnergy(cpu, world.root))
+            return std::unexpected("場面の確かめ: 混ざらない子から粗くした親が Ec を持たない");
+
+        Log(Channel::Gpu, Level::Info,
+            "相の層の配り手の欄: 混ざらない子 → 混ざった親(親の Ec の頁を割り当ての段が取る)で一致");
+
+        return {};
+    }
+
+    std::expected<void, std::string> RunPhaseLayer(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                   gpu::DebugRing& ring) {
+        const sim::BakedReactionTable table = test::MakePhaseLayerTable();
+        std::expected<void, std::string> ran = RunPhaseChain(device, queue, ring, table, false);
+        if (ran)
+            ran = RunPhaseChain(device, queue, ring, table, true);
+        if (ran)
+            ran = RunPhaseRemix(device, queue, ring, table);
+
+        return ran;
+    }
+
     // --- 4. 区画を持たない GPU は断る ---
     std::expected<void, std::string> RunRefusal(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring,
                                                 const sim::BakedReactionTable& table) {
@@ -833,6 +987,8 @@ namespace {
             ran = RunGather(device->Get(), *queue, *ring, *table);
         if (ran)
             ran = RunConservedOwner(device->Get(), *queue, *ring, *table);
+        if (ran)
+            ran = RunPhaseLayer(device->Get(), *queue, *ring);
         if (!ran) {
             Log(Channel::Gpu, Level::Error, "gpu_field_region_test: FAILED ({})", ran.error());
             return 1;
