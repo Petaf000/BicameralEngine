@@ -331,10 +331,16 @@ namespace bicameral::sim {
         void RecordWideDeferred(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
         void RecordWideBig(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
         void StampStage(ID3D12GraphicsCommandList10* list);
-        // 層を合わせる段(T-1221。層の頁を持たなければ何もしない): u4 に層の置き場を結び、層の頁のセルの層を付け替える
-        void RecordLayerReconcile(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
+        // 層を合わせる段(T-1221。層の頁を持たなければ何もしない): u4 に層の置き場を結び、層の頁のセルの層を付け替える。
+        // afterStep(刻みの段の後)で、層を使う世界で反応が粒を生む表なら、刻む前の写しと比べて生まれた粒を層に足す段(T-1323)
+        void RecordLayerReconcile(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing,
+                                  bool afterStep = false);
+        // 刻む前のセルを写す(層を使う世界で反応が粒を生む表だけ。T-1323)
+        void RecordGrainSnapshot(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
+        // 刻む前のセルの写し(u1 と同じ大きさ)を、要る世界で初めて写す時に作る
+        [[nodiscard]] bool EnsureGrainSnapshot();
 
-        // 層を使う世界の粒の印のある物質を、表の規則が生むか(生むなら写さない。T-1322・T-1323)
+        // 層を使う世界の粒の印のある物質を、表の規則が生むか(生むなら生まれた粒を層に足す段を通す。T-1322・T-1323)
         [[nodiscard]] bool ProducesGrain(const MultiresNest& nest) const;
 
         // 外のバッファの口(u4・u5)と定数の結び先(T-1240: 木の段の間は u4 に層の置き場を結ぶ)
@@ -438,6 +444,11 @@ namespace bicameral::sim {
         std::vector<uint8_t> m_producedSpecies;  // [物質] 表の規則の生成物なら 1(層を使う世界の断り。T-1322)
         uint32_t m_layerUsed = 0;                // 写した時に使った層の頁の数(0 なら層を合わせる段を投げない)
         ComPtr<ID3D12PipelineState> m_layerPipeline;
+        // 層を使う世界で反応が粒を生む表(T-1323): 刻む前のセルの写し(u5)・写す段・生まれた粒を層に足す段
+        bool m_grainBorn = false;
+        ComPtr<ID3D12Resource> m_grainBefore;
+        ComPtr<ID3D12PipelineState> m_grainSnapshotPipeline;
+        ComPtr<ID3D12PipelineState> m_grainReconcilePipeline;
         ComPtr<ID3D12Resource> m_layerBuffer;
         ComPtr<ID3D12Resource> m_layerUpload;
         ComPtr<ID3D12Resource> m_layerReadback;
