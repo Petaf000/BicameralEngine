@@ -1,6 +1,6 @@
 # T-1252 登録に「配り手」と「寿命」・粗くする時のセルの配りの口・集めて書く段(土台。段 1 CPU / 段 2 GPU。ADR-0500 改訂)
 
-- Status: In Progress(2026-11-12 wt6: 段 2 の 3 本目 = GPU の世界の欄の区画まで〔t-1252-tree-gpu-2〕。段 2 の 1 段目 = GPU の欄の頁の置き場の並びと集めて書く段の Compute が CPU と頁の番号までビット一致〔ブランチ t-1252-registry-owner-gpu・ADR-0532〕。木の段への載せは下の「段 2 の残り」。段 1 CPU の主な形は済み・2026-10-29 本体の作業役 18 回目)
+- Status: In Progress(2026-11-12 wt6: 段 2 の 5 本目 = 影の鎖・引き戻し・畳む・広げるまで〔t-1252-tree-gpu-4〕。段 2 の 3 本目 = GPU の世界の欄の区画まで〔t-1252-tree-gpu-2〕。段 2 の 1 段目 = GPU の欄の頁の置き場の並びと集めて書く段の Compute が CPU と頁の番号までビット一致〔ブランチ t-1252-registry-owner-gpu・ADR-0532〕。木の段への載せは下の「段 2 の残り」。段 1 CPU の主な形は済み・2026-10-29 本体の作業役 18 回目)
 - 種類: 工学(土台の共通部分。並走の作業役は自分の都合で広げない = CLAUDE.md §1 の 9)
 - PC: 必須
 - 見積もり: チャット 2〜4 回分(段 1 CPU 1〜2 / 段 2 GPU 1〜2)
@@ -214,3 +214,7 @@
   試験(release 警告 0): gpu_field_region(HW 121 秒・新しい 5・6 を含む)・gpu_field_region_warp・field_owner・dxil_alloca_check 合格・archmap --check OK。
   欄の無い世界の GPU の組 gpu_multires・gpu_lab_box・gpu_tree_refine_placement・gpu_multires_layers(と warp。lab_box は HW だけ)7 本合格。残りは「段 2 の 4 本目」の「段 2 の残り」1〜6。
 - 2026-11-12(wt6 作業役・段 2 の 5 本目): 影の鎖・引き戻し・畳む・刻みの広げる段が欄の区画を読み書き(ADR-0532 の 7)を t-1252-tree-gpu-4 に。試験の結果は次の行。
+  rebase main(4af1dc44 = t-1240-wide-layers-2 の後。multires_graph.hlsl の UniformValueTail の後ろで衝突 = 両方残した)。dxil_alloca_check が 2 回落ちた(写した見出しの子の並びを動的な添字で読む:
+  畳む段の MrFoldValueCell・影の親の LoadCarriedCell)→ 見出しのバッファから直に読む形(CarriedFoldValueCell・LoadCarriedSlotCell)で直した。
+  試験(release 警告 0。rebase の後): gpu_field_region(HW 41 秒・7〜9 を含む)・gpu_field_region_warp(38 秒)・gpu_multires・gpu_multires_layers(_warp 564 秒)・gpu_multires_uniform・gpu_lab_box・
+  gpu_tree_refine_placement・field_owner・multires・multires_sparse・float_check 5 本・dxil_alloca_check 合格・archmap --check OK。残りは「段 2 の 5 本目」の「段 2 の残り」1〜3(集めて書く段・保存量の配り手の欄・相の層)。
