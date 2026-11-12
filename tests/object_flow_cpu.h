@@ -94,6 +94,8 @@ namespace bicameral::test {
         // 調べるだけ(T-1202): pressureDumpEvery 回に 1 回、圧力の問題(箱・面の重み・残り)と止まった答え・回数を書き出す(多重格子の研究用)
         std::ostream* pressureDump = nullptr;
         uint32_t pressureDumpEvery = 0;
+        // 調べるだけ(T-1362): 0 でなければ、線の答えの V 字がこの回数以上だった解きだけを書き出す(pressureDumpEvery に依らない)
+        uint32_t pressureDumpMinCycles = 0;
 
         // --- 1 刻みの受け渡し(作業。真実ではない。T-1332)---
         reaction::RxCell cellView{};      // 囲むセルの見立て = 刻みの初めのセル + この物の小刻みごとの粗い量
@@ -930,9 +932,10 @@ namespace bicameral::test {
         if (!atGap.empty())
             MeasurePressureGap(box, atGap, potential, flow);
 
-        if (flow.pressureDump != nullptr && flow.pressureDumpEvery != 0 &&
-            flow.pressureSolves % flow.pressureDumpEvery == 0)
-            DumpPressureProblem(*flow.pressureDump, box, weight, residual, potential, used);
+        const bool dumpEvery = flow.pressureDumpEvery != 0 && flow.pressureSolves % flow.pressureDumpEvery == 0;
+        const bool dumpSlow = flow.pressureDumpMinCycles != 0 && toLine && counted.cycles >= flow.pressureDumpMinCycles;
+        if (flow.pressureDump != nullptr && (dumpEvery || dumpSlow))
+            DumpPressureProblem(*flow.pressureDump, box, weight, residual, potential, toLine ? counted.cycles : used);
 
         // 運動量に圧力の力積(ΔM = (Ψ_i − Ψ_j)× 基準の質量)→ 速さ
         for (uint32_t a = 0; a < 3; ++a) {
