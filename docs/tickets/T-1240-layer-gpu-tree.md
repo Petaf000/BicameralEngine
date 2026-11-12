@@ -155,6 +155,21 @@ T-1221 の 1 段目は、層の頁を GPU に置き、刻みの段の後に層�
   ④ 試験: gpu_multires_layers に溢れの世界(層 + 溢れのセル・粗くするで 9 種になって断る場面)〔HW・WARP〕・multires_layers(CPU の往復)。dxil_alloca_check(溢れの変種は 6・graph_wide の数を見る)。
 - 注意: 溢れの量を物質で引く時に 64bit の引き算と比べを並べない(T-1078)。溢れの変種の alloca は覆われたかを 1 回だけ読む形で戻した(上)。
 
+## 引き継ぎメモ(2026-11-12 wt2 4 本目。t-1240-wide-layers-2・7 の 5 の ②③④ を書いた)
+- rebase main(50a6cad6)。芯: 層と結ぶ量を溢れまで引く道具を 1 つ(sim/multires_layer_access.hlsli の LayerTail・LayerAmountOf・
+  LayerAfterWriteAt・BoundLayerOfAt・WriteBoundLayersAt)。溢れを使わない変種は MrLayerAfterWrite と同じコード(溢れを読まない)。
+- ② 層を合わせる段の変種 multires_layers_wide(頁の今の面の溢れ)。GpuMultires が m_wideCells で選ぶ。
+- ③ 木の段: multires_graph_wide の細かくする(一様な親の層を値の溢れと結ぶ)・粗くする(WriteWideCoarsenOctantLayers:
+  WriteCoarsenTails の後・子の面を空にする前に、子の量〔溢れまで〕で結んだ層を物質ごとに和 ÷ 8、親の頁の今の面で抑える・
+  広げた親の残りのセルは一様の枠の層を値の溢れと結ぶ)・multires_tree_wide_expand(一様の枠の層を頁へ)・
+  新しい変種 multires_tree_wide_settle(一様な子→一様な親の層の比べを値の溢れまで。SameTailLayers)・
+  multires_tree_wide_resolve(CoarsenLayersFit: 粗いセル 1 つで 0 でない層の物質が 9 種以上なら MR_STATUS_NO_SPACE + 層の足りない数。D-689)。
+  畳む段は溢れのある頁を畳まない(前から)ので、溢れを読まない比べのままで合う。
+- RecordUpload の「溢れを使う世界の層」の断りを外した。代わりに「溢れを使う世界で粒を生む表」は断る(刻む前の溢れを写さない。T-1340 に分ける)。
+- ④ 試験: gpu_multires_layers に RunWideChain(溢れの成分に層のある根〔頁・一様の枠〕× 本物の鎖・影の鎖を毎刻み比べる)・
+  RunWideCoarsenRefusal(最も細かい段を物質の違う層のセルにして粗くする → 断って数える・粗くしない CPU と一致)。
+- 状態は下の作業ログの最後の行を見る(ビルド・試験の結果)。
+
 ## 引き継ぎメモ(2026-11-05 wt2 作業役 6。t-1240-wide-layers-2・7 の 5 の ① 済み)
 - 済み ①: engine/src/sim/gpu_multires_layers.cpp。溢れを使う世界は LoadWidePageCell / LoadWidePageCellLayers で溢れの成分の層まで物質で組に詰め
   (0 でない層が 9 種以上のセルは理由を返す)、戻す時は物質で引き直して StoreWidePageCellWithLayers(溢れの層 cellOverflow[頁].layers も先に消す)。

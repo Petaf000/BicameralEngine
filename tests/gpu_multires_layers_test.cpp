@@ -314,8 +314,14 @@ namespace {
     }
 
     // 溢れを使う世界の根。paged なら頁(セルごとに量が違う)、でなければ一様の枠(全部 WideImageCell(0))
-    sim::MultiresNest MakeWideImageRoot(const sim::BakedReactionTable& table, uint32_t stride, bool paged) {
-        sim::MultiresNest nest = sim::MakeMultiresNest(test::MakeMultiresCapacity(table, 16, 0, 16));
+    sim::MultiresNest MakeWideImageRoot(const sim::BakedReactionTable& table, uint32_t stride, bool paged,
+                                        bool chain = false) {
+        // chain: 鎖の場面の大きさ(本物の鎖 9 段・影の鎖 9 段。multires_test_scene)
+        const sim::MultiresCapacity capacity = chain ? test::MakeMultiresCapacity(table, test::MULTIRES_WORLD_BLOCKS,
+                                                                                  test::MULTIRES_LEVELS,
+                                                                                  test::MULTIRES_FRACTION_CAPACITY)
+                                                     : test::MakeMultiresCapacity(table, 16, 0, 16);
+        sim::MultiresNest nest = sim::MakeMultiresNest(capacity);
         sim::EnableWideCells(nest);
         std::vector<RxCell> cells(MR_BLOCK_CELLS, RxMakeEmptyCell(0));
         if (paged)
@@ -759,6 +765,112 @@ namespace {
         return Compare(cpu, *read, std::format("まとめて {} 刻み", BATCH_TICKS));
     }
 
+    // --- 8. 溢れを使う世界の層(T-1240 の 7 の 5): 溢れの成分にも層のある根で鎖の場面を毎刻み比べる・
+    //     粗くすると層を持つ物質が 9 種以上になる要求は断って数える(D-689)---
+    sim::GpuMultiresOptions WideOptions() {
+        sim::GpuMultiresOptions options = GpuOptions(StepMode::Full, CHAIN_LAYER_PAGES);
+        options.wideCells = true;
+
+        return options;
+    }
+
+    std::expected<void, std::string> RunWideChain(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                  gpu::DebugRing& ring, const sim::BakedReactionTable& table,
+                                                  test::MultiresScenario scenario, bool paged) {
+        sim::MultiresNest cpu = MakeWideImageRoot(table, 3, paged, true);
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, WideOptions());
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        const std::string scene = std::format("溢れの世界の{}({})",
+                                              scenario == test::MultiresScenario::Real ? "本物の鎖" : "影の鎖",
+                                              paged ? "頁" : "一様の枠");
+        const uint64_t firstSum = RootLayerSum(cpu);
+        uint32_t mostLayered = 0;
+        for (uint64_t tick = 0; tick < CHAIN_TICKS; ++tick) {
+            const auto record = [&](ID3D12GraphicsCommandList10* list) {
+                if (tick == 0 && !gpu->RecordUpload(list, cpu))
+                    return false;
+
+                return RecordSceneTick(list, *gpu, ring.GpuAddress(), scenario, tick);
+            };
+            auto read = Execute(queue, ring, *gpu, record);
+            if (!read)
+                return std::unexpected(std::format("{} 刻み {}: {}", scene, tick, read.error()));
+
+            test::StepMultiresScene(cpu, table, scenario, tick);
+            if (auto compared = Compare(cpu, *read, std::format("{} 刻み {}", scene, tick)); !compared)
+                return std::unexpected(std::format("{}({})", compared.error(), DescribeRoot(*read)));
+
+            if (gpu->ReadLayerShortage() != 0u)
+                return std::unexpected(std::format("{} 刻み {}: 足りるはずの層の頁が尽きた", scene, tick));
+
+            mostLayered = std::max(mostLayered, LayeredPages(*read));
+        }
+
+        // 頁の根は鎖の頁へ層を配った(試験が空でない)。一様の枠の根は一様の鎖(層の頁は使わない)
+        if (paged && mostLayered <= 1)
+            return std::unexpected(std::format("{}: 層のある頁が {}(鎖へ配られない)", scene, mostLayered));
+
+        Log(Channel::Gpu, Level::Info, "{}: {} 刻み毎回一致(層の和 {} → {}・層のある頁 最大 {})", scene, CHAIN_TICKS,
+            firstSum, RootLayerSum(cpu), mostLayered);
+
+        return {};
+    }
+
+    // 本物の鎖の最も細かい段の頁を、セルごとに層を持つ物質の違うセル(WideImageLayers の stride 3。子 2³ の和集合は 12 種)にして粗くする。
+    // GPU は断って数え(層の頁の足りない数・空きが無い)、木と量は粗くしない CPU と一致する
+    std::expected<void, std::string> RunWideCoarsenRefusal(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                           gpu::DebugRing& ring, const sim::BakedReactionTable& table) {
+        sim::MultiresNest cpu = MakeWideImageRoot(table, 3, true, true);
+        sim::SubmitRequests(cpu, test::MultiresRequestsAt(test::MultiresScenario::Real, test::MULTIRES_REFINE_TICK));
+        sim::ProcessRequests(cpu);
+        uint32_t deepest = MR_NO_BLOCK;
+        for (uint32_t slot = 0; slot < cpu.capacity.worldBlocks; ++slot) {
+            const MrBlock& block = cpu.blocks[slot];
+            if (block.kind == MR_BLOCK_REAL && block.level == (int32_t)test::MULTIRES_LEVELS && !MrIsUniform(block))
+                deepest = slot;
+        }
+
+        if (deepest == MR_NO_BLOCK)
+            return std::unexpected("溢れの世界で断る: 頁の鎖を作れない");
+
+        for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+            const RxWideCell cell = WideImageCell(table, index);
+            sim::StoreWideNestCellWithLayers(cpu, deepest, index, cell, WideImageLayers(cell, index, 3));
+        }
+
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, WideOptions());
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        const uint64_t tick = test::MULTIRES_COARSEN_TICK;
+        const auto record = [&](ID3D12GraphicsCommandList10* list) {
+            if (!gpu->RecordUpload(list, cpu))
+                return false;
+
+            return RecordSceneTick(list, *gpu, ring.GpuAddress(), test::MultiresScenario::Real, tick);
+        };
+        auto read = Execute(queue, ring, *gpu, record);
+        if (!read)
+            return std::unexpected(std::format("溢れの世界で断る: {}", read.error()));
+
+        test::StepMultiresScene(cpu, table, test::MultiresScenario::None, tick);
+        const std::optional<uint32_t> shortage = gpu->ReadLayerShortage();
+        if (shortage != 1u || read->counters[MR_COUNTER_NO_SPACE] != cpu.counters[MR_COUNTER_NO_SPACE] + 1)
+            return std::unexpected(std::format("溢れの世界で断る: 断った数が違う(層 {}・空きが無い {})",
+                                               shortage.value_or(~0u), read->counters[MR_COUNTER_NO_SPACE]));
+
+        read->counters[MR_COUNTER_NO_SPACE] = cpu.counters[MR_COUNTER_NO_SPACE];
+        if (auto compared = Compare(cpu, *read, "溢れの世界で断る"); !compared)
+            return compared;
+
+        Log(Channel::Gpu, Level::Info,
+            "溢れの世界で層の物質が 9 種以上になる粗くする: 断って数えた(粗くしない CPU と一致)");
+
+        return {};
+    }
+
     std::expected<sim::BakedReactionTable, std::string> MakeGrainBornTable();
 
     // --- 時間: 層のある場面の 1 刻み(全部を刻む)を層の頁あり・なしで ---
@@ -893,6 +1005,17 @@ namespace {
 
         if (auto wide = TestWideImage(*limits); !wide)
             return wide;
+
+        for (const bool paged : {true, false}) {
+            for (const test::MultiresScenario scenario :
+                 {test::MultiresScenario::Real, test::MultiresScenario::Shadow}) {
+                if (auto chain = RunWideChain(device, queue, ring, *limits, scenario, paged); !chain)
+                    return chain;
+            }
+        }
+
+        if (auto refusal = RunWideCoarsenRefusal(device, queue, ring, *limits); !refusal)
+            return refusal;
 
         for (const StepMode mode : {StepMode::Full, StepMode::Conduction, StepMode::Active}) {
             if (auto run = RunEachTick(device, queue, ring, table, mode, true); !run)

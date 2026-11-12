@@ -3,6 +3,8 @@
 // ルート署名は多重解像度のもの(multires_bindings.hlsli。sim/gpu_multires.cpp)で、外のバッファ u4 に層の置き場を結ぶ(並びは
 // common/multires_layers.hlsli・道具は sim/multires_layer_access.hlsli)。1 グループ = 層の頁 1 つの 64 セル、1 スレッド = セル 1 つ。
 // 空いている層の頁(持ち主が無い)は何もしない(頁を返す段が層の頁も返す。T-1240)。
+// 溢れを使う世界の変種(MR_WIDE_CELLS。multires_layers_wide。T-1240 の 7 の 5)は、インラインに無い物質の量を頁の今の面の溢れから引く
+// (刻みの段 WideDeferred・WideRetry・WideBig が面を入れ替えた後に回る)。生まれた粒を層に足す段は溢れを使う世界ではまだ使わない(T-1340)。
 // セルは読むだけ。CPU リファレンスは sim::StoreDenseCellImage → nest_detail::StorePageCell(試験 gpu_multires_layers)。
 //
 // 層を使う世界で反応が粒を生む表(T-1323。ADR-0489 の 3 (B)・CPU の nest_detail::GrowGrainLayers): 刻みの前に SnapshotGrainCells が
@@ -25,6 +27,12 @@
 
     const uint32_t index = ((groupId.x % MR_LAYER_GROUPS_PER_PAGE) * MR_LAYER_GROUP_THREADS) + threadId.x;
     const RxCell cell = g_cells[PageCellAddress(page, index)];
+#ifdef MR_WIDE_CELLS
+    const LayerTail tail = PageLayerTail(page,
+                                         index);  // インラインに無い物質の量は頁の今の面の溢れから(T-1240 の 7 の 5)
+#else
+    const LayerTail tail = NoLayerTail();
+#endif
 
     // --- 組ごとに付け替える(変わった組だけ書く)---
     FX_UNROLL
@@ -36,7 +44,7 @@
             continue;
 
         const uint64_t layer = ((uint64_t)high << 32) | low;
-        const uint64_t next = MrLayerAfterWrite(cell, g_layers[address], layer);
+        const uint64_t next = LayerAfterWriteAt(cell, tail, g_layers[address], layer);
         const uint32_t nextLow = (uint32_t)next;
         const uint32_t nextHigh = (uint32_t)(next >> 32);
         if (nextLow == low && nextHigh == high)

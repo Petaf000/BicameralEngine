@@ -197,6 +197,58 @@ bool CoarsenFits(uint32_t childSlot) {
     return fits;
 }
 
+#ifdef MR_WIDE_CELLS
+// 子のブロック childSlot を粗くした親の八分の一の 64 セルのどれも、0 でない層を持つ物質が 8 種までか(1 スレッドで 64 セル。
+// 層は刻みの後に合わせてある = 量で結んだ値なので、置き場の 0 でない組を物質で数える。一様な子は子の値の層だけなので入る。T-1240 の 7 の 5)
+bool CoarsenLayersFit(uint32_t childSlot) {
+    const MrBlock child = g_blocks[childSlot];
+    const uint32_t layerPage = MrIsUniform(child) ? MR_LAYER_NO_PAGE : LayerPageOf(child.page);
+    if (layerPage == MR_LAYER_NO_PAGE)
+        return true;
+
+    bool fits = true;
+    for (uint32_t local = 0; local < MR_OCTANT_CELLS && fits; ++local) {
+        uint32_t seen[RX_MAX_CELL_SPECIES];
+        FX_UNROLL
+        for (uint32_t m = 0; m < RX_MAX_CELL_SPECIES; ++m)
+            seen[m] = 0;
+
+        uint32_t count = 0;
+        for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
+            const uint32_t base = MrLayerEntryAddress(LayerPageCount(), LayerCapacity(), layerPage,
+                                                      MrChildCell(local, j), 0);
+            for (uint32_t k = 0; k < RX_MAX_CELL_SPECIES; ++k) {
+                const uint32_t address = base + (k * MR_LAYER_ENTRY_WORDS);
+                if ((g_layers[address + 1] | g_layers[address + 2]) == 0)
+                    continue;
+
+                // 前に数えたか(決まった数の回しで選ぶ。動的な添字で書かない。T-0397)
+                const uint32_t species = g_layers[address];
+                bool known = false;
+                FX_UNROLL
+                for (uint32_t m = 0; m < RX_MAX_CELL_SPECIES; ++m)
+                    known = known || (m < count && seen[m] == species);
+
+                if (known)
+                    continue;
+
+                FX_UNROLL
+                for (uint32_t m = 0; m < RX_MAX_CELL_SPECIES; ++m) {
+                    if (m == count)
+                        seen[m] = species;
+                }
+
+                count += 1;
+            }
+        }
+
+        fits = count <= RX_MAX_CELL_SPECIES;
+    }
+
+    return fits;
+}
+#endif
+
 MrRequestState ResolveCoarsen(MrRequest request, MrRequestState state, uint32_t i) {
     const uint32_t slot = LookupBlock(request.level, MrBlockOriginOf(request.x), MrBlockOriginOf(request.y),
                                       MrBlockOriginOf(request.z));
@@ -211,6 +263,14 @@ MrRequestState ResolveCoarsen(MrRequest request, MrRequestState state, uint32_t 
     if (!CoarsenFits(slot)) {
         g_blocks[slot].quietCheck = MrQuietCheckStamp(g_blocks[slot].busyTick, false);
         state.status = MR_STATUS_SPECIES_FULL;
+        return state;
+    }
+#else
+    // 層を持つ物質が粗いセル 1 つで 9 種以上になるなら断って数える(GPU の層の組は 1 セル 8 つ。D-689・T-1240 の 7 の 5。
+    // 溢れを使わない世界は粗くした親が 8 種に入らなければ上で断るので起きない)
+    if (!CoarsenLayersFit(slot)) {
+        CountLayerShortage(1);
+        state.status = MR_STATUS_NO_SPACE;
         return state;
     }
 #endif
@@ -242,8 +302,34 @@ MrRequestState ResolveCoarsen(MrRequest request, MrRequestState state, uint32_t 
 
     g_states[i] = state;
 }
-
 // --- 2. 確定 ---
+
+#ifdef MR_WIDE_CELLS
+// 一様の値の溢れの成分(今の面のセル 0 の範囲)の層が子と親で同じか。溢れの数が違えば違う(並びの位置ごとに物質で結んで比べる。
+// CPU の CoarsenKeepsUniformLayers は上限の無い形の並びを比べる。T-1240 の 7 の 5)
+bool SameTailLayers(uint32_t childSlot, RxCell childValue, LayerTail childTail, uint32_t parentSlot, RxCell parentValue,
+                    LayerTail parentTail) {
+    const bool childWide = childValue.speciesCount == RX_MAX_CELL_SPECIES && childTail.area != MR_NO_PAGE;
+    const bool parentWide = parentValue.speciesCount == RX_MAX_CELL_SPECIES && parentTail.area != MR_NO_PAGE;
+    const uint2 childRange = childWide ? WideRange(childTail.area, childTail.side, 0) : uint2(0, 0);
+    const uint2 parentRange = parentWide ? WideRange(parentTail.area, parentTail.side, 0) : uint2(0, 0);
+    if (childRange.y - childRange.x != parentRange.y - parentRange.x)
+        return false;
+
+    for (uint32_t n = 0; n < childRange.y - childRange.x; ++n) {
+        const uint32_t childWord = MrWideEntryWord(childRange.x + n);
+        const uint32_t parentWord = MrWideEntryWord(parentRange.x + n);
+        const uint32_t childSpecies = g_treeWords[WideWord(childTail.area, childTail.side, childWord)];
+        const uint32_t parentSpecies = g_treeWords[WideWord(parentTail.area, parentTail.side, parentWord)];
+        const uint64_t a = BoundLayerOfAt(UniformLayerBase(childSlot), childSpecies, childValue, childTail);
+        const uint64_t b = BoundLayerOfAt(UniformLayerBase(parentSlot), parentSpecies, parentValue, parentTail);
+        if ((uint32_t)a != (uint32_t)b || (uint32_t)(a >> 32) != (uint32_t)(b >> 32))
+            return false;
+    }
+
+    return true;
+}
+#endif
 
 // 一様な子 childSlot を一様な親へ粗くしても、親の一様の値の層が同じか(層の無い世界はいつも true。CPU の
 // CoarsenKeepsUniformLayers: 今の値と結んだ層の並びを比べる。64bit の比べは 32bit の 2 つで。T-1240)
@@ -253,12 +339,24 @@ bool CoarsenKeepsUniformLayers(uint32_t childSlot, uint32_t parentSlot) {
 
     const RxCell childValue = g_cells[childSlot];
     const RxCell parentValue = g_cells[parentSlot];
+#ifdef MR_WIDE_CELLS
+    // 溢れを使う世界(multires_tree_wide_settle): 溢れの成分の層も比べる(値は同じ = 溢れも同じ並び。T-1240 の 7 の 5)
+    const LayerTail childTail = UniformLayerTail(childSlot);
+    const LayerTail parentTail = UniformLayerTail(parentSlot);
+    if (!SameTailLayers(childSlot, childValue, childTail, parentSlot, parentValue, parentTail))
+        return false;
+#else
+    const LayerTail childTail = NoLayerTail();
+    const LayerTail parentTail = NoLayerTail();
+#endif
     bool same = childValue.speciesCount == parentValue.speciesCount;
     FX_UNROLL
     for (uint32_t i = 0; i < RX_MAX_CELL_SPECIES; ++i) {
         if (i < childValue.speciesCount && i < parentValue.speciesCount) {
-            const uint64_t a = BoundLayerOf(UniformLayerBase(childSlot), childValue.species[i], childValue);
-            const uint64_t b = BoundLayerOf(UniformLayerBase(parentSlot), parentValue.species[i], parentValue);
+            const uint64_t a = BoundLayerOfAt(UniformLayerBase(childSlot), childValue.species[i], childValue,
+                                              childTail);
+            const uint64_t b = BoundLayerOfAt(UniformLayerBase(parentSlot), parentValue.species[i], parentValue,
+                                              parentTail);
             same = same && (uint32_t)a == (uint32_t)b && (uint32_t)(a >> 32) == (uint32_t)(b >> 32);
         }
     }
@@ -740,8 +838,13 @@ void ExpandLayers(uint32_t i, uint32_t slot, uint32_t freeLayers, inout uint32_t
             if (real && g_blocks[expanded].children[MrOctantOfCell(index)] != MR_NO_BLOCK)
                 cell = RxMakeEmptyCell(0);
 
-            WriteBoundLayers(UniformLayerBase(expanded), cell,
-                             MrLayerEntryAddress(pageCount, capacity, layerPage, index, 0));
+#ifdef MR_WIDE_CELLS
+            const LayerTail tail = UniformLayerTail(expanded);  // 値の溢れの成分の層も(T-1240 の 7 の 5)
+#else
+            const LayerTail tail = NoLayerTail();
+#endif
+            WriteBoundLayersAt(UniformLayerBase(expanded), cell, tail,
+                               MrLayerEntryAddress(pageCount, capacity, layerPage, index, 0));
         }
     }
 
