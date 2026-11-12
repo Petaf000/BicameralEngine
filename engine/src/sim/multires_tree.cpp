@@ -660,7 +660,15 @@ namespace bicameral::sim {
 
     uint32_t PlaceRootBlock(MultiresNest& nest, int64_t originX, int64_t originY, int64_t originZ,
                             std::span<const RxCell> cells) {
-        return PlaceRootBlock(nest, originX, originY, originZ, cells, {});
+        if (!nest.cellLayers.enabled)
+            return PlaceRootBlock(nest, originX, originY, originZ, cells, {});
+
+        // --- 層を使う世界: 層を渡さずに置いた粒は全部が層(T-1322。ADR-0489 の 3 (B)・D-687)---
+        std::vector<MrCellLayers> layers(MR_BLOCK_CELLS);
+        for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
+            layers[index] = nest_detail::SettledGrainLayers(nest, cells[index]);
+
+        return PlaceRootBlock(nest, originX, originY, originZ, cells, layers);
     }
 
     uint32_t PlaceRootBlock(MultiresNest& nest, int64_t originX, int64_t originY, int64_t originZ,

@@ -56,14 +56,14 @@ namespace bicameral::sim {
         std::vector<WorldCellAmount> settled;  // 中身のうち積もった層の量(物質は contents にあること。層 ≤ 量)
     };
 
-    // 層を書かなかった粒の物質(RX_SPECIES_GRAIN)を、層を使う世界でどう読むか(ADR-0489 の 3。ユーザー未確認)
+    // 層を書かなかった粒の物質(RX_SPECIES_GRAIN)を、層を使う世界でどう読むか(ADR-0489 の 3)
     enum class UnwrittenGrainLayers : uint8_t {
         Floating,  // (a) 舞う粒(層 0)。ベイクが領域ごとに知らせを作る(WorldLayout::unsettledGrainNotes)
-        Settled,   // (b) 全部が層(層 = 量)。知らせは作らない
+        Settled,  // (b) 層を使う世界では全部が層(層 = 量)。使わない世界は層 0(層は舞う粒を分けないので同じ)。知らせは作らない
     };
 
-    // 今の読み方(仮 = (a)。ADR-0489 の 3 の答えでここを変える)
-    constexpr UnwrittenGrainLayers UNWRITTEN_GRAIN_LAYERS = UnwrittenGrainLayers::Floating;
+    // 今の読み方 = (b)(2026-11-12 ユーザー・Q175・T-1338。舞う粒は崩れ・吹き上げの出来事からだけ)。(a) に戻すならここ 1 行
+    constexpr UnwrittenGrainLayers UNWRITTEN_GRAIN_LAYERS = UnwrittenGrainLayers::Settled;
 
     // 物 1 つ(直方体。物理の座標 = y が上・格子の (0, 0, 0) の角が原点)。並び order の小さい順(同じなら名前の順)に番号を振る
     struct WorldBodyDefinition {
