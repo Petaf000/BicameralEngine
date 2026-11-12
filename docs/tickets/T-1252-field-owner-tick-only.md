@@ -1,6 +1,6 @@
 # T-1252 登録に「配り手」と「寿命」・粗くする時のセルの配りの口・集めて書く段(土台。段 1 CPU / 段 2 GPU。ADR-0500 改訂)
 
-- Status: In Progress(2026-11-12 wt6: 段 2 の 6 本目 = 集めて書く段を木の段に〔t-1252-gather-tree〕。段 2 の 5 本目 = 影の鎖・引き戻し・畳む・広げるまで〔t-1252-tree-gpu-4〕。段 2 の 3 本目 = GPU の世界の欄の区画まで〔t-1252-tree-gpu-2〕。段 2 の 1 段目 = GPU の欄の頁の置き場の並びと集めて書く段の Compute が CPU と頁の番号までビット一致〔ブランチ t-1252-registry-owner-gpu・ADR-0532〕。木の段への載せは下の「段 2 の残り」。段 1 CPU の主な形は済み・2026-10-29 本体の作業役 18 回目)
+- Status: In Progress(2026-11-13 wt6: 段 2 の 7 本目 = 保存量の配り手の欄を GPU の木の段に〔t-1252-conserved-owner〕。2026-11-12 wt6: 段 2 の 6 本目 = 集めて書く段を木の段に〔t-1252-gather-tree〕。段 2 の 5 本目 = 影の鎖・引き戻し・畳む・広げるまで〔t-1252-tree-gpu-4〕。段 2 の 3 本目 = GPU の世界の欄の区画まで〔t-1252-tree-gpu-2〕。段 2 の 1 段目 = GPU の欄の頁の置き場の並びと集めて書く段の Compute が CPU と頁の番号までビット一致〔ブランチ t-1252-registry-owner-gpu・ADR-0532〕。木の段への載せは下の「段 2 の残り」。段 1 CPU の主な形は済み・2026-10-29 本体の作業役 18 回目)
 - 種類: 工学(土台の共通部分。並走の作業役は自分の都合で広げない = CLAUDE.md §1 の 9)
 - PC: 必須
 - 見積もり: チャット 2〜4 回分(段 1 CPU 1〜2 / 段 2 GPU 1〜2)
@@ -233,6 +233,41 @@
 2. 相の層の配り(T-1231)・T-1230 段 2 ③ の残り。
 3. 上の器の約束(司令塔の決めの後。2 なら RecordUpload の見積もりと試験の容量)。
 4. 書き手: T-1227 段 2(RC の作業 → 葉の頁)・T-1228 段 2(源の項 → 当てる段)は RecordGather を呼ぶ。作業の並びは MfWork*(書き手のバッファ)。
+
+## 段 2 の 7 本目(2026-11-13 wt6 作業役。ブランチ t-1252-conserved-owner = t-1252-gather-tree の上)
+- **入った(「段 2 の 6 本目」の残りの 1 = 保存量の配り手の欄。ADR-0532 の 9。新しい口は足していない = 登録・見立て・欄の持ち方・帳簿の並びは今のまま)**:
+  - 区画の表に 5 語目 `MF_TABLE_LEDGER`(保存量の欄の帳簿の列の始まり = CPU の NestFieldLedgerBase + NestConservedIndex。保存量でなければ MF_NO_LEDGER_COLUMN)。MF_TABLE_WORDS 4 → 5
+    (区画の大きさの上限 MfRegionWordsBound は表の語の数で数えるので自動で足りる)。
+  - 帳簿の列の数を確かめた: GPU の世界の帳簿は CPU の nest.capacity.ledgerColumns で作る(GpuMultires::Create・RecordUpload が大きさを比べる)。
+    保存量の欄を登録すると CPU の capacity.ledgerColumns が値の数だけ増える(RegisterNestField)= 欄の列は GPU の帳簿にもう有る。列を足す必要は無かった。
+  - CoarsenCarriedFields(multires_graph.hlsl。既定と溢れの両方の変種): SfOwnerCoarsen の余りを `AddWorldLedgerUnits(粗くした端数・出, 子のレベル, 列 + 値の番号, 余り)`
+    (CPU の CoarsenOwners の AddFieldRemainder と同じ段・同じ列。一様のままの親でも足す = 余りは 0。atomic の足し算なので順によらない。64bit の引き算と比べは無い)。
+  - RecordUpload は保存量の配り手の欄を断らない(相の層の配り手の欄 = T-1231 は今のまま断る)。
+- 試験 gpu_field_region に 11(保存量の配り手の欄で 5 の木の段: 細かく → 鎖の子の値を 8 で割り切れない値に変えて写す → 粗く 2 回。
+  帳簿・置き場・要約が毎回 CPU とビット一致・帳簿が動く〔余りが載る〕・ComputeConservedTotals が粗くする前後で CPU・GPU とも同じ)。結果は作業ログ。
+
+### T-1231(相の層の配り)の GPU の設計の詰め(コードは次の作業役。読んで確かめた所と未確認を分けた)
+- 足す場所(読んで確かめた):
+  - **細かく**: RefineLevel(multires_graph.hlsl 284〜)。CPU は Refine の最後の RefineOwners = セルの中身の配り(置かれ方 PlaceRefineOctantCells か SAME)の**後**にセルを読む。
+    GPU は今 RefineCarriedFields がセルを写した直後・`#ifdef MR_REFINE_PLACE` の PlaceRefineChildren の**前**にある。相の層の欄だけは
+    PlaceRefineChildren の後・親を覆う前に `DeviceMemoryBarrierWithGroupSync` を 1 つ挟み、t < 64(親の八分の一のセル)が子 8 つ(g_cells の子の頁)・親のセル・親の Ec を読んで
+    子のエネルギー(g_cells)と子の Ec(区画の欄の頁)を書く(CPU の RefinePhaseLayerOctant)。一般の配り手の欄(試験用)は今の場所のまま(セルを読まない)。
+    一様な子(uniformChild)・影の鎖(RefineShadow・PullBackShadow はセルを読まない一般の配り)は今の SfOwnerRefineUniform / SfOwnerRefineChild のまま = CPU と同じ。
+  - **粗く**: CoarsenRequest の CoarsenCarriedFields(1152 行あたり。セルの中身と一般の欄の後 = CPU の Coarsen の最後の CoarsenOwners と同じ順)。
+    相の層の欄で `paged`(頁を持つ親か広げる親。CPU は ExpandPage の後なので広げる親も「頁を持つ親」)なら、親の八分の一のセル t の粗くしたセル(同じスレッドが書いた g_cells か要確認)と
+    子 8 つのセル・子の Ec から PlCoarsenCondensedEnergy(CPU の CoarsenPhaseLayerOctant)。一様のままの親は今の SfOwnerCoarsen(一般)。保存量でない = 帳簿は無い。
+  - 溢れを使う世界(MR_WIDE_CELLS)は CPU が一般の配り(`!nest.wideCells` の時だけ相の層の配り)= GPU も `#ifndef MR_WIDE_CELLS` の中だけ。
+  - TreeAllocate の頁の要る/要らない(CarriedOwnerNeed)は配り手によらない規則 = そのまま。RecordUpload の断り(SF_OWNER_PHASE_LAYER && !wideCells)を外す。
+- 読んで確かめた: 細かくする段の置かれ方(multires_refine_place.hlsli)が g_species(t0)を読んでいる = 木の段のグラフで物質の表は結ばれている(GpuReactionTable で包めばよい)。
+  粗くする段の親の八分の一のセル t は同じスレッド t が `result.cell` を書く(CoarsenRequest 1146 行)= 相の層の粗くする配りは result.cell を引数で渡せばバリア不要。
+  広げる親の八分の一の外のセルは別のスレッドが書くが、相の層の配りは八分の一のセルだけ読む。
+- 未確認: 溢れの変種(MR_WIDE_CELLS)の CoarsenRequest も result.cell の形か(CPU は溢れの世界で相の層の配りを使わないので、`#ifndef MR_WIDE_CELLS` で外せば読まなくてよい)。
+- 技術の注意: CPU の RefinePhaseLayerCell は RxCell の配列 children[8]・PlPartSums の配列を `j == last` で選ぶ = GPU では書き換えた構造体の配列の動的な添字(T-0397)にしない
+  (子のセルは g_cells から j ごとに読み直す・FX_UNROLL の 8 回の回し・最後の子は回しの中の比べで選ぶ)。dxil_alloca_check で確かめる。
+  PlRefineHeatsOf の `(parent.energy − Ec) × 8`・SplitPart の `total − given` は 64bit の引き算の後に比べが無い。PlCoarsenCondensedEnergy の床と天井は PlAtLeastS64(2 語で借りを回す形)= 今の規則の中。
+  PlRefinePartEnergy の `(uint32_t)(chemicalMj × micro − childChemical)` と比べは 32bit に落としてから(RTX の上の 32bit の壊れに当たらない見込み = HW の試験で確かめる)。
+- 試験の形: gpu_field_region に場面 12(EnablePhaseLayerEnergy の世界・CPU の phase_layer_tree の混ざったセルの場面で、頁を持つ根の鎖を細かく → 粗く・広げる親を含む)を HW・WARP で CPU とビット一致。
+  混ざったセルの無い木は今とビット一致(gpu_multires・gpu_multires_layers・gpu_tree_refine_placement)。量の見込み: チャット 1 回(未確認)。
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-10-29(本体 16 回目・設計): ADR-0500 の改訂で作った。
