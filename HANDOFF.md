@@ -3,15 +3,17 @@
 最終更新: 2026-11-12(本体の作業役 28 回目・claude/50 の再開の巡目の締め。前は 27 回目)
 
 ## この仕事でしたこと(2026-11-12・本体の作業役・28 回目〔この巡目の最後〕: runner/ready の印のマージ・試験・push)
-- **入れた(--no-ff・来た順・既定の切り替えではない・衝突なし)**: wt2 t-1240-wide-layers-2 4e72390c(4af1dc44。T-1240 Done = 7 の 5 の ②③④・溢れを使う世界の層を GPU で)/ wt4 t-1346-bench-energy 80910285(0bba3f1f。測りの道具 2 本とチケットだけ・シミュのコードは不変)/ wt3 t-1343-shell-finish-answer 5415dc26(89f256ab。T-1343 研究 Done・捨てる試作の口だけ・既定 0 = 答えとハッシュ不変)。
+- **入れた(--no-ff・来た順・既定の切り替えではない・衝突なし)**: wt2 t-1240-wide-layers-2 4e72390c(4af1dc44。T-1240 Done = 7 の 5 の ②③④・溢れを使う世界の層を GPU で)/ wt4 t-1346-bench-energy 80910285(0bba3f1f。測りの道具 2 本とチケットだけ・シミュのコードは不変)/ wt3 t-1343-shell-finish-answer 5415dc26(89f256ab。T-1343 研究 Done・捨てる試作の口だけ・既定 0 = 答えとハッシュ不変)/ wt6 t-1252-tree-gpu-4 a8b3c4a5(d54c4d09。T-1252 段 2 の 5 本目 = 影の鎖・引き戻し・畳む・TreeExpand が欄の区画を読み書き・ADR-0532 の 7)。
 - **試験(release・警告 0・RTX 3070 Ti)**: t-1240 の後 = CPU 13 本(multires・multires_layers・multires_wide・multires_state・field_owner・field_storage・tree_refine_placement・float_check 系 5・dxil_alloca_check〔multires_graph_wide の上限 55 の表で main でも合格〕)+ GPU 5 本(gpu_multires・gpu_multires_layers〔HW・WARP〕・gpu_field_region・gpu_tree_refine_placement)合格・archmap --check OK /
   t-1343 の後 = release ビルド警告 0・object_shell・float_check 系 5・dxil_alloca_check・gpu_object_shell_flow(HW 76 秒)合格 /
+  t-1252-tree-gpu-4 の後 = release ビルド警告 0・CPU 12 本(field_owner・multires・multires_sparse・multires_layers・multires_wide・tree_refine_placement・float_check 系 5・dxil_alloca_check)+ GPU 8 本(gpu_multires・gpu_multires_layers〔HW・WARP〕・gpu_multires_uniform・gpu_lab_box・gpu_field_region〔HW・WARP〕・gpu_tree_refine_placement)合格・archmap --check OK /
   t-1346 の後 = release ビルド警告 0(ctest に無い道具なので試験の取り直しなし)+ GPU gpu_multires_wide_* 6 組と gpu_multires_wide_warp(t-1240 の rebase 後に流していなかった分): 7 本とも合格(wide_warp 353 秒)
 - **記録**: ROADMAP(T-1240 Done・T-1341〔不具合・決定性・次の巡目の最優先〕と T-1340 の行を足した・T-1346 / T-1347 Done〔仮〕・T-1156 の行を足した〔次の巡目で T-1341 の次・司令塔の仮〕・T-1343 Done)・QUESTIONS(Q188【エンジン】)・NEXT。印は done/ へ。
 - **wt4 から(司令塔の仮)**: T-1346 = 道具の数え方の誤り(放射の段がセルの外に持つ分を数えていなかった。保存は破れていない)。T-1347 = 変わり目は T-1113 daaf77e3 で CPU リファレンスに既定の RC が入った意図した変化(T-1084 の「放射なし」は実は RC が流れていた)。
   **既定の RC の世界では草原の場面が燃え広がらない**(付けたセルだけで 8 s で消える。T-1084 の 14 s・18 s は対の形の放射の結果)→ T-1156 と同じ根の見込み → **T-1156 を次の巡目で T-1341 の次に上げる**(司令塔の仮・ユーザーに出した)。gpu_probe_fire_test(DISABLED)も同じセルだけの和の数え方(止めを外す時に直す)。
 - **wt2 から**: T-1341 = 溢れを使う世界で 9 段の鎖(test::MultiresScenario::Real を 1 つの要求で)を回すと、層なしでも刻み 10 で CPU と GPU が食い違う(段 9 のブロックのセル 0 の量・T-1240 の前から・今までの溢れの試験は 2 段の鎖まで。疑い = TreeWideReserve の RefineTailEntries の深さか細かい段の刻み。詳しくは docs/tickets/T-1240-layer-gpu-tree.md の 7 の 5)。T-1340 = 溢れを使う世界で粒を生む表の層(RecordUpload が断る)。どちらもチケットのファイルは着手する時に作る。
 - **wt3 から**: T-1343 = 案 (i) 線 7(多重格子を残差が Ψ の半分以下まで回して丸める・赤黒の仕上げなし)が費用は今の約半分・V 字 2.4〜2.8 回で箱と層の数で増えない・上限に当たらない・保存 0・速さは閉じた 1 セルで 0.1〜0.4 %・世界の流れで +1 %。(ii) は打ち切り。→ **Q188【エンジン】を QUESTIONS に足した**(仮のおすすめ = 案 A・答えまで既定は変えない)。案 A なら新しいチケットで GPU 化・ビット一致・時間・ハッシュの取り直しを 1 本で(T-1350 の後)。
+- **wt6 から(司令塔の印)**: T-1252 段 2 の 5 本目の仮 = 影の鎖と広げる段で欄の頁が尽きたら頁なしで数える(断れないので CPU とずれる・層の頁と同じ・fieldPages を足りる数にする約束)。容量の約束を破ると CPU と GPU がずれるのは D-428 に近い → **次の巡目で「容量を起動時に見積もって足りない世界を写さない」形を検討する**。T-1252 の残り = 集めて書く段を木の段に(T-1227 / T-1228 と一緒)→ 保存量の配り手の欄 → 相の層の配り(T-1231)・T-1230 ③。
 - **残った印**: なし(この時点。来た印は来た順に)
 - 次の番号は **D-696・ADR-0479・Q189**(本体。Q188 は使った)。
 
