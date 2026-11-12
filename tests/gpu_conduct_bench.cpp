@@ -7,11 +7,12 @@
 // 正しさ(T-1346): GPU を走らせた後、同じ刻みの数だけ CPU リファレンス(ProbeReference)を走らせ、刻みごとの要約(ハッシュ・エネルギーの合計・
 // つつきの分・計算したブロックの数)が GPU と一致し、CPU で「セルのエネルギー × 2^16 + 熱の放射の段がセルの外に持つ分」がつつきの分だけ
 // 変わる(保存。gpu_probe_sim_test と同じ式。T-1113)ことを確かめる。どちらかが外れたら失敗。
+// CPU の熱の放射の段は重い(64³ で 1 刻み 1 秒近く)ので、突き合わせるのは既定で各場面の初めの CHECK_TICKS_DEFAULT 刻み(--check-ticks n。0 = 全部)。
 // GPU のハッシュの表はセルのエネルギーの和しか持たない(放射の持ち越し・世界の外へ出た分は持たない)ので、燃える場面ではセルだけの和は
 // 放射で外へ出た分だけ減る。T-1346 の前はセルだけの和で保存を見ていて、既定の放射(T-1113)が入った後の木箱の壁で NG と出ていた。
 //
 // ctest には登録しない(時間がかかり、時間は機械しだい)。走らせ方: `job.py run -Preset release -Exe gpu_conduct_bench`。
-// 引数は gpu_test_options.h(--warp)と、--trace(連鎖のトレースを全部の刻み・格子の全体で有効にして、その費用を測る。T-0087)か
+// 引数は gpu_test_options.h(--warp)と、--check-ticks n(上)・--trace(連鎖のトレースを全部の刻み・格子の全体で有効にして、その費用を測る。T-0087)か
 // --trace-idle(容量は確保して範囲は無効。実行中に範囲を変えられるようにしたときの、使っていない間の費用。T-0088)。
 // WARP での時間は GPU の目安にならない。
 #include <algorithm>
@@ -36,6 +37,7 @@ using namespace bicameral::sim;  // probe_sim.hlsli の定数(PROBE_*)
 namespace {
 
     constexpr uint32_t TICKS_PER_FRAME = 16;
+    constexpr uint64_t CHECK_TICKS_DEFAULT = 160;  // CPU リファレンスと突き合わせる刻みの数(T-1346)
     constexpr uint32_t
         TRACE_CAPACITY = 1u << 20;  // --trace: 1 フレーム(16 刻み)に書ける記録(16 MiB。全部のブロックが活性でも足りる)
 
@@ -71,10 +73,12 @@ namespace {
         uint64_t quietTick = 0;  // 計算したブロックが 0 になった最初の刻み(0 なら止まらなかった)
         uint32_t maxBlocks = 0;
         bool cellEnergyKept = true;  // セルだけの和がつつきの分だけ変わった(放射の段がセルの外へ出すと外れる。参考)
+        uint64_t cellEnergyDriftTick = 0;   // セルだけの和が最初に外れた刻み(0 なら外れない)
         std::vector<ProbeTickHash> hashes;  // S(1)〜S(ticks)(CPU リファレンスと比べる)
         uint32_t radiationOverflow = 0;     // 熱の放射の段の置き場の溢れの印(溢れた刻みからは決定的でない)
 
         // --- CPU リファレンスとの突き合わせ(T-1346)---
+        uint64_t checkedTicks = 0;
         bool matchesReference = false;
         bool energyConserved = false;    // セル × 2^16 + 放射がセルの外に持つ分の保存(CPU)
         int64_t radiationOutsideMj = 0;  // 最後の刻みで放射の段がセルの外に持つ分(mJ。持ち越し + 外へ出た分)
@@ -140,6 +144,9 @@ namespace {
                 result.unitMicroseconds[unit] += unitMicroseconds(unit);
 
             result.maxBlocks = std::max(result.maxBlocks, state.scheduledBlocks);
+            if (state.energy != energy + state.sourceEnergy && result.cellEnergyDriftTick == 0)
+                result.cellEnergyDriftTick = state.tick;
+
             result.cellEnergyKept = result.cellEnergyKept && state.energy == energy + state.sourceEnergy;
             energy = state.energy;
             if (state.scheduledBlocks == 0 && result.quietTick == 0)
@@ -190,7 +197,8 @@ namespace {
     }
 
     // GPU と同じ刻みの数だけ CPU リファレンスを走らせ、刻みごとの要約と保存を確かめる(T-1346。gpu_probe_sim_test の HashesMatch と同じ欄)
-    void CheckAgainstReference(const BakedReactionTable& table, const Scenario& scenario, ScenarioResult& result) {
+    void CheckAgainstReference(const BakedReactionTable& table, const Scenario& scenario, uint64_t checkTicks,
+                               ScenarioResult& result) {
         if (!result.ok || result.hashes.size() != result.ticks)
             return;
 
@@ -206,7 +214,9 @@ namespace {
         result.matchesReference = true;
         result.energyConserved = true;
 
-        for (uint64_t tick = 0; tick < result.ticks; ++tick) {
+        result.checkedTicks = checkTicks == 0 ? result.ticks : std::min(result.ticks, checkTicks);
+
+        for (uint64_t tick = 0; tick < result.checkedTicks; ++tick) {
             reference.Advance(tick, tick == 0 ? std::span<const ProbeCommand>(pokes) : std::span<const ProbeCommand>());
             const std::span<const reaction::RxCell> state = reference.State(tick + 1);
 
@@ -251,8 +261,11 @@ namespace {
             result.quietTick == 0 ? std::string("(止まらない)") : std::to_string(result.quietTick), result.maxBlocks,
             PROBE_BLOCK_COUNT, result.matchesReference ? "OK" : "NG", result.energyConserved ? "OK" : "NG");
         Log(Channel::Sim, Level::Info,
-            "{}: セルだけの和の保存 {}(放射の段がセルの外に持つ分 {} mJ)  放射の置き場の溢れ {}", scenario.name,
-            result.cellEnergyKept ? "OK" : "外れ", result.radiationOutsideMj, result.radiationOverflow);
+            "{}: CPU と突き合わせた刻み {}  セルだけの和の保存 {}(最初に外れた刻み "
+            "{}・突き合わせの終わりで放射の段がセルの外に持つ分 {} "
+            "mJ)  放射の置き場の溢れ {}",
+            scenario.name, result.checkedTicks, result.cellEnergyKept ? "OK" : "外れ", result.cellEnergyDriftTick,
+            result.radiationOutsideMj, result.radiationOverflow);
 
         const double ticks = static_cast<double>(std::max<uint64_t>(result.ticks, 1));
 
@@ -294,6 +307,15 @@ int main(int argc, char** argv) {
         return true;
     };
 
+    // --check-ticks n(CPU リファレンスと突き合わせる刻みの数。0 = 全部。T-1346)
+    uint64_t checkTicks = CHECK_TICKS_DEFAULT;
+    const auto checkFound = rng::find_if(
+        arguments, [](const char* argument) { return std::string_view(argument) == "--check-ticks"; });
+    if (checkFound != arguments.end() && checkFound + 1 != arguments.end()) {
+        checkTicks = std::stoull(*(checkFound + 1));
+        arguments.erase(checkFound, checkFound + 2);
+    }
+
     const bool traced = takeArgument("--trace");
     const bool idle = takeArgument("--trace-idle");
     const uint32_t traceCapacity = idle ? TRACE_CAPACITY : 0;
@@ -306,7 +328,8 @@ int main(int argc, char** argv) {
 
     const auto options = test::ParseGpuTestOptions(std::span(arguments));
     if (!options) {
-        Log(Channel::Sim, Level::Error, "使い方: gpu_conduct_bench [--warp] [--trace | --trace-idle]");
+        Log(Channel::Sim, Level::Error,
+            "使い方: gpu_conduct_bench [--warp] [--trace | --trace-idle] [--check-ticks n]");
         bicameral::SingletonFinalizer::Finalize();
 
         return 2;
@@ -340,7 +363,7 @@ int main(int argc, char** argv) {
         if (!result.ok)
             Log(Channel::Sim, Level::Error, "{}: 走らせられない", scenario.name);
 
-        CheckAgainstReference(*table, scenario, result);
+        CheckAgainstReference(*table, scenario, checkTicks, result);
         Report(scenario, result);
         passed = passed && result.ok && result.matchesReference && result.energyConserved;
     }
