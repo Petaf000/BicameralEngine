@@ -67,14 +67,14 @@ groupshared uint32_t gs_grainLayerPage;
         return;
 
     const MrBlock block = g_blocks[slot];
-    const bool uniform = MrIsUniform(block);
+    const bool wasUniform = MrIsUniform(block);
     if (threadId.x == 0) {
         RxCell value = g_cells[slot];
-        value.padding = uniform ? 0u : GRAIN_PAGED_MARK;
+        value.padding = wasUniform ? 0u : GRAIN_PAGED_MARK;
         g_grainBefore[slot] = value;
     }
 
-    if (uniform)
+    if (wasUniform)
         return;
 
     for (uint32_t k = 0; k < GRAIN_CELLS_PER_THREAD; ++k) {
@@ -199,6 +199,14 @@ uint32_t TakeLayerPage(uint32_t page) {
     return layerPage;
 }
 
+// 刻む前のセル index(枠の写し beforeValue が印なら頁の写し、でなければ一様の値。広げた頁は一様の値で埋めてから刻む)
+RxCell GrainBeforeCell(MrBlock block, RxCell beforeValue, uint32_t address, uint32_t index) {
+    if (beforeValue.padding == GRAIN_PAGED_MARK)
+        return g_grainBefore[address];
+
+    return MrUniformCell(block, beforeValue, index);
+}
+
 // 刻みの後: 枠ごとに刻む前のセルと比べ、増えた粒の物質を層に足す。1 グループ = 枠 1 つ(64 スレッド × 8 セル)
 [numthreads(GRAIN_THREADS, 1, 1)] void ReconcileGrownLayers(uint3 groupId : SV_GroupID,
                                                             uint3 threadId : SV_GroupThreadID) {
@@ -212,7 +220,6 @@ uint32_t TakeLayerPage(uint32_t page) {
 
     // --- 刻む前のセル(刻む前に一様なら一様の値。広げた頁は一様の値で埋めてから刻む)と粒の増え ---
     const RxCell beforeValue = g_grainBefore[slot];
-    const bool pagedBefore = beforeValue.padding == GRAIN_PAGED_MARK;
     if (threadId.x == 0)
         gs_grainGrew = 0;
 
@@ -222,7 +229,7 @@ uint32_t TakeLayerPage(uint32_t page) {
     for (uint32_t k = 0; k < GRAIN_CELLS_PER_THREAD; ++k) {
         const uint32_t index = threadId.x + (GRAIN_THREADS * k);
         const uint32_t address = PageCellAddress(block.page, index);
-        const RxCell before = pagedBefore ? g_grainBefore[address] : MrUniformCell(block, beforeValue, index);
+        const RxCell before = GrainBeforeCell(block, beforeValue, address, index);
         if (GrainGrew(before, g_cells[address]))
             grewMask |= 1u << k;
     }
@@ -257,7 +264,7 @@ uint32_t TakeLayerPage(uint32_t page) {
             continue;
         }
 
-        const RxCell before = pagedBefore ? g_grainBefore[address] : MrUniformCell(block, beforeValue, index);
+        const RxCell before = GrainBeforeCell(block, beforeValue, address, index);
         WriteGrownLayers(base, before, cell);
     }
 }

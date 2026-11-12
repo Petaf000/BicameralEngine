@@ -1,6 +1,6 @@
 # T-1323 GPU: 層を使う世界で反応で生まれた粒を層に足す(T-1322 の GPU)
 
-- Status: Todo
+- Status: In Progress
 - 種類: 工学
 - PC: 必須
 - 見積もり: チャット 1〜2 回分
@@ -37,3 +37,13 @@ T-1322 の CPU の規則(層を使う世界で、反応・実験室の命令で�
   順: ① 層を使う世界だけ「反応の前のセル」の写しのバッファ(頁 × 64 × 112 B)を広げる段の後・刻みの前に CopyBufferRegion
   ② 合わせる段の 2 つ目の入口(全部のセルの頁に投げ、粒の物質〔粒の印の表が要る。u5 か定数で〕で増えた分を層へ。層の頁が無ければ取る・尽きたら CountLayerShortage)
   ③ lab_box.hlsl の LabCells ④ gpu_multires_layers の 9 を燃える場面のビット一致に(HW/WARP)。u5 に前のセルを結べるか(64/64 語)を最初に確かめる。
+- 2026-11-12 wt2(4 本目): 実装(a17013ea〜)。形 = **刻む前の写し + 枠ごとに比べる段**(合わせる段の 2 つ目の入口を枠ごとに投げる)。
+  ① SnapshotGrainCells(刻みの前・1 グループ = 枠 1 つ): 刻む前のセルを u5(u1 と同じ並び・同じ大きさ。層を使う世界で粒を生む表だけ作る)へ。
+  枠の所は一様なら一様の値、頁を持てば印(padding = 1)と頁のセル全部。広げた頁は刻む前に一様だった = 前のセル = 一様の値(MrUniformCell)
+  なので、広げる段(RecordExpandPass・ExpandStepNode・ConductPrepareBlock)には手を入れない。
+  ② ReconcileGrownLayers(刻みの段の後・枠ごと): 前と比べて粒が増えたセルは組を「今のセルの k 番目の物質」で書き直す(増えた粒 = 前の層 + 増え、
+  ほか = min(前の層, 量)。前の層は前のセルと結ぶ)。増えないセルは ReconcileLayers と同じ min。層の頁が無い頁で増えたら 1 つ取る
+  (空きの数を InterlockedAdd(-1) で下げ、0 か上限超えなら戻して CountLayerShortage)。64bit の差と和は 32bit の 2 つで。
+  影の引き戻しの後の合わせる段は今の min のまま。ProducesGrain の断りは外した(関数は m_grainBorn を決めるのに使う)。
+  実験室: GPU の実験室(GpuLabBox)は layerPages を持たない = 層を使う世界を写さない(RecordUpload が断る)ので、LabCells の同じ規則は今は要らない
+  (層を持たせる時に要る: 1 刻みに同じセルへ命令が 2 つ以上当たると、刻みの前後の比べは CPU の命令ごとの規則と違う → 命令ごとに層を書く形が要る)。
