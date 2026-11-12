@@ -726,7 +726,10 @@ bicameral_add_gpu_test_case(gpu_object_shell_flow gpu_object_shell_flow_test gpu
 # WARP(T-1284): 写し元(256 バイト以上に切り上がる)と UAV の大きさの食い違いで CopyResource がデバイスを失っていた。
 # 比べ 16 本は 1 つで走ると約 275 秒だが、ほかの作業ツリーのビルドと重なると 900 秒を超えた(T-1286: 16 本目の途中で 900 秒)ので上限を延ばす
 bicameral_add_gpu_test_case(gpu_object_shell_flow_warp gpu_object_shell_flow_test warp --warp --queue compute)
-set_tests_properties(gpu_object_shell_flow_warp PROPERTIES TIMEOUT 1800)
+set_tests_properties(gpu_object_shell_flow_warp PROPERTIES TIMEOUT 2400)
+# 大きい箱(121,856 ボクセル)を上限の 1,024 回で回して止まらない・CPU とビット一致(段ごとの Dispatch。T-1350。HW だけ: WARP では数時間)
+bicameral_add_gpu_test_case(gpu_object_shell_flow_large gpu_object_shell_flow_test gpu --queue compute --large-box)
+set_tests_properties(gpu_object_shell_flow_large PROPERTIES TIMEOUT 600)
 
 bicameral_add_gpu_test(gpu_multires_layers_test)  # セルの成分ごとの層の量の GPU と CPU のビット一致(T-1221)
 target_link_libraries(gpu_multires_layers_test PRIVATE bicameral_sim)

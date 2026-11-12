@@ -20,7 +20,12 @@
 //         GPU を 2 回回して状態のハッシュが同じか(回ごとに変わらないか)も見る。
 //   --grow(T-1331 の小さく試す 2。比べを飛ばす): 骨格を大きくした紙 1 枚で、箱の大きさと赤黒の回数(0 から収まるまで・多重格子)を出す。
 //         切り分け(T-1349): --grow-cpu N(CPU だけで N 刻み・上限で止まった解きの中身)・--grow-shape 列 高さ 層(その 1 つだけ)・--grow-sweeps N(0 から決まった N 回だけ)・--grow-ticks 暖機 測る・--grow-groupshared。
-// 引数は gpu_test_options.h と --measure / --measure-only / --profile / --scale / --grow / --threads N / --sweeps N / --rule N。
+//   分けた刻み(T-1350): 1 つの Dispatch が長くなる箱(ボクセル × 赤黒の上限 × 小刻みが GROUP_VOXEL_SWEEPS を超える)は、1 刻みを小刻みごとの
+//         Dispatch〔⓪〜④ / 赤黒を続きから n 回ずつ / ⑥〜⑨〕に分けて回す(既定 = 自動)。比べに、分けた形(n = 7 で小刻みの途中で区切る)を
+//         1 つの Dispatch の形と同じハッシュになるかも足した。--large-box: 紙 96 × 48・層 8 段(121,856 ボクセル)を 0 から決まった 1,024 回(上限)で
+//         2 刻み回して CPU とビット一致・一番長い Dispatch の時間を出す(HW だけ。WARP では数時間かかる)。
+//         --split auto|whole|split(測りの形を決める)・--split-sweeps N(分けた形の 1 つの Dispatch の赤黒の回数)。
+// 引数は gpu_test_options.h と --measure / --measure-only / --profile / --scale / --grow / --large-box / --threads N / --sweeps N / --rule N / --split / --split-sweeps。
 #include <cstdlib>
 #include <cstring>
 #include <optional>
@@ -62,12 +67,24 @@ namespace {
 
     // --- GPU の並び(object_shell_flow.hlsl と同じ)---
     constexpr uint32_t SHARED_VOXELS = 7168;
-    constexpr uint32_t ROOT_CONSTANT_COUNT = 11;
+    constexpr uint32_t ROOT_CONSTANT_COUNT = 12;
+    constexpr uint32_t SUBSTEPS = 4;        // 1 刻みの小刻み(CPU の StepShellFlow と同じ)
     constexpr uint32_t APPLY_THREADS = 64;  // object_shell_flow.hlsl の OH_SHELL_APPLY_THREADS
     constexpr uint32_t SWEEP_STATS = 4;     // g_stats の後ろ: 解いた回数・赤黒の和・一番多い・上限で止まった(T-1201)
-    // u0〜u15 / b0 / デバッグのリング / t0〜t8(16 × 2 + 11 + 2 + 9 × 2 = 63 語。物の熱の 63 語とは別の署名)
+    // u0〜u15 / b0 / デバッグのリング / t0〜t8(16 × 2 + 12 + 2 + 9 × 2 = 64 語 = 上限。物の熱の 63 語とは別の署名)
     constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
         .uavCount = 16, .rootConstantCount = ROOT_CONSTANT_COUNT, .debugRing = true, .srvCount = 9};
+
+    // --- 分けた刻み(object_shell_flow.hlsl の OH_SPLIT_*。T-1350)---
+    constexpr uint32_t SPLIT_PREPARE = 1;
+    constexpr uint32_t SPLIT_SWEEPS = 2;
+    constexpr uint32_t SPLIT_FINISH = 3;
+    constexpr uint32_t SPLIT_WORDS = 3;  // g_stats の後ろの物ごとの作業場の語の数
+    // 1 グループが 1 つの Dispatch で回してよいボクセル × 赤黒の回数(2^25 ≈ 0.24 s。RTX 3070 Ti で 1 ボクセルの赤黒 1 回 ≈ 7.1 ns・
+    // Windows の TDR 2 s の約 1/8。T-1349)。groupshared に載る箱(7,168 ボクセル)× 上限 1,024 回 × 小刻み 4 はちょうど収まる
+    constexpr uint64_t GROUP_VOXEL_SWEEPS = 1ull << 25;
+    constexpr uint32_t SPLIT_SWEEPS_MAX = (1u << 24) - 1;  // g_split の上の 24 bit
+    constexpr uint32_t DISPATCH_TIMESTAMPS = 1024;  // 1 つ目の刻みの Dispatch ごとの時刻(一番長い Dispatch を出す)
 
     // 段の印(object_shell_flow.hlsl の OH_STAGE_*。1 つずつだけ回して費用を分ける。T-1223)
     constexpr uint32_t ALL_STAGES = 0xFFFFFFFFu;
@@ -321,6 +338,13 @@ namespace {
 
     // --- GPU ---
 
+    // 1 刻みの Dispatch の形(T-1350)
+    enum class SplitMode : uint8_t {
+        Auto,   // 1 つの Dispatch が長くなる箱だけ分ける(既定)
+        Whole,  // 1 刻み = 1 つの Dispatch
+        Split,  // 段ごとの Dispatch
+    };
+
     struct Gpu {
         ComPtr<ID3D12RootSignature> rootSignature;
         ComPtr<ID3D12PipelineState> pipeline;
@@ -339,7 +363,30 @@ namespace {
         uint32_t pressureMode =
             1;  // 1 = 収まったら止める・2 = 温めた始まり・4 = 多重格子・8 = 試験だけ 64bit の欄の道(shaders の OH_PRESSURE_*。T-1201・T-1222)
         uint32_t stageMask = ALL_STAGES;  // 回す段(測るだけ。T-1223)
+
+        // --- 分けた刻み(T-1350)---
+        uint32_t maxVoxels = 0;  // 一番大きい箱のボクセルの数
+        SplitMode split = SplitMode::Auto;
+        uint32_t splitSweeps = 0;      // 分けた形の 1 つの Dispatch の赤黒の回数(0 = GROUP_VOXEL_SWEEPS ÷ 一番大きい箱)
+        double longestDispatchMs = 0;  // 最後の RunTicks の 1 つ目の刻みで一番長い Dispatch
+        uint32_t dispatchesPerTick = 0;
     };
+
+    // 1 刻みを段ごとの Dispatch に分けるか。自動 = 1 つの Dispatch の形で、一番大きい箱が上限まで回すと GROUP_VOXEL_SWEEPS を超える時
+    bool UsesSplit(const Gpu& gpuState) {
+        if (gpuState.split != SplitMode::Auto)
+            return gpuState.split == SplitMode::Split;
+
+        return static_cast<uint64_t>(gpuState.maxVoxels) * gpuState.pressureSweeps * SUBSTEPS > GROUP_VOXEL_SWEEPS;
+    }
+
+    uint32_t SplitSweepsOf(const Gpu& gpuState) {
+        if (gpuState.splitSweeps != 0)
+            return std::min(gpuState.splitSweeps, SPLIT_SWEEPS_MAX);
+
+        const uint64_t sweeps = GROUP_VOXEL_SWEEPS / std::max<uint32_t>(gpuState.maxVoxels, 1);
+        return static_cast<uint32_t>(std::clamp<uint64_t>(sweeps, 1, SPLIT_SWEEPS_MAX));
+    }
 
     // 圧力の反復の規則(T-1201。CPU の OhShellFlow と GPU の g_pressureMode に同じものを渡す)
     struct PressureRule {
@@ -356,7 +403,7 @@ namespace {
     }
 
     size_t StatsCount(size_t objects) {
-        return 2 + (2 * objects) + SWEEP_STATS;
+        return 2 + (2 * objects) + SWEEP_STATS + (SPLIT_WORDS * objects);  // 後ろは分けた刻みの作業場(T-1350)
     }
 
     template <typename T>
@@ -372,6 +419,8 @@ namespace {
         result.rangeCount = static_cast<uint32_t>(world.ranges.size());
         result.passBase = world.pass;
         result.sharedPotential = sharedPotential ? 1u : 0u;
+        for (const rx::OhObject& object : world.objects)
+            result.maxVoxels = std::max(result.maxVoxels, object.voxelCount);
         result.rootSignature = gpu::CreateRootSignature(device, ROOT_LAYOUT);
         const auto bytecode = gpu::LoadShader(shader);
         const auto applyBytecode = gpu::LoadShader("sim/object_shell_apply_cells.cso");
@@ -430,8 +479,10 @@ namespace {
                 return std::unexpected("表のバッファを作れない");
         }
 
-        result.timestampReadback = gpu::CreateBuffer(device, 2 * sizeof(uint64_t), gpu::BufferKind::Readback);
-        const D3D12_QUERY_HEAP_DESC heapDesc{.Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP, .Count = 2, .NodeMask = 0};
+        result.timestampReadback = gpu::CreateBuffer(device, (2 + DISPATCH_TIMESTAMPS) * sizeof(uint64_t),
+                                                     gpu::BufferKind::Readback);
+        const D3D12_QUERY_HEAP_DESC heapDesc{
+            .Type = D3D12_QUERY_HEAP_TYPE_TIMESTAMP, .Count = 2 + DISPATCH_TIMESTAMPS, .NodeMask = 0};
         if (FAILED(device->CreateQueryHeap(&heapDesc, IID_PPV_ARGS(&result.timestamps))) || !result.timestampReadback)
             return std::unexpected("タイムスタンプを作れない");
 
@@ -473,33 +524,63 @@ namespace {
                                                    gpuState.srvs[i].buffer->GetGPUVirtualAddress());
 
         list->EndQuery(gpuState.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0);
+        uint32_t stamped = 0;
         for (uint32_t i = 0; i < count; ++i) {
             const uint64_t tick = first + i;
-            const std::array<uint32_t, ROOT_CONSTANT_COUNT> constants = {gpuState.objectCount,
-                                                                         static_cast<uint32_t>(tick),
-                                                                         static_cast<uint32_t>(tick >> 32),
-                                                                         gpuState.passBase,
-                                                                         4u,
-                                                                         gpuState.pressureSweeps,
-                                                                         1u,
-                                                                         gpuState.sharedPotential,
-                                                                         gpuState.pressureMode,
-                                                                         gpuState.stageMask,
-                                                                         gpuState.rangeCount};
-            list->SetComputeRoot32BitConstants(ROOT_LAYOUT.RootConstantIndex(), ROOT_CONSTANT_COUNT, constants.data(),
-                                               0);
-            list->Dispatch(gpuState.objectCount, 1, 1);
-            test::object_heat_gpu::Barrier(list);
+            // 1 つ目の刻みだけ Dispatch ごとに時刻を打つ(一番長い Dispatch を出す)
+            const auto stamp = [&](bool firstTick) {
+                if (!firstTick || stamped >= DISPATCH_TIMESTAMPS)
+                    return;
+
+                list->EndQuery(gpuState.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 2 + stamped);
+                ++stamped;
+            };
+            const auto dispatch = [&](uint32_t split) {
+                const std::array<uint32_t, ROOT_CONSTANT_COUNT> constants = {gpuState.objectCount,
+                                                                             static_cast<uint32_t>(tick),
+                                                                             static_cast<uint32_t>(tick >> 32),
+                                                                             gpuState.passBase,
+                                                                             SUBSTEPS,
+                                                                             gpuState.pressureSweeps,
+                                                                             1u,
+                                                                             gpuState.sharedPotential,
+                                                                             gpuState.pressureMode,
+                                                                             gpuState.stageMask,
+                                                                             gpuState.rangeCount,
+                                                                             split};
+                list->SetComputeRoot32BitConstants(ROOT_LAYOUT.RootConstantIndex(), ROOT_CONSTANT_COUNT,
+                                                   constants.data(), 0);
+                list->Dispatch(gpuState.objectCount, 1, 1);
+                test::object_heat_gpu::Barrier(list);
+                stamp(i == 0);
+            };
+
+            if (!UsesSplit(gpuState)) {
+                dispatch(0);
+            } else {
+                // 段ごとの Dispatch(T-1350): 小刻みごとに ⓪〜④ / 赤黒を続きから n 回ずつ(上限まで足りる数)/ ⑥〜⑨
+                const uint32_t sweeps = SplitSweepsOf(gpuState);
+                const uint32_t chunks = (gpuState.pressureSweeps + sweeps - 1) / sweeps;
+                for (uint32_t substep = 0; substep < SUBSTEPS; ++substep) {
+                    dispatch(SPLIT_PREPARE | (substep << 2));
+                    for (uint32_t c = 0; c < chunks; ++c)
+                        dispatch(SPLIT_SWEEPS | (substep << 2) | (sweeps << 8));
+
+                    dispatch(SPLIT_FINISH | (substep << 2));
+                }
+            }
+
             // 集めて書く段: セルごとに物の順で足して 1 回だけ当てる(T-1332)
             list->SetPipelineState(gpuState.applyPipeline.Get());
             list->Dispatch((gpuState.rangeCount + APPLY_THREADS - 1) / APPLY_THREADS, 1, 1);
             test::object_heat_gpu::Barrier(list);
+            stamp(i == 0);
             list->SetPipelineState(gpuState.pipeline.Get());
             gpuState.passBase += gpuState.objectCount;
         }
 
         list->EndQuery(gpuState.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 1);
-        list->ResolveQueryData(gpuState.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2,
+        list->ResolveQueryData(gpuState.timestamps.Get(), D3D12_QUERY_TYPE_TIMESTAMP, 0, 2 + stamped,
                                gpuState.timestampReadback.Get(), 0);
         debugRing.RecordReadbackAndReset(list);
         if (!queue.ExecuteAndWait())
@@ -509,11 +590,19 @@ namespace {
         if (debugOutput.assertCount > 0)
             return std::unexpected(std::format("GPU の FX_ASSERT が {} 件", debugOutput.assertCount));
 
-        std::array<uint64_t, 2> times{};
+        std::vector<uint64_t> times(2 + stamped, 0);
         uint64_t frequency = 0;
         if (!gpu::ReadBuffer(gpuState.timestampReadback.Get(), std::as_writable_bytes(std::span(times))) ||
             FAILED(queue.Native()->GetTimestampFrequency(&frequency)) || frequency == 0)
             return std::unexpected("タイムスタンプを読めない");
+
+        // 一番長い Dispatch(1 つ目の刻み。バリアの待ちも含む)
+        uint64_t longest = 0;
+        for (uint32_t k = 0; k < stamped; ++k)
+            longest = std::max(longest, times[2 + k] - times[k == 0 ? 0 : 1 + k]);
+
+        gpuState.longestDispatchMs = static_cast<double>(longest) * 1000.0 / static_cast<double>(frequency);
+        gpuState.dispatchesPerTick = stamped;
 
         return static_cast<double>(times[1] - times[0]) * 1000.0 / static_cast<double>(frequency) /
                static_cast<double>(count);
@@ -615,7 +704,15 @@ namespace {
         // --- 測りの刻みの数(--grow-ticks。T-1349 の切り分け)---
         uint32_t warmTicks = WARM_TICKS;
         uint32_t measureTicks = MEASURE_TICKS;
+
+        // --- 1 刻みの Dispatch の形(--split・--split-sweeps。T-1350)---
+        SplitMode split = SplitMode::Auto;
+        uint32_t splitSweeps = 0;
     };
+
+    const char* SplitName(const Gpu& gpuState) {
+        return UsesSplit(gpuState) ? "段ごとの Dispatch" : "1 つの Dispatch";
+    }
 
     // GPU の真実(ボクセル・セル・対の端数・面の運動量)のハッシュ(FNV-1a。回ごとに変わらないかを見る。T-1332)
     std::expected<uint64_t, std::string> GpuDigest(ID3D12Device5* device, gpu::ImmediateQueue& queue,
@@ -645,7 +742,10 @@ namespace {
     struct CompareScene {
         uint32_t copies = 2;
         uint32_t objectsPerCell = 1;
-        bool vary = false;  // 物ごとに熱い層の温度を変える(1,500 K・1,200 K・1,800 K の順)
+        bool vary = false;               // 物ごとに熱い層の温度を変える(1,500 K・1,200 K・1,800 K の順)
+        uint32_t ticks = COMPARE_TICKS;  // 比べる刻みの数(every ごとに比べる)
+        uint32_t every = COMPARE_EVERY;
+        double maxDispatchMs = 0;  // 0 でなければ、1 つ目の刻みの一番長い Dispatch がこれを超えたら失敗(T-1350)
     };
 
     // CPU と GPU を同じ場面から回して比べる。戻り値 = 最後の GPU の真実のハッシュ
@@ -679,13 +779,15 @@ namespace {
 
         gpuState->pressureSweeps = rule.sweeps;
         gpuState->pressureMode = rule.mode;
+        gpuState->split = context.split;
+        gpuState->splitSweeps = context.splitSweeps;
         uint64_t limited = 0;
-        for (uint32_t tick = 2; tick < 2 + COMPARE_TICKS; tick += COMPARE_EVERY) {
-            const auto ran = RunTicks(*queue, *gpuState, *debugRing, tick, COMPARE_EVERY);
+        for (uint32_t tick = 2; tick < 2 + scene.ticks; tick += scene.every) {
+            const auto ran = RunTicks(*queue, *gpuState, *debugRing, tick, scene.every);
             if (!ran)
                 return std::unexpected(ran.error());
 
-            for (uint32_t t = tick; t < tick + COMPARE_EVERY; ++t) {
+            for (uint32_t t = tick; t < tick + scene.every; ++t) {
                 if (!test::StepShellFlows(context.shared, context.tables.gases, world, flows, t))
                     return std::unexpected(std::format("CPU の流れが崩れた(刻み {})", t));
             }
@@ -696,7 +798,7 @@ namespace {
 
             if (*different != 0)
                 return std::unexpected(
-                    std::format("刻み {} で GPU と CPU が食い違った({} 件)", tick + COMPARE_EVERY - 1, *different));
+                    std::format("刻み {} で GPU と CPU が食い違った({} 件)", tick + scene.every - 1, *different));
         }
 
         for (const test::OhShellFlow& flow : flows)
@@ -706,15 +808,20 @@ namespace {
         if (!digest)
             return std::unexpected(digest.error());
 
+        if (scene.maxDispatchMs > 0 && gpuState->longestDispatchMs > scene.maxDispatchMs)
+            return std::unexpected(std::format("一番長い Dispatch {:.1f} ms が {:.0f} ms を超えた",
+                                               gpuState->longestDispatchMs, scene.maxDispatchMs));
+
         Log(Channel::Gpu, Level::Info,
-            "{}・圧力の値は{}・{}: {} ボクセル × {} 枚({} 枚で 1 セル)・{} 刻みでビット一致(一番速い面 "
+            "{}・圧力の値は{}・{}・{}: {} ボクセル × {} 枚({} 枚で 1 セル)・{} 刻みでビット一致(一番速い面 "
             "{}・出る上限で縮めた {}・"
-            "赤黒 平均 {:.1f} 一番多い {} 上限 {}・ハッシュ {:016x})",
-            shape.name, sharedPotential ? " groupshared" : "作業場", rule.name, one->voxels.size(), scene.copies,
-            scene.objectsPerCell, COMPARE_TICKS, flows[0].fastestQ16, limited,
+            "赤黒 平均 {:.1f} 一番多い {} 上限 {}・ハッシュ {:016x}・Dispatch 1 刻み {} 回 一番長い {:.3f} ms)",
+            shape.name, sharedPotential ? " groupshared" : "作業場", rule.name, SplitName(*gpuState),
+            one->voxels.size(), scene.copies, scene.objectsPerCell, scene.ticks, flows[0].fastestQ16, limited,
             static_cast<double>(flows[0].pressureSweepsUsed) /
                 static_cast<double>(std::max<uint64_t>(flows[0].pressureSolves, 1)),
-            flows[0].pressureMostSweeps, flows[0].pressureCapped, *digest);
+            flows[0].pressureMostSweeps, flows[0].pressureCapped, *digest, gpuState->dispatchesPerTick,
+            gpuState->longestDispatchMs);
 
         return *digest;
     }
@@ -747,6 +854,62 @@ namespace {
         return {};
     }
 
+    // 段ごとの Dispatch に分けた形(T-1350): 赤黒を 7 回ずつに区切り(収まるのは区切りの途中・ちょうど区切り・上限のどれも起きる)、
+    // CPU とビット一致で、1 つの Dispatch の形(wholeDigests。[規則][groupshared = 0・作業場 = 1])と同じハッシュになる
+    std::expected<void, std::string> CompareSplit(const Context& context, const Shape& shape,
+                                                  std::span<const PressureRule> rules,
+                                                  const std::array<std::array<uint64_t, 2>, 4>& wholeDigests) {
+        Context split = context;
+        split.split = SplitMode::Split;
+        split.splitSweeps = 7;
+        for (size_t r = 0; r < rules.size(); ++r) {
+            for (const bool sharedPotential : {true, false}) {
+                const auto compared = RunCompare(split, shape, sharedPotential, rules[r]);
+                if (!compared)
+                    return std::unexpected(
+                        std::format("分けた形・{}・{}: {}", shape.name, rules[r].name, compared.error()));
+
+                const uint64_t whole = wholeDigests[r][sharedPotential ? 0 : 1];
+                if (*compared != whole)
+                    return std::unexpected(
+                        std::format("分けた形・{}・{}: ハッシュが 1 つの Dispatch の形と違う({:016x} / {:016x})",
+                                    shape.name, rules[r].name, *compared, whole));
+            }
+        }
+
+        // 1 つのセルに物が 3 個(集めて書く段と一緒に)
+        const CompareScene scene{.copies = 7, .objectsPerCell = 3, .vary = true};
+        Context wholeContext = context;
+        wholeContext.split = SplitMode::Whole;
+        const PressureRule rule{"0 から収まるまで", 1024, 1};
+        const auto whole = RunCompare(wholeContext, shape, true, rule, scene);
+        const auto parts = RunCompare(split, shape, true, rule, scene);
+        if (!whole || !parts)
+            return std::unexpected(std::format("分けた形・3 個で 1 セル: {}", !whole ? whole.error() : parts.error()));
+
+        if (*whole != *parts)
+            return std::unexpected(
+                std::format("分けた形・3 個で 1 セル: ハッシュが違う({:016x} / {:016x})", *whole, *parts));
+
+        return {};
+    }
+
+    // 大きい箱(T-1350): 紙 96 × 48・層 8 段(121,856 ボクセル)を 0 から決まった 1,024 回(上限)で 2 刻み。1 つの Dispatch の形なら
+    // 1 刻み約 3.5 s で TDR に当たる箱(T-1349)。自動で段ごとの Dispatch になり、CPU とビット一致・一番長い Dispatch が 2 s より十分短い
+    std::expected<void, std::string> CompareLargeBox(const Context& context) {
+        const Shape shape{"紙 96 × 48・層 8 段", 96, 48, 8};
+        const PressureRule rule{"0 から決まった 1,024 回", 1024, 0};
+        const CompareScene scene{
+            .copies = 1, .objectsPerCell = 1, .vary = false, .ticks = 2, .every = 1, .maxDispatchMs = 1000.0};
+        Context automatic = context;
+        automatic.split = SplitMode::Auto;
+        const auto compared = RunCompare(automatic, shape, false, rule, scene);
+        if (!compared)
+            return std::unexpected(std::format("{}: {}", shape.name, compared.error()));
+
+        return {};
+    }
+
     // 戻り値 = 1 刻みの平均の GPU の ms。stageMask を全部でなくすると暖機の後だけ段を外す(結果は変わるので数え上げは見ない・書き出さない)
     std::expected<double, std::string> Measure(const Context& context, const Shape& shape, uint32_t copies,
                                                bool sharedPotential, const PressureRule& rule,
@@ -765,6 +928,8 @@ namespace {
 
         gpuState->pressureSweeps = rule.sweeps;
         gpuState->pressureMode = rule.mode;
+        gpuState->split = context.split;
+        gpuState->splitSweeps = context.splitSweeps;
         const size_t statsCount = StatsCount(world.objects.size());
         const size_t base = 2 + (2 * world.objects.size());
         const auto warm = RunTicks(*queue, *gpuState, *debugRing, 2, context.warmTicks);
@@ -794,11 +959,13 @@ namespace {
         const uint32_t cappedMeasured = (*stats)[base + 3] - (*before)[base + 3];
         Log(Channel::Gpu, Level::Info,
             "測る: {}({} ボクセル・面 {})× {}・圧力の値は{}・{}: 1 刻み {:.3f} ms・赤黒 平均 {:.1f} 回"
-            "(暖機からの一番多い {}・上限で止まった {}・測った {} 回の解きのうち上限で止まった {})",
+            "(暖機からの一番多い {}・上限で止まった {}・測った {} 回の解きのうち上限で止まった {})・{}"
+            "(1 刻み {} 回・一番長い {:.3f} ms)",
             shape.name, one->voxels.size(), gpuState->faceCount / copies, copies,
             sharedPotential ? " groupshared" : "作業場", rule.name, *measured,
             static_cast<double>(sweeps) / static_cast<double>(std::max<uint32_t>(solves, 1)), (*stats)[base + 2],
-            (*stats)[base + 3], solves, cappedMeasured);
+            (*stats)[base + 3], solves, cappedMeasured, SplitName(*gpuState), gpuState->dispatchesPerTick,
+            gpuState->longestDispatchMs);
 
         return *measured;
     }
@@ -1031,6 +1198,9 @@ namespace {
         uint32_t threads = 1024;
         uint32_t measureSweeps = 24;
         int32_t onlyRule = -1;
+        bool largeBox = false;
+        SplitMode split = SplitMode::Auto;
+        uint32_t splitSweeps = 0;
         for (size_t i = 0; i < arguments.size(); ++i) {
             char* argument = arguments[i];
             const std::string_view text = argument;
@@ -1063,6 +1233,14 @@ namespace {
             } else if (text == "--grow-ticks" && i + 2 < arguments.size()) {
                 warmTicks = static_cast<uint32_t>(std::strtoul(arguments[++i], nullptr, 10));
                 measureTicks = static_cast<uint32_t>(std::strtoul(arguments[++i], nullptr, 10));
+            } else if (text == "--large-box") {
+                largeBox = true;
+                compare = false;
+            } else if (text == "--split" && i + 1 < arguments.size()) {
+                const std::string_view mode = arguments[++i];
+                split = mode == "whole" ? SplitMode::Whole : (mode == "split" ? SplitMode::Split : SplitMode::Auto);
+            } else if (text == "--split-sweeps" && i + 1 < arguments.size()) {
+                splitSweeps = static_cast<uint32_t>(std::strtoul(arguments[++i], nullptr, 10));
             } else if (text == "--measure") {
                 measure = true;
             } else if (text == "--measure-only") {
@@ -1099,23 +1277,37 @@ namespace {
                               .shader = threads == 1024 ? std::string("sim/object_shell_flow.cso")
                                                         : std::format("sim/object_shell_flow_t{}.cso", threads),
                               .warmTicks = warmTicks,
-                              .measureTicks = measureTicks};
+                              .measureTicks = measureTicks,
+                              .split = split,
+                              .splitSweeps = splitSweeps};
         if (compare) {
             const std::array<Shape, 2> shapes = {Shape{"紙 24 列・層 2 段", 24, 3, 2},
                                                  Shape{"紙 24 列・層 4 段", 24, 3, 4}};
             const std::array<PressureRule, 4> rules = {
                 PressureRule{"0 から決まった 24 回", 24, 0}, PressureRule{"0 から収まるまで", 1024, 1},
                 PressureRule{"温めた始まり + 収まるまで", 1024, 3}, PressureRule{"多重格子 + 収まるまで", 1024, 5}};
-            for (const PressureRule& rule : rules) {
-                for (const Shape& shape : shapes) {
+            // 1 つの Dispatch の形のハッシュ(紙 24 列・層 2 段。分けた形と比べる。T-1350)
+            std::array<std::array<uint64_t, 2>, 4> wholeDigests{};
+            for (size_t r = 0; r < rules.size(); ++r) {
+                for (size_t s = 0; s < shapes.size(); ++s) {
                     for (const bool sharedPotential : {true, false}) {
-                        if (auto compared = RunCompare(context, shape, sharedPotential, rule); !compared) {
+                        const auto compared = RunCompare(context, shapes[s], sharedPotential, rules[r]);
+                        if (!compared) {
                             Log(Channel::Gpu, Level::Error, "gpu_object_shell_flow_test: FAILED({}・{}: {})",
-                                shape.name, rule.name, compared.error());
+                                shapes[s].name, rules[r].name, compared.error());
                             return 1;
                         }
+
+                        if (s == 0)
+                            wholeDigests[r][sharedPotential ? 0 : 1] = *compared;
                     }
                 }
+            }
+
+            // 段ごとの Dispatch に分けた形(T-1350): 赤黒 7 回ずつで小刻みの途中で区切り、CPU とビット一致・1 つの Dispatch の形と同じハッシュ
+            if (auto splitCompared = CompareSplit(context, shapes[0], rules, wholeDigests); !splitCompared) {
+                Log(Channel::Gpu, Level::Error, "gpu_object_shell_flow_test: FAILED({})", splitCompared.error());
+                return 1;
             }
 
             // 重みが 32bit に入らないボクセルの道(64bit の欄)も CPU と比べる(試験の印 8 = x が 3 の倍数のボクセルをその道へ。T-1320 段 1)
@@ -1134,6 +1326,13 @@ namespace {
 
             if (auto sharedCells = CompareSharedCells(context); !sharedCells) {
                 Log(Channel::Gpu, Level::Error, "gpu_object_shell_flow_test: FAILED({})", sharedCells.error());
+                return 1;
+            }
+        }
+
+        if (largeBox) {
+            if (auto large = CompareLargeBox(context); !large) {
+                Log(Channel::Gpu, Level::Error, "gpu_object_shell_flow_test: FAILED({})", large.error());
                 return 1;
             }
         }
