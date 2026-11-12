@@ -108,7 +108,7 @@ T-1221 の 1 段目は、層の頁を GPU に置き、刻みの段の後に層�
 - 2026-11-12 wt2(4 本目): 7 の 5 の ②③④(t-1240-wide-layers-2)。層と結ぶ量を溢れまで引く道具 1 つ(LayerTail)で層を合わせる段・細かくする・
   粗くする(T-1324 の切り上げも同じ)・広げる・一様の層の比べ(新しい変種 multires_tree_wide_settle)を溢れの世界に。粗くすると層の物質が 9 種以上なら
   TreeResolve の溢れの変種が断って数える(D-689)。合格(rebase 前 main 50a6cad6・RTX 3070 Ti・release): gpu_multires_layers〔HW・WARP〕・gpu_multires・
-  gpu_multires_wide_*(6 組 + WARP)・multires_layers・dxil_alloca_check(graph_wide 51 → 41)。9 段の鎖は溢れの世界で層なしでも食い違う → T-1341。
+  gpu_multires_wide_*(6 組 + WARP)・multires_layers・dxil_alloca_check(graph_wide 51 → 41。rebase main 75656697 の後は 55 = main の T-1252 の欄の配りと合わさった数で表を 55 に。main 単独の数は未確認)。9 段の鎖は溢れの世界で層なしでも食い違う → T-1341。
 
 ## 7 の 3・4 の詰め(2026-11-05 wt2 作業役 4。t-1240-coarsen-layers)
 - **一様の枠の層の置き場 → 枠ごとに決まった場所(仮・ユーザー未確認)【エンジン】**: 置き場の最後に [枠 × 組 8 つ(物質・層の下位・上位)]。

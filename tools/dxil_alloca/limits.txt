@@ -27,7 +27,7 @@ multires_conduct_graph 6
 multires_conduct_mark 6
 multires_graph 11
 multires_graph_place 11
-multires_graph_wide 41
+multires_graph_wide 55
 multires_peek_extract 1
 multires_step_wide_big 49
 multires_step_wide_deferred 32
