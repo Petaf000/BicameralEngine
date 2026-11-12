@@ -242,6 +242,44 @@ LayerTail UniformValueTail(uint32_t slot) {
 #endif
 }
 
+// --- 影の鎖の欄(CPU の RefineShadow。T-1252 段 2 の 5 本目)---
+// 影の子は親と同じ数(一般)・配り手の細かくする関数(配り手。一様な親は SfOwnerRefineUniform)。親は一様でも頁でも CPU の LoadNestField と同じに読む。
+// 影の頁が前から持つ欄の頁は空きへ返し(StartPage)、0 でない値を書くなら 1 つ取る(StorePage の EnsurePage)。影の鎖は 1 段 = 1 グループで順なので、
+// スレッド 0 が段の順に取る(番号は CPU と同じ)。この刻みだけの欄も同じ道(値は木の段では 0)
+int64_t ShadowCarriedValue(uint32_t f, uint32_t owner, MrBlock parent, uint32_t parentSlot, uint32_t parentCell,
+                           uint32_t component, uint32_t j) {
+    const int64_t value = LoadCarriedSlotCell(f, parentSlot, parentCell, component);
+    if (owner == SF_NO_OWNER)
+        return SfRefineValue(value);
+
+    if (MrIsUniform(parent))
+        return SfOwnerRefineUniform(owner, value);
+
+    return SfOwnerRefineChild(owner, value, j);
+}
+
+// 全部のスレッドが呼ぶ(1 スレッド = 子のセル t)
+void RefineShadowCarried(MrBlock parent, uint32_t parentSlot, uint32_t parentCell, uint32_t childPage, uint32_t t) {
+    const uint32_t count = CarriedFieldCount();
+    const uint32_t j = CarriedChildOfCell(t);
+    for (uint32_t f = 0; f < count; ++f) {
+        const uint32_t owner = CarriedOwner(f);
+        const uint32_t components = CarriedComponents(f);
+        bool mine = false;
+        for (uint32_t c = 0; c < components; ++c)
+            mine = mine || CarriedValueNonZero(ShadowCarriedValue(f, owner, parent, parentSlot, parentCell, c, j));
+
+        const bool wanted = CarriedGroupOr(t, mine ? 1u : 0u) != 0;
+        const uint32_t fieldPage = SharedRestartCarriedPage(t, f, childPage, true, wanted);
+        if (fieldPage == MF_NO_PAGE)
+            continue;
+
+        for (uint32_t c = 0; c < components; ++c)
+            StoreCarriedWords(CarriedValueAddress(f, fieldPage, t, c),
+                              ShadowCarriedValue(f, owner, parent, parentSlot, parentCell, c, j));
+    }
+}
+
 // 1 段を細かくする(1 スレッド = 子のセル t。親のセル t も読む)
 void RefineLevel(MrRefineRecord record, uint32_t t) {
     const bool fromRequest = record.request != MR_NO_BLOCK;
@@ -310,6 +348,8 @@ void RefineLevel(MrRefineRecord record, uint32_t t) {
     // --- 配り手の欄(セルの中身の配りの後。CPU の Refine の最後の RefineOwners)---
     if (fromRequest && real)
         RefineCarriedFields(parent, record.parentSlot, parentCell, childSlot, childPage, uniformChild, t);
+    else if (!fromRequest)
+        RefineShadowCarried(parent, record.parentSlot, parentCell, childPage, t);  // グループで一様な分岐
 
 #ifdef MR_REFINE_PLACE
     // --- 寄せるセルの中身は置かれ方で(T-1188・T-1176。CPU の PlaceRefineOctantCells。端数は上で写した SAME のまま。
@@ -1230,6 +1270,66 @@ void CoarsenRequestNode(DispatchNodeInputRecord<MrCoarsenRecord> input, uint32_t
 
 // clang-format off
 
+// --- 影の引き戻しの欄(CPU の PullBackShadow。T-1252 段 2 の 5 本目)---
+// 親のセルごとに子 2³ の和を親 × 8 に(一般 = SfPullBackChild・配り手 = SfOwnerPullBackChild。ADR-0361)。影の頁が欄の頁を持たず
+// 0 でない値を書くなら 1 つ取る(StorePage)。1 スレッド = 親の八分の一のセル octantCell(自分の子 8 個だけを読み書きする)。全部のスレッドが呼ぶ
+
+SfFamily LoadCarriedFamily(uint32_t f, uint32_t fieldPage, uint32_t octantCell, uint32_t component) {
+    SfFamily family;
+    FX_UNROLL
+    for (uint32_t j = 0; j < SF_CHILDREN; ++j)
+        family.values[j] = LoadCarriedPage(f, fieldPage, MrChildCell(octantCell, j), component);
+
+    return family;
+}
+
+int64_t PullBackCarriedValue(uint32_t owner, int64_t parentValue, SfFamily family, uint32_t j) {
+    if (owner == SF_NO_OWNER)
+        return SfPullBackChild(parentValue, family, j);
+
+    return SfOwnerPullBackChild(owner, parentValue, family, j);
+}
+
+void PullBackCarried(MrBlock shadow, uint32_t octantCell) {
+    const uint32_t count = CarriedFieldCount();
+    const uint32_t parentCell = MrOctantCell(shadow.parentOctant, octantCell);
+    for (uint32_t f = 0; f < count; ++f) {
+        const uint32_t owner = CarriedOwner(f);
+        const uint32_t components = CarriedComponents(f);
+        uint32_t fieldPage = CarriedPageOf(f, shadow.page);  // グループで一様
+        const bool fresh = fieldPage == MF_NO_PAGE;          // 新しく取る頁は 0 と読む(CPU の EnsurePage は 0 で埋める)
+        if (fresh) {
+            bool mine = false;
+            for (uint32_t c = 0; c < components; ++c) {
+                const int64_t parentValue = LoadCarriedSlotCell(f, shadow.parent, parentCell, c);
+                const SfFamily family = LoadCarriedFamily(f, MF_NO_PAGE, octantCell, c);
+                FX_UNROLL
+                for (uint32_t j = 0; j < SF_CHILDREN; ++j)
+                    mine = mine || CarriedValueNonZero(PullBackCarriedValue(owner, parentValue, family, j));
+            }
+
+            const bool wanted = CarriedGroupOr(octantCell, mine ? 1u : 0u) != 0;
+            fieldPage = SharedRestartCarriedPage(octantCell, f, shadow.page, false, wanted);
+        }
+
+        if (fieldPage == MF_NO_PAGE)
+            continue;
+
+        for (uint32_t c = 0; c < components; ++c) {
+            const int64_t parentValue = LoadCarriedSlotCell(f, shadow.parent, parentCell, c);
+            uint32_t familyPage = fieldPage;
+            if (fresh)
+                familyPage = MF_NO_PAGE;
+
+            const SfFamily family = LoadCarriedFamily(f, familyPage, octantCell, c);
+            FX_UNROLL
+            for (uint32_t j = 0; j < SF_CHILDREN; ++j)
+                StoreCarriedWords(CarriedValueAddress(f, fieldPage, MrChildCell(octantCell, j), c),
+                                  PullBackCarriedValue(owner, parentValue, family, j));
+        }
+    }
+}
+
 // 影の子 2³ を親 × 8 に引き戻し、次はその下の影を(1 スレッド = 親のセル 1 つ。影の鎖の枠は連続)
 [Shader("node")]
 [NodeLaunch("broadcasting")]
@@ -1254,6 +1354,9 @@ void PullBackNode(DispatchNodeInputRecord<MrChainRecord> input, uint32_t thread 
 
     [unroll] for (uint32_t k = 0; k < MR_CHILDREN_PER_CELL; ++k)
         g_cells[PageCellAddress(shadow.page, MrChildCell(thread, k))] = pulled.cells[k];
+
+    // --- 載せた欄(CPU の PullBackLevel の PullBackShadow。区画を持たない世界は回らない)---
+    PullBackCarried(shadow, thread);
 
     // --- セルの値が変わりうるので、つついた印にして次の刻みに tc を書き直す(CPU の PullBackLevel。ADR-0018 追記 T-0125。
     //     観察の枠は種の一覧に入れない)---

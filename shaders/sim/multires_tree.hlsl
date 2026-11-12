@@ -856,6 +856,73 @@ void ExpandLayers(uint32_t i, uint32_t slot, uint32_t freeLayers, inout uint32_t
     GroupMemoryBarrierWithGroupSync();  // 次の区切りが累積和と一覧を書き直す前に、全部が読み終える
 }
 
+// --- 広げた頁の載せた欄(CPU の ExpandWantedPages の ExpandPage。T-1252 段 2 の 5 本目)---
+// 1 区切り(全部のスレッドが呼ぶ): スレッド i が頁を配った一様な枠 slot(無ければ MR_NO_BLOCK)が覆われていないセルを持ち、
+// 欄の一様の値に 0 でないものがあれば、欄ごとに枠の順で 1 つ取り(空きの上から k 番目・その後は高さの上 = CPU の StorePage の EnsurePage)、
+// 覆われていないセルに一様の値・覆われたセルに 0 を書く。一様の値は消さない(CPU と同じ)。尽きたら数えて頁なし(GPU だけ。CPU とずれる)
+void ExpandCarried(uint32_t i, uint32_t slot) {
+    const uint32_t count = CarriedFieldCount();
+    bool open = false;  // 覆われていないセルがある
+    if (slot != MR_NO_BLOCK) {
+        const MrBlock block = g_blocks[slot];
+        open = block.kind != MR_BLOCK_REAL || MrFoldValueCell(block) != MR_BLOCK_CELLS;
+    }
+
+    for (uint32_t f = 0; f < count; ++f) {
+        bool need = false;
+        if (open)
+            need = CarriedUniformNonZero(f, slot);
+
+        const uint32_t freeCount = CarriedHeader(f, MF_HEADER_FREE_COUNT);
+        const uint32_t top = CarriedHeader(f, MF_HEADER_TOP);
+        const uint32_t available = MfPagesAvailable(CarriedHeader(f, MF_HEADER_CAPACITY), 0u, freeCount, top);
+        LayerInclusiveScan(i, need ? 1u : 0u);  // 中のバリアで、全部のスレッドが頭を読み終えてから
+        const uint32_t total = gs_layerScan[MR_MAX_REQUESTS - 1];
+        if (need) {
+            const uint32_t k = gs_layerScan[i] - 1;
+            uint32_t fieldPage = MF_NO_PAGE;
+            if (k < available) {
+                fieldPage = TakenCarriedPage(f, k, freeCount, top);
+                SetCarriedPageOf(f, g_blocks[slot].page, fieldPage);
+            }
+
+            gs_expandLayerSlots[k] = slot;
+            gs_expandLayerPages[k] = fieldPage;
+        }
+
+        AllMemoryBarrierWithGroupSync();
+        const uint32_t components = CarriedComponents(f);
+        for (uint32_t n = 0; n < total; ++n) {
+            const uint32_t expanded = gs_expandLayerSlots[n];
+            const uint32_t fieldPage = gs_expandLayerPages[n];
+            const bool real = g_blocks[expanded].kind == MR_BLOCK_REAL;
+            for (uint32_t index = i; index < MR_BLOCK_CELLS && fieldPage != MF_NO_PAGE; index += MR_MAX_REQUESTS) {
+                // 覆われたか(子の並びはバッファから直に読む。T-0397)
+                const bool covered = real && g_blocks[expanded].children[MrOctantOfCell(index)] != MR_NO_BLOCK;
+                for (uint32_t c = 0; c < components; ++c) {
+                    int64_t value = 0;
+                    if (!covered)
+                        value = LoadCarriedUniform(f, expanded, c);
+
+                    StoreCarriedWords(CarriedValueAddress(f, fieldPage, index, c), value);
+                }
+            }
+        }
+
+        DeviceMemoryBarrierWithGroupSync();  // 全部が空きのスタックと頭を読み終えてから書き直す
+        if (i == 0 && total > 0) {
+            const uint32_t taken = min(total, available);
+            const uint32_t fromFree = min(taken, freeCount);
+            SetCarriedHeader(f, MF_HEADER_FREE_COUNT, freeCount - fromFree);
+            SetCarriedHeader(f, MF_HEADER_TOP, top + (taken - fromFree));
+            if (total > taken)
+                CountCarriedPagesShort(total - taken);
+        }
+
+        DeviceMemoryBarrierWithGroupSync();
+    }
+}
+
 [numthreads(MR_MAX_REQUESTS, 1, 1)] void TreeExpand(uint32_t i : SV_GroupIndex) {
     const uint32_t freePages = g_counters[MR_COUNTER_FREE_PAGES];
     uint32_t wanted = 0;  // ここまでの区切りで頁に広げたいブロックの数(グループで一様)
@@ -883,6 +950,9 @@ void ExpandLayers(uint32_t i, uint32_t slot, uint32_t freeLayers, inout uint32_t
 
         if (LayerCapacity() > 0)
             ExpandLayers(i, granted ? slot : MR_NO_BLOCK, freeLayers, layersTaken);
+
+        if (CarriedFieldCount() > 0)
+            ExpandCarried(i, granted ? slot : MR_NO_BLOCK);
 
         wanted += gs_blockScan[MR_MAX_REQUESTS - 1];
         GroupMemoryBarrierWithGroupSync();  // 次の区切りが累積和を書き直す前に、全部が読み終える
@@ -963,6 +1033,119 @@ static const uint32_t MR_CLAIM_FOLD_WRITTEN = 2;         // 畳む: 一様の値
 static const uint32_t MR_CLAIM_FOLD_RETURN = 4;          // 端数の枠を返す(端数は TreeFoldCheck が帳簿へ移した)
 
 groupshared uint32_t gs_foldMismatch;
+
+// --- 載せた欄を畳む(CPU の FoldExact の ReleaseZeroPages・PageFoldable と FoldPage の欄の分。T-1252 段 2 の 5 本目)---
+// TreeFoldCheck が、調べる刻みの頁の全部 0 の欄の頁に返す印(pageOf の上の bit。欄の頁の番号 < 容量 < 2^31)を付け(畳めなくても返す)、
+// 欄の頁が一様(覆われていないセル = 値のセル・覆われたセル = 0)でなければ畳まない。畳むなら一様の値 = 値のセルの値。
+// TreeFold が枠の順に、畳む頁と印の付いた頁の欄の頁を欄ごとに空きのスタックへ積み、pageOf を消す
+static const uint32_t CARRIED_RELEASE_MARK = 0x80000000u;
+static const uint32_t CARRIED_FOLD_DIFFER = 1;
+static const uint32_t CARRIED_FOLD_NONZERO = 2;
+
+// pageOf の語(印つき)から欄の頁(MF_NO_PAGE はそのまま)
+uint32_t CarriedUnmarkedPage(uint32_t raw) {
+    if (raw == MF_NO_PAGE)
+        return MF_NO_PAGE;
+
+    return raw & ~CARRIED_RELEASE_MARK;
+}
+
+// MrFoldValueCell を枠 slot の見出しのバッファから直に(写した見出しの子の並びを動的な添字で読むと局所の配列になる。T-0397)
+uint32_t CarriedFoldValueCell(uint32_t slot) {
+    FX_UNROLL
+    for (uint32_t octant = 0; octant < MR_CHILDREN_PER_CELL; ++octant) {
+        if (g_blocks[slot].children[octant] == MR_NO_BLOCK)
+            return MrCellIndex((octant & 1u) * MR_OCTANT_EDGE, ((octant >> 1) & 1u) * MR_OCTANT_EDGE,
+                               ((octant >> 2) & 1u) * MR_OCTANT_EDGE);
+    }
+
+    return MR_BLOCK_CELLS;
+}
+
+// 載せた欄が一様か(全部のスレッドが呼ぶ・グループで一様な結果)。全部 0 の欄の頁には返す印を付ける。page = 枠 slot のセルの頁
+bool CarriedFoldable(uint32_t slot, uint32_t page, bool real, uint32_t index) {
+    const uint32_t count = CarriedFieldCount();
+    const uint32_t valueCell = CarriedFoldValueCell(slot);
+    const bool covered = real &&
+                         g_blocks[slot].children[MrOctantOfCell(index)] != MR_NO_BLOCK;  // バッファから直に(T-0397)
+    bool foldable = true;
+    for (uint32_t f = 0; f < count; ++f) {
+        const uint32_t fieldPage = CarriedPageOf(f, page);  // グループで一様
+        if (fieldPage == MF_NO_PAGE)
+            continue;
+
+        // 64bit は 2 語の比べ(T-1078・T-1159)
+        const uint32_t components = CarriedComponents(f);
+        uint32_t mine = 0;
+        for (uint32_t c = 0; c < components; ++c) {
+            const uint32_t address = CarriedValueAddress(f, fieldPage, index, c);
+            uint32_t expectedLow = 0;
+            uint32_t expectedHigh = 0;
+            if (!covered && valueCell != MR_BLOCK_CELLS) {
+                const uint32_t valueAddress = CarriedValueAddress(f, fieldPage, valueCell, c);
+                expectedLow = g_layers[valueAddress];
+                expectedHigh = g_layers[valueAddress + 1];
+            }
+
+            if (g_layers[address] != expectedLow || g_layers[address + 1] != expectedHigh)
+                mine |= CARRIED_FOLD_DIFFER;
+
+            if ((g_layers[address] | g_layers[address + 1]) != 0u)
+                mine |= CARRIED_FOLD_NONZERO;
+        }
+
+        const uint32_t flags = CarriedGroupOr(index, mine);
+        if (index == 0 && (flags & CARRIED_FOLD_NONZERO) == 0)
+            SetCarriedPageOf(f, page, fieldPage | CARRIED_RELEASE_MARK);
+
+        foldable = foldable && (flags & CARRIED_FOLD_DIFFER) == 0;
+    }
+
+    return foldable;
+}
+
+// 畳む枠 slot の載せた欄の一様の値 = 値のセルの値(全部覆われていれば・欄の頁が無ければ 0。CPU の FoldPage の FoldValue)
+void FoldCarriedUniform(uint32_t slot, uint32_t page) {
+    const uint32_t count = CarriedFieldCount();
+    const uint32_t valueCell = CarriedFoldValueCell(slot);
+    for (uint32_t f = 0; f < count; ++f) {
+        uint32_t fieldPage = MF_NO_PAGE;
+        if (valueCell != MR_BLOCK_CELLS)
+            fieldPage = CarriedUnmarkedPage(g_layers[CarriedStoreBase(f) + MfPageOfAddress(page)]);
+
+        const uint32_t components = CarriedComponents(f);
+        for (uint32_t c = 0; c < components; ++c)
+            StoreCarriedUniform(f, slot, c, LoadCarriedPage(f, fieldPage, valueCell, c));
+    }
+}
+
+// 1 グループで、スレッド i の枠のセルの頁 page(頁を持たない・世界の外なら MR_NO_PAGE)の欄の頁を、畳む(folds)か返す印があれば
+// 欄ごとに枠の順に空きのスタックへ積む(CPU の ReleasePage。中身は消さない)。全部のスレッドが呼ぶ
+void ReleaseFoldedCarried(uint32_t i, uint32_t page, bool folds) {
+    const uint32_t count = CarriedFieldCount();
+    for (uint32_t f = 0; f < count; ++f) {
+        uint32_t raw = MF_NO_PAGE;
+        if (page != MR_NO_PAGE)
+            raw = g_layers[CarriedStoreBase(f) + MfPageOfAddress(page)];
+
+        const uint32_t fieldPage = CarriedUnmarkedPage(raw);
+        const bool marked = fieldPage != raw;
+        const bool give = fieldPage != MF_NO_PAGE && (folds || marked);
+        const uint32_t freeCount = CarriedHeader(f, MF_HEADER_FREE_COUNT);
+        LayerInclusiveScan(i, give ? 1u : 0u);
+        const uint32_t total = gs_layerScan[MR_MAX_REQUESTS - 1];
+        if (give) {
+            SetCarriedFreePage(f, freeCount + gs_layerScan[i] - 1, fieldPage);
+            SetCarriedPageOf(f, page, MF_NO_PAGE);
+        }
+
+        DeviceMemoryBarrierWithGroupSync();
+        if (i == 0 && total > 0)
+            SetCarriedHeader(f, MF_HEADER_FREE_COUNT, freeCount + total);
+
+        DeviceMemoryBarrierWithGroupSync();
+    }
+}
 
 // 畳む時の一様の値(覆われていない最初のセル。全部覆われていれば空)
 RxCell FoldValue(MrBlock block) {
@@ -1347,6 +1530,12 @@ uint32_t FoldLayerFlags(MrBlock block, uint32_t layerPage, uint32_t index) {
     //     畳むと溢れを落とす。仮。溢れまで畳むのは T-0312)---
     bool foldable = MrWantsFoldCheck(block, mark);
 
+    // 載せた欄(T-1252): 全部 0 の欄の頁に返す印・欄が一様でなければ畳まない(CPU の FoldExact・FoldNear の PageFoldable。グループで一様な分岐)
+    if (foldable && CarriedFieldCount() > 0) {
+        if (!CarriedFoldable(slot, block.page, block.kind == MR_BLOCK_REAL, index))
+            foldable = false;
+    }
+
     // 層の頁を持つ頁は層まで一様な時だけ層ごと畳み(CPU の FoldLayeredPage)、0 でない層があれば平均では畳まない(FoldNear。T-1240)
     uint32_t layerPage = MR_LAYER_NO_PAGE;
     uint32_t layerFlags = 0;
@@ -1379,6 +1568,9 @@ uint32_t FoldLayerFlags(MrBlock block, uint32_t layerPage, uint32_t index) {
         else
             ClearLayerWords(UniformLayerBase(slot));
     }
+
+    if (index == 0 && folds && CarriedFieldCount() > 0)
+        FoldCarriedUniform(slot, block.page);
 
     if (index == 0 && flags != 0)
         g_treeWords[TreeClaimAddress(slot)] = MR_CLAIM_FOLD_BASE | flags;
@@ -1432,6 +1624,17 @@ void FoldBlock(uint32_t slot, uint32_t claim, uint32_t position) {
                 foldedPage = g_blocks[slot].page;
 
             ReleaseLayerPages(i, foldedPage);
+        }
+
+        // 畳む頁と全部 0 の欄の頁の載せた欄の頁を返す(CPU の FoldExact の ReleaseZeroPages・FoldPage。T-1252)
+        if (CarriedFieldCount() > 0) {
+            uint32_t carriedPage = MR_NO_PAGE;
+            if (slot < g_worldBlocks) {
+                if (!MrIsUniform(g_blocks[slot]))
+                    carriedPage = g_blocks[slot].page;
+            }
+
+            ReleaseFoldedCarried(i, carriedPage, folds);
         }
 
         if (folds)

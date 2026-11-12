@@ -12,7 +12,14 @@
 //      細かくする段の配り手の配り・親を覆う・粗くする段の配り手の和・解放の段が要求の順に返す)。
 //   6. 広げる: 一様な根の一様な子の配り手の値を変えてから写し、粗くすると親が頁に広がる(TreeSettle の判定・広げる親の欄の頁)。
 //      この刻みだけの欄の 0 の頁を持つ子を粗くして、その頁を解放の段が返す。
-// 影の鎖・畳む・広げる段(TreeExpand)・集めて書く段が区画を読むのは T-1252 の段 2 の残り。引数は gpu_test_options.h。
+//   7. 影の鎖(T-1252 段 2 の 5 本目): 頁を持つ根の 2 段・一様な根の 1 段(同じ影の枠 = 前の欄の頁を返して取り直す)を影に細かくし、
+//      影の欄の値を変え・親のこの刻みだけの欄に 0 でない値を書いてから引き戻す(影が欄の頁を持たない所は新しく取る)。毎回 CPU とビット一致。
+//   8. 畳む: 頁を持つ根(セルが一様でない)と、頁に広げた一様な根(セルも配り手の欄も一様)を、ちょうど静かになった刻みで畳む。
+//      広げた根は畳まれて欄の頁を返し、頁を持つ根は畳まれずに全部 0 のこの刻みだけの欄の頁だけを返す(CPU の ReleaseZeroPages)。
+//   9. 刻みの広げる段と畳む段: 一様な木箱の根(配り手の欄の一様の値を持つ)が刻みで頁に広がり(TreeExpand が欄の頁を取って一様の値で埋める)、
+//      燃え尽きて畳まれる(欄の頁を返す)までの活性の刻み(multires_uniform_scene の場面)を毎刻み CPU とビット一致。
+// 集めて書く段が区画を読むのは T-1252 の段 2 の残り。引数は gpu_test_options.h。
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <expected>
@@ -29,6 +36,7 @@
 #include "gpu/immediate_queue.h"
 #include "gpu_test_options.h"
 #include "multires_activity_scene.h"
+#include "multires_uniform_scene.h"
 #include "reaction_test_table.h"
 #include "sim/gpu_multires.h"
 #include "sim/gpu_multires_fields.h"
@@ -356,6 +364,207 @@ namespace {
         return {};
     }
 
+    // --- 7. 影の鎖 ---
+
+    // 影の鎖を CPU と GPU で細かくして比べる
+    std::expected<void, std::string> ShadowBoth(gpu::ImmediateQueue& queue, gpu::DebugRing& ring, sim::GpuMultires& gpu,
+                                                sim::MultiresNest& cpu, sim::MultiresNest& read, uint32_t parentSlot,
+                                                uint32_t levels, const sim::MultiresPoint& point, bool upload,
+                                                std::string_view where) {
+        const uint32_t shadowSlot = cpu.capacity.worldBlocks;
+        const auto record = [&](ID3D12GraphicsCommandList10* list) {
+            if (upload && !gpu.RecordUpload(list, cpu))
+                return false;
+
+            gpu.RecordRefineShadow(list, ring.GpuAddress(), parentSlot, shadowSlot, levels, point);
+            return true;
+        };
+        if (auto ran = Execute(queue, ring, gpu, record, read); !ran)
+            return std::unexpected(std::format("{}: {}", where, ran.error()));
+
+        sim::RefineShadowChain(cpu, parentSlot, shadowSlot, levels, point);
+
+        return CompareFields(cpu, read, where);
+    }
+
+    std::expected<void, std::string> RunShadow(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring,
+                                               const sim::BakedReactionTable& table) {
+        FieldWorld world = MakeFieldWorld(table);
+        sim::MultiresNest& cpu = world.nest;
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, RegionOptions(0));
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        const uint32_t paged = FindRealBlock(cpu, 0, false);
+        const uint32_t uniform = FindRealBlock(cpu, 0, true);
+        const sim::MultiresPoint chainPoint{.x = CHAIN_X, .y = CHAIN_Y, .z = CHAIN_Z, .level = 2};
+        const sim::MultiresPoint uniformPoint{.x = UNIFORM_X, .y = UNIFORM_Y, .z = UNIFORM_Z, .level = 1};
+        const uint32_t shadowSlot = cpu.capacity.worldBlocks;
+        sim::MultiresNest read = cpu;
+        if (auto both = ShadowBoth(queue, ring, *gpu, cpu, read, paged, 2, chainPoint, true, "影 頁を持つ根の 2 段");
+            !both)
+            return both;
+
+        const uint32_t shadowPages = sim::UsedNestFieldPages(cpu, world.owned);
+        if (auto both = ShadowBoth(queue, ring, *gpu, cpu, read, uniform, 1, uniformPoint, false, "影 一様な根の 1 段");
+            !both)
+            return both;
+
+        if (auto both = ShadowBoth(queue, ring, *gpu, cpu, read, paged, 2, chainPoint, false, "影 もう一度 2 段");
+            !both)
+            return both;
+
+        // --- 引き戻す: 影の配り手の欄を変え、親(頁を持つ根)のこの刻みだけの欄に 0 でない値(影はこの刻みだけの欄の頁を持たない)---
+        for (uint32_t index = 0; index < MR_BLOCK_CELLS; index += 7) {
+            for (uint32_t c = 0; c < OWNER_COMPONENTS; ++c)
+                sim::StoreNestField(cpu, world.owned, shadowSlot + 1, index, c, OwnerValue(index, c) * -5);
+        }
+
+        const uint32_t octantCell = MrOctantCell(cpu.blocks[shadowSlot].parentOctant, 3);
+        sim::StoreNestField(cpu, world.tick, paged, octantCell, 1, 4001);
+        const uint32_t tickPagesBefore = sim::UsedNestFieldPages(cpu, world.tick);
+        const auto pull = [&](ID3D12GraphicsCommandList10* list) {
+            if (!gpu->RecordUpload(list, cpu))
+                return false;
+
+            gpu->RecordPullBack(list, ring.GpuAddress(), shadowSlot, 2);
+            return true;
+        };
+        if (auto ran = Execute(queue, ring, *gpu, pull, read); !ran)
+            return std::unexpected(std::format("影の引き戻し: {}", ran.error()));
+
+        sim::PullBackShadowChain(cpu, table, shadowSlot, 2);
+        if (auto compared = CompareFields(cpu, read, "影の引き戻し"); !compared)
+            return compared;
+
+        if (shadowPages < 3 || sim::UsedNestFieldPages(cpu, world.tick) <= tickPagesBefore)
+            return std::unexpected(
+                std::format("場面の確かめ: 影が欄の頁を持たない(配り手 {})・引き戻しで影が頁を取らない", shadowPages));
+
+        Log(Channel::Gpu, Level::Info,
+            "影の鎖: 細かく 3 回(取り直しを含む)・引き戻し(新しい頁を含む)で一致(配り手の欄の頁 {})",
+            sim::UsedNestFieldPages(cpu, world.owned));
+
+        return {};
+    }
+
+    // --- 8. 畳む ---
+
+    constexpr uint64_t FOLD_TICK = 30;
+
+    // ちょうど静かになった刻みが tick になるように、枠 slot の忙しさの印を書く(MrWantsFoldCheck)
+    void MarkQuietAt(sim::MultiresNest& nest, uint32_t slot, uint64_t tick) {
+        nest.blocks[slot].busyTick = MrChangeMark(tick) - (MR_QUIET_TICKS + 1);
+    }
+
+    std::expected<void, std::string> RunFold(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring,
+                                             const sim::BakedReactionTable& table) {
+        FieldWorld world = MakeFieldWorld(table);
+        sim::MultiresNest& cpu = world.nest;
+        const uint32_t paged = FindRealBlock(cpu, 0, false);
+        const uint32_t uniform = FindRealBlock(cpu, 0, true);
+        if (!sim::ExpandNestPage(cpu, uniform))
+            return std::unexpected("場面の確かめ: 一様な根を頁に広げられない");
+
+        // この刻みだけの欄の全部 0 の頁を両方の根に
+        for (const uint32_t slot : {paged, uniform}) {
+            sim::StoreNestField(cpu, world.tick, slot, 9, 1, 5);
+            sim::StoreNestField(cpu, world.tick, slot, 9, 1, 0);
+            MarkQuietAt(cpu, slot, FOLD_TICK);
+        }
+
+        const uint32_t ownedBefore = sim::UsedNestFieldPages(cpu, world.owned);
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, RegionOptions(0));
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        sim::MultiresNest read = cpu;
+        const auto fold = [&](ID3D12GraphicsCommandList10* list) {
+            if (!gpu->RecordUpload(list, cpu))
+                return false;
+
+            gpu->RecordFoldPages(list, ring.GpuAddress(), FOLD_TICK);
+            return true;
+        };
+        if (auto ran = Execute(queue, ring, *gpu, fold, read); !ran)
+            return std::unexpected(std::format("畳む: {}", ran.error()));
+
+        sim::FoldQuietPages(cpu, FOLD_TICK);
+        if (auto compared = CompareFields(cpu, read, "畳む"); !compared)
+            return compared;
+
+        if (ownedBefore != 2 || !MrIsUniform(cpu.blocks[uniform]) || MrIsUniform(cpu.blocks[paged]) ||
+            sim::UsedNestFieldPages(cpu, world.owned) != 1 || sim::UsedNestFieldPages(cpu, world.tick) != 0)
+            return std::unexpected(std::format(
+                "場面の確かめ: 広げた根だけが畳まれ・全部 0 の欄の頁が返る、になっていない(配り手の頁 {} → "
+                "{}・この刻みだけ {})",
+                ownedBefore, sim::UsedNestFieldPages(cpu, world.owned), sim::UsedNestFieldPages(cpu, world.tick)));
+
+        Log(Channel::Gpu, Level::Info, "畳む: 一様な頁を畳んで欄の頁を返す・畳めない頁の全部 0 の欄の頁を返す で一致");
+
+        return {};
+    }
+
+    // --- 9. 刻みの広げる段と畳む段(multires_uniform_scene)---
+    std::expected<void, std::string> RunUniformTicks(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                     gpu::DebugRing& ring, const sim::BakedReactionTable& table) {
+        sim::MultiresNest cpu = test::MakeUniformNest(table, test::UNIFORM_WORLD_BLOCKS);
+        const uint32_t owned = sim::RegisterNestField(cpu, "owned",
+                                                      SfMakeOwnerDesc(SF_PLACE_CELL, SF_TYPE_I64, SF_PHASE_NONE,
+                                                                      SF_FLAG_HASHED, OWNER_COMPONENTS, SF_OWNER_TEST));
+        static_cast<void>(
+            sim::RegisterNestField(cpu, "source", SfMakeTickDesc(SF_PLACE_CELL, SF_TYPE_I64, SF_PHASE_NONE, 2)));
+        for (uint32_t slot = 0; slot < test::UNIFORM_ROOTS; ++slot) {
+            for (uint32_t c = 0; c < OWNER_COMPONENTS; ++c)
+                sim::StoreNestFieldUniform(cpu, owned, slot, c, OwnerValue(slot + 3, c));
+        }
+
+        sim::GpuMultiresOptions options = RegionOptions(0);
+        options.activity = true;
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, options);
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        sim::MultiresNest read = cpu;
+        uint32_t mostPages = 0;
+        for (uint64_t tick = 0; tick < test::UNIFORM_TICKS; ++tick) {
+            const auto record = [&](ID3D12GraphicsCommandList10* list) {
+                if (tick == 0 && !gpu->RecordUpload(list, cpu))
+                    return false;
+
+                if (!gpu->RecordRequests(list, test::UniformRequestsAt(tick)))
+                    return false;
+
+                gpu->RecordFoldPages(list, ring.GpuAddress(), tick);
+                gpu->RecordQuietRequests(list, ring.GpuAddress(), tick);
+                gpu->RecordProcessRequests(list, ring.GpuAddress());
+                return gpu->RecordStepActive(list, ring.GpuAddress(), test::STRESS_SEED, tick);
+            };
+            if (auto ran = Execute(queue, ring, *gpu, record, read); !ran)
+                return std::unexpected(std::format("一様な根の刻み {}: {}", tick, ran.error()));
+
+            test::BeginUniformTick(cpu, tick);
+            sim::StepActive(cpu, table, test::STRESS_SEED, tick);
+            if (auto compared = CompareFields(cpu, read, std::format("一様な根の刻み {}", tick)); !compared)
+                return compared;
+
+            mostPages = std::max(mostPages, sim::UsedNestFieldPages(cpu, owned));
+        }
+
+        if (cpu.counters[MR_COUNTER_EXPANDED] == 0 || cpu.counters[MR_COUNTER_FOLDED] == 0 || mostPages == 0 ||
+            sim::UsedNestFieldPages(cpu, owned) != 0)
+            return std::unexpected(
+                std::format("場面の確かめ: 広げて欄の頁を取り・畳んで返す、になっていない(広げた {}・畳んだ {}・"
+                            "欄の頁 最多 {} → {})",
+                            cpu.counters[MR_COUNTER_EXPANDED], cpu.counters[MR_COUNTER_FOLDED], mostPages,
+                            sim::UsedNestFieldPages(cpu, owned)));
+
+        Log(Channel::Gpu, Level::Info, "刻みの広げる・畳む: {} 刻み毎回一致(広げた {}・畳んだ {}・欄の頁 最多 {})",
+            test::UNIFORM_TICKS, cpu.counters[MR_COUNTER_EXPANDED], cpu.counters[MR_COUNTER_FOLDED], mostPages);
+
+        return {};
+    }
+
     // --- 4. 区画を持たない GPU は断る ---
     std::expected<void, std::string> RunRefusal(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring,
                                                 const sim::BakedReactionTable& table) {
@@ -408,6 +617,12 @@ namespace {
             ran = RunRefusal(device->Get(), *queue, *ring, *table);
         if (ran)
             ran = RunOwnerTree(device->Get(), *queue, *ring, *table);
+        if (ran)
+            ran = RunShadow(device->Get(), *queue, *ring, *table);
+        if (ran)
+            ran = RunFold(device->Get(), *queue, *ring, *table);
+        if (ran)
+            ran = RunUniformTicks(device->Get(), *queue, *ring, *table);
         if (!ran) {
             Log(Channel::Gpu, Level::Error, "gpu_field_region_test: FAILED ({})", ran.error());
             return 1;
@@ -417,8 +632,9 @@ namespace {
             return 1;
 
         Log(Channel::Gpu, Level::Info,
-            "gpu_field_region_test: OK(欄の区画を写して戻す・刻む・欄の無い世界・断り・木の段の配り手の欄で GPU と CPU "
-            "がビット一致)");
+            "gpu_field_region_test: "
+            "OK(欄の区画を写して戻す・刻む・欄の無い世界・断り・木の段・影の鎖・畳む・広げるの配り手の欄で "
+            "GPU と CPU がビット一致)");
 
         return 0;
     }

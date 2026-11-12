@@ -1,6 +1,6 @@
 # T-1252 登録に「配り手」と「寿命」・粗くする時のセルの配りの口・集めて書く段(土台。段 1 CPU / 段 2 GPU。ADR-0500 改訂)
 
-- Status: In Progress(2026-11-12 wt6: 段 2 の 3 本目 = GPU の世界の欄の区画まで〔t-1252-tree-gpu-2〕。段 2 の 1 段目 = GPU の欄の頁の置き場の並びと集めて書く段の Compute が CPU と頁の番号までビット一致〔ブランチ t-1252-registry-owner-gpu・ADR-0532〕。木の段への載せは下の「段 2 の残り」。段 1 CPU の主な形は済み・2026-10-29 本体の作業役 18 回目)
+- Status: In Progress(2026-11-12 wt6: 段 2 の 5 本目 = 影の鎖・引き戻し・畳む・広げるまで〔t-1252-tree-gpu-4〕。段 2 の 3 本目 = GPU の世界の欄の区画まで〔t-1252-tree-gpu-2〕。段 2 の 1 段目 = GPU の欄の頁の置き場の並びと集めて書く段の Compute が CPU と頁の番号までビット一致〔ブランチ t-1252-registry-owner-gpu・ADR-0532〕。木の段への載せは下の「段 2 の残り」。段 1 CPU の主な形は済み・2026-10-29 本体の作業役 18 回目)
 - 種類: 工学(土台の共通部分。並走の作業役は自分の都合で広げない = CLAUDE.md §1 の 9)
 - PC: 必須
 - 見積もり: チャット 2〜4 回分(段 1 CPU 1〜2 / 段 2 GPU 1〜2)
@@ -167,6 +167,30 @@
 5. **保存量の配り手の欄**: 粗くする余りを世界の帳簿の列(CPU の NestFieldLedgerBase + 保存量の番号)へ。GPU の帳簿の列の数を確かめて表に列を足す(今は RecordUpload が断る)。
 6. 相の層の配り(T-1231)・T-1230 段 2 ③ の残り。
 
+## 段 2 の 5 本目(2026-11-12 wt6 作業役。ブランチ t-1252-tree-gpu-4 = t-1252-tree-gpu-3 の上)
+- **入った(「段 2 の 4 本目」の残りの 1〜3。ADR-0500 改訂・ADR-0532 の 2・3 の形のまま。新しい口は足していない。ADR-0532 の 7)**:
+  - **影の鎖**(multires_graph.hlsl の RefineShadowCarried・RefineLevel の影の道): CPU の RefineShadow と同じに、影の頁が前から持つ欄の頁を空きへ返し(StartPage)、
+    0 でない値を書くなら 1 つ取る(StorePage の EnsurePage = 空きの上から・無ければ高さの上)。影の鎖は 1 段 = 1 グループで順なので、スレッド 0 が段の順に取る
+    (番号は CPU と同じ。並べて取る形にしない = CPU の頁の取り方を変えない)。値は一般 = SfRefineValue・配り手 = SfOwnerRefineChild / 一様な親は SfOwnerRefineUniform。
+  - **引き戻し**(PullBackCarried・PullBackNode): 親のセルごとに SfPullBackChild / SfOwnerPullBackChild。影が欄の頁を持たず 0 でない値を書くなら 1 つ取る(新しく取る頁は 0 と読む)。
+    RecordPullBack が BindLayers する(前は結ばなかった)。RecordRefineShadow の「影の鎖は配り手の欄をまだ配らない」の誤りの記録を外した。
+  - **畳む**(multires_tree.hlsl の CarriedFoldable・FoldCarriedUniform・ReleaseFoldedCarried): TreeFoldCheck が調べる刻みの頁の全部 0 の欄の頁に返す印
+    (pageOf の上の bit = CARRIED_RELEASE_MARK。欄の頁の番号 < 容量 < 2^31。TreeFold が必ず消す)を付け(畳めなくても返す = CPU の FoldExact の ReleaseZeroPages)、
+    欄が一様でなければ畳まない(PageFoldable。64bit は 2 語の比べ)。畳むなら一様の値 = 値のセルの値(FoldPage)。TreeFold が枠の順に、畳む頁と印の付いた頁の欄の頁を欄ごとに空きへ積む。
+  - **広げる**(ExpandCarried・TreeExpand): 頁を配った一様な枠が覆われていないセルを持ち欄の一様の値に 0 でないものがあれば、欄ごとに枠の順で 1 つ取り(k 番目 = 空きの上から k 番目)、
+    覆われていないセルに一様の値・覆われたセルに 0(CPU の ExpandWantedPages の ExpandPage)。一様の値は消さない(CPU と同じ)。
+  - 影・広げる段で欄の頁が尽きたら頁なしで数える(MF_HEADER_TREE_SHORTAGE。断れない = CPU とずれる。層の頁と同じ扱い・仮)。
+- 試験 gpu_field_region に 7(影の鎖: 頁を持つ根の 2 段 → 一様な根の 1 段〔同じ影の枠 = 返して取り直す〕→ もう一度 2 段 → 影の値を変え、親のこの刻みだけの欄に 0 でない値を書いて引き戻す〔影が新しい頁を取る〕)・
+  8(畳む: 頁を持つ根は畳まれず全部 0 のこの刻みだけの欄の頁だけ返す・広げた一様な根は畳まれて欄の頁を返す)・9(multires_uniform_scene の活性の刻み 123 刻み: 木箱の根が刻みで広がり〔TreeExpand が欄の頁〕、燃え尽きて畳まれる)を足した。結果は作業ログ。
+
+### 段 2 の残り(次の作業役へ。この順)
+1. **集めて書く段を木の段に**(multires_field_gather.hlsl を区画の置き場で。WANTED → TreeExpand で広げてから印・取る・書く。書いた枠をつつく = CPU の PokeBlock)。
+   使い手(T-1227 の光の持ち越し・T-1228 の源の項)が来るまで呼ぶ所が無い。作業の並び(blockOf・値)の置き場をどこに持つか(区画の後ろ)を使い手と一緒に決める。
+2. **保存量の配り手の欄**: 粗くする余りを世界の帳簿の列(CPU の NestFieldLedgerBase + 保存量の番号)へ。GPU の帳簿の列の数を確かめて表に列を足す(今は RecordUpload が断る)。
+3. 相の層の配り(T-1231)・T-1230 段 2 ③ の残り。
+- wt2 の t-1240-wide-layers-2 との重なり: この本で足したのは RefineLevel の影の道(層の配りの後・`fromRequest && real` の else)・PullBackNode のセルの書き込みの後・
+  TreeFoldCheck(`foldable` を決めた直後と一様の枠の層を書いた後)・TreeFold(FoldBlock の前)・TreeExpand(ExpandLayers の後)。wt2 の溢れの畳む・広げる(multires_tree_wide_expand)と同じ関数に数行ずつ = 文字の衝突の見込み(両方残せば足りる。欄と層・溢れは別の語)。
+
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-10-29(本体 16 回目・設計): ADR-0500 の改訂で作った。
 - 2026-10-29(本体 18 回目・段 1): 登録の印 2 つ・配り手の表(試験用 1 つ)・セルの配りの口(細かく/粗く・影)・集めて書く段・この刻みだけの読む口と境目の検査・SF_MAX_COMPONENTS 12 を CPU に。
@@ -189,3 +213,8 @@
 - 2026-11-12(wt6 作業役・段 2 の 4 本目): GPU の木の段(TreeSettle・TreeAllocate・RefineLevel・CoarsenRequest・TreeRelease)が欄の区画を読み書き(ADR-0532 の 6)を t-1252-tree-gpu-3 に。
   試験(release 警告 0): gpu_field_region(HW 121 秒・新しい 5・6 を含む)・gpu_field_region_warp・field_owner・dxil_alloca_check 合格・archmap --check OK。
   欄の無い世界の GPU の組 gpu_multires・gpu_lab_box・gpu_tree_refine_placement・gpu_multires_layers(と warp。lab_box は HW だけ)7 本合格。残りは「段 2 の 4 本目」の「段 2 の残り」1〜6。
+- 2026-11-12(wt6 作業役・段 2 の 5 本目): 影の鎖・引き戻し・畳む・刻みの広げる段が欄の区画を読み書き(ADR-0532 の 7)を t-1252-tree-gpu-4 に。試験の結果は次の行。
+  rebase main(4af1dc44 = t-1240-wide-layers-2 の後。multires_graph.hlsl の UniformValueTail の後ろで衝突 = 両方残した)。dxil_alloca_check が 2 回落ちた(写した見出しの子の並びを動的な添字で読む:
+  畳む段の MrFoldValueCell・影の親の LoadCarriedCell)→ 見出しのバッファから直に読む形(CarriedFoldValueCell・LoadCarriedSlotCell)で直した。
+  試験(release 警告 0。rebase の後): gpu_field_region(HW 41 秒・7〜9 を含む)・gpu_field_region_warp(38 秒)・gpu_multires・gpu_multires_layers(_warp 564 秒)・gpu_multires_uniform・gpu_lab_box・
+  gpu_tree_refine_placement・field_owner・multires・multires_sparse・float_check 5 本・dxil_alloca_check 合格・archmap --check OK。残りは「段 2 の 5 本目」の「段 2 の残り」1〜3(集めて書く段・保存量の配り手の欄・相の層)。

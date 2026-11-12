@@ -135,6 +135,21 @@ int64_t LoadCarriedCell(uint32_t field, MrBlock block, uint32_t slot, uint32_t i
     return LoadCarriedPage(field, CarriedPageOf(field, block.page), index, component);
 }
 
+// LoadCarriedCell を枠 slot の見出しのバッファから直に読む形(写した見出しの子の並びを動的な添字で読むと局所の配列になる。T-0397。
+// 影の鎖・引き戻しの親)
+int64_t LoadCarriedSlotCell(uint32_t field, uint32_t slot, uint32_t index, uint32_t component) {
+    const uint32_t page = g_blocks[slot].page;
+    if (page < MR_PAGE_WANTED)
+        return LoadCarriedPage(field, CarriedPageOf(field, page), index, component);
+
+    const bool covered = g_blocks[slot].kind == MR_BLOCK_REAL &&
+                         g_blocks[slot].children[MrOctantOfCell(index)] != MR_NO_BLOCK;
+    if (covered)
+        return 0;
+
+    return LoadCarriedUniform(field, slot, component);
+}
+
 // 子のブロックのセル index は、親のセルの何番目の子か(MrChildCell の j。CPU の ChildOfCell)
 uint32_t CarriedChildOfCell(uint32_t index) {
     return (MrCellX(index) & 1u) | ((MrCellY(index) & 1u) << 1) | ((MrCellZ(index) & 1u) << 2);
@@ -210,6 +225,87 @@ uint32_t CarriedOwnerCellPage(uint32_t i, MrRequestState state, uint32_t d) {
         return PoppedPage(state, 0);
 
     return g_blocks[g_blocks[state.target].parent].page;
+}
+
+// --- 1 つずつ取る・返す(影の鎖・引き戻し。木の段の要求の並びの外。T-1252 段 2 の 5 本目)---
+
+void SetCarriedHeader(uint32_t field, uint32_t word, uint32_t value) {
+    g_layers[CarriedStoreBase(field) + word] = value;
+}
+
+// 欄の頁が尽きた所を数える(計器。GPU だけ。CPU は上限が無い。欄 0 の頭の MF_HEADER_TREE_SHORTAGE)
+void CountCarriedPagesShort(uint32_t count) {
+    InterlockedAdd(g_layers[CarriedStoreBase(0) + MF_HEADER_TREE_SHORTAGE], count);
+}
+
+bool CarriedValueNonZero(int64_t value) {
+    return ((uint32_t)((uint64_t)value) | (uint32_t)((uint64_t)value >> 32)) != 0u;
+}
+
+// セルの頁 cellPage の欄の頁を CPU と同じ順で決める(スレッド 0 だけが呼ぶ)。release なら前から持つ頁を空きの上へ返す
+// (CPU の StartPage = ReleasePage)・wanted(0 でない値を書く)で頁が無ければ空きの上から、無ければ高さの上から 1 つ取る
+// (CPU の StorePage の EnsurePage)。返すのは値を書く欄の頁(書かないなら MF_NO_PAGE)。取った頁は呼ぶ側が全部のセルを書く
+uint32_t RestartCarriedPage(uint32_t field, uint32_t cellPage, bool release, bool wanted) {
+    uint32_t fieldPage = CarriedPageOf(field, cellPage);
+    uint32_t freeCount = CarriedHeader(field, MF_HEADER_FREE_COUNT);
+    if (release && fieldPage != MF_NO_PAGE) {
+        SetCarriedFreePage(field, freeCount, fieldPage);
+        SetCarriedPageOf(field, cellPage, MF_NO_PAGE);
+        freeCount += 1;
+        fieldPage = MF_NO_PAGE;
+    }
+
+    if (fieldPage == MF_NO_PAGE && wanted) {
+        const uint32_t top = CarriedHeader(field, MF_HEADER_TOP);
+        if (freeCount > 0) {
+            freeCount -= 1;
+            fieldPage = CarriedFreePage(field, freeCount);
+        } else if (top < CarriedHeader(field, MF_HEADER_CAPACITY)) {
+            fieldPage = top;
+            SetCarriedHeader(field, MF_HEADER_TOP, top + 1);
+        } else {
+            CountCarriedPagesShort(1);
+        }
+
+        if (fieldPage != MF_NO_PAGE)
+            SetCarriedPageOf(field, cellPage, fieldPage);
+    }
+
+    SetCarriedHeader(field, MF_HEADER_FREE_COUNT, freeCount);
+
+    return fieldPage;
+}
+
+// --- グループの縮約(全部のスレッドが呼ぶ。thread 0 が消す。結果はグループで一様)---
+
+groupshared uint32_t gs_carriedFlags;
+groupshared uint32_t gs_carriedPage;
+
+uint32_t CarriedGroupOr(uint32_t thread, uint32_t mine) {
+    if (thread == 0)
+        gs_carriedFlags = 0;
+
+    GroupMemoryBarrierWithGroupSync();
+    if (mine != 0)
+        InterlockedOr(gs_carriedFlags, mine);
+
+    GroupMemoryBarrierWithGroupSync();
+    const uint32_t flags = gs_carriedFlags;
+    GroupMemoryBarrierWithGroupSync();  // 次に呼ぶ時に消す前に、全部が読み終える
+
+    return flags;
+}
+
+// スレッド 0 が RestartCarriedPage で決めた欄の頁を全部のスレッドへ(全部のスレッドが呼ぶ)
+uint32_t SharedRestartCarriedPage(uint32_t thread, uint32_t field, uint32_t cellPage, bool release, bool wanted) {
+    if (thread == 0)
+        gs_carriedPage = RestartCarriedPage(field, cellPage, release, wanted);
+
+    AllMemoryBarrierWithGroupSync();
+    const uint32_t fieldPage = gs_carriedPage;
+    GroupMemoryBarrierWithGroupSync();
+
+    return fieldPage;
 }
 
 #endif  // BICAMERAL_MULTIRES_FIELD_ACCESS_HLSLI
