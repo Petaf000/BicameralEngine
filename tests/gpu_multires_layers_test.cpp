@@ -1228,13 +1228,14 @@ namespace {
         return sim::BakeReactionTable(definition);
     }
 
-    // 世界の全部の枠のセルの 0 でない層の和(溢れの成分まで)と、溢れの位置(9 番目から)の粒の物質の層の最大
+    // 世界の全部の枠のセルの 0 でない層の和(溢れの成分まで)と、溢れの位置(9 番目から)の粒の物質の層の最大。
+    // 粒の印は CPU の入れ物のもの(grain。読み戻した入れ物は層を使う世界の印を持たない)
     struct WideGrainLayers {
         uint64_t sum = 0;
         uint64_t tailGrain = 0;
     };
 
-    WideGrainLayers MeasureWideGrainLayers(const sim::MultiresNest& nest) {
+    WideGrainLayers MeasureWideGrainLayers(const sim::MultiresNest& nest, std::span<const uint8_t> grain) {
         WideGrainLayers measured;
         for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
             if (nest.blocks[slot].kind == MR_BLOCK_UNUSED)
@@ -1245,9 +1246,8 @@ namespace {
                 const std::vector<uint64_t> layers = sim::LoadWideNestCellLayers(nest, slot, index);
                 for (uint32_t i = 0; i < layers.size(); ++i) {
                     measured.sum += layers[i];
-                    const bool grain = cell.species[i] < nest.cellLayers.grain.size() &&
-                                       nest.cellLayers.grain[cell.species[i]] != 0;
-                    if (grain && i >= RX_MAX_CELL_SPECIES)
+                    const bool isGrain = cell.species[i] < grain.size() && grain[cell.species[i]] != 0;
+                    if (isGrain && i >= RX_MAX_CELL_SPECIES)
                         measured.tailGrain = std::max(measured.tailGrain, layers[i]);
                 }
             }
@@ -1270,7 +1270,7 @@ namespace {
         const std::string scene = std::format("溢れの世界で粒を生む {}・{}・{}", ModeName(mode),
                                               paged ? "頁" : "一様の枠",
                                               stride == WIDE_NO_LAYERS ? "層なし" : "層あり");
-        const uint64_t firstSum = MeasureWideGrainLayers(cpu).sum;
+        const uint64_t firstSum = MeasureWideGrainLayers(cpu, cpu.cellLayers.grain).sum;
         WideGrainLayers most;
         for (uint64_t tick = 0; tick < WIDE_TICKS; ++tick) {
             const std::vector<MrRequest> requests = WideChainRequestsAt(tick);
@@ -1298,7 +1298,7 @@ namespace {
             if (gpu->ReadLayerShortage() != 0u)
                 return std::unexpected(std::format("{} 刻み {}: 足りるはずの層の頁・組が尽きた", scene, tick));
 
-            const WideGrainLayers measured = MeasureWideGrainLayers(*read);
+            const WideGrainLayers measured = MeasureWideGrainLayers(*read, cpu.cellLayers.grain);
             most.sum = std::max(most.sum, measured.sum);
             most.tailGrain = std::max(most.tailGrain, measured.tailGrain);
         }

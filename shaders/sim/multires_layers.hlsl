@@ -510,12 +510,27 @@ uint32_t TakeLayerPage(uint32_t page) {
     return layerPage;
 }
 
+// 一様だった枠のセル index(覆われていれば空。MrUniformCell と同じ答え)。子は 8 つから選ぶ(溢れを使う変種の MR_CHILD_OF は
+// 見出しの写しの children を動的な添字で読み、この段では局所の配列になった。T-1266・T-1340)
+RxCell GrainUniformCell(MrBlock block, RxCell value, uint32_t index) {
+    const uint32_t octant = MrOctantOfCell(index);
+    uint32_t child = MR_NO_BLOCK;
+    FX_UNROLL
+    for (uint32_t k = 0; k < 8; ++k)
+        child = k == octant ? block.children[k] : child;
+
+    if (block.kind == MR_BLOCK_REAL && child != MR_NO_BLOCK)
+        return RxMakeEmptyCell(0);
+
+    return value;
+}
+
 // 刻む前のセル index(枠の写し beforeValue が印なら頁の写し、でなければ一様の値。広げた頁は一様の値で埋めてから刻む)
 RxCell GrainBeforeCell(MrBlock block, RxCell beforeValue, uint32_t address, uint32_t index) {
     if (beforeValue.padding == GRAIN_PAGED_MARK)
         return LoadGrainBefore(address);
 
-    return MrUniformCell(block, beforeValue, index);
+    return GrainUniformCell(block, beforeValue, index);
 }
 
 // 刻みの後: 枠ごとに刻む前のセルと比べ、増えた粒の物質を層に足す。1 グループ = 枠 1 つ(64 スレッド × 8 セル)
