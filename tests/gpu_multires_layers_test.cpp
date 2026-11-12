@@ -14,7 +14,8 @@
 //   7. 一様の枠の層(T-1240 の 3・4 段目): 層まで同じ静かな頁を畳む(層ごと一様の枠の層へ)→ 一様な根を本物の鎖で細かくする(子は親と同じ
 //      一様の枠の層)→ 粗くして戻す。燃える一様な根(一様の枠の層)を刻むと頁に広げる(一様の枠の層を頁へ)。毎刻み比べる
 //   9. 層を使う世界で反応が粒を生む表(T-1322・T-1323): 燃える根(層なしで始める = GPU が層の頁を取る)と燃える一様な根(一様の枠の層 →
-//      頁に広げて刻む)を、全部を刻む・伝導つき・活性だけで毎刻み比べる。生まれた粒(熱分解の炭)が層になる(層の和が増える)
+//      頁に広げて刻む)を、全部を刻む・伝導つき・活性だけで毎刻み比べる。表は燃えて出た湯気が粒の露になる規則を足したもの。
+//      生まれた粒が層になる(層の和が増える)
 //   8. 一様な親の影の鎖(影の頁へ一様の枠の層を今の値と結んで写す)・一様な親へ層の違う一様な子を粗くする(親を頁に広げて
 //      子の層の和 ÷ 8。T-1240 の 4 段目で試していなかった道)
 // 時間(WARP では測らない): 層のある場面の 1 刻み(全部を刻む)を層の頁あり・なしで測り、層を合わせる段の分を見る(docs/perf.md)。
@@ -56,6 +57,7 @@ namespace {
     constexpr uint64_t EXPAND_TICKS = 24;                              // 一様な根を広げる場面の刻みの数
     constexpr uint32_t WARMUP_STEPS = 200;                             // 計測の前の刻み(GPU のクロックを上げる)
     constexpr uint32_t MEASURE_STEPS = 64;                             // 計測の刻み
+    constexpr uint64_t GRAIN_DEW_RATE_PER_SECOND = 1000;               // 粒を生む表の湯気 → 露(粒)の速さ(9)
 
     enum class StepMode : uint8_t {
         Full,
@@ -760,8 +762,29 @@ namespace {
         return {};
     }
 
+    // 粒を生む表: 試験の燃える表に、湯気が粒の露(ばらける固体)になる規則を足す(燃えて出た湯気がすぐ粒になる)
+    std::expected<sim::BakedReactionTable, std::string> MakeGrainBornTable() {
+        sim::ReactionTableDefinition definition = sim::MakeCombustionTestTable();
+        sim::AddDewCondensationForTest(definition, GRAIN_DEW_RATE_PER_SECOND);
+        for (sim::SpeciesDefinition& species : definition.species) {
+            if (species.name != "test_dew")
+                continue;
+
+            species.transport.solidMotion = sim::SolidMotion::Loose;
+            species.transport.reposeAngleDegrees = 35;
+            species.transport.packingPercent = sim::DEFAULT_PACKING_PERCENT;
+        }
+
+        return sim::BakeReactionTable(definition);
+    }
+
     std::expected<void, std::string> RunGrainBornScenes(ID3D12Device5* device, gpu::ImmediateQueue& queue,
-                                                        gpu::DebugRing& ring, const sim::BakedReactionTable& table) {
+                                                        gpu::DebugRing& ring) {
+        const auto baked = MakeGrainBornTable();
+        if (!baked)
+            return std::unexpected(std::format("粒を生む表: {}", baked.error()));
+
+        const sim::BakedReactionTable& table = *baked;
         for (const bool uniform : {false, true}) {
             for (const StepMode mode : {StepMode::Full, StepMode::Conduction, StepMode::Active}) {
                 if (auto run = RunGrainBorn(device, queue, ring, table, mode, uniform); !run)
@@ -805,7 +828,7 @@ namespace {
         if (auto coarsen = RunUniformCoarsenExpand(device, queue, ring, table); !coarsen)
             return coarsen;
 
-        if (auto born = RunGrainBornScenes(device, queue, ring, table); !born)
+        if (auto born = RunGrainBornScenes(device, queue, ring); !born)
             return born;
 
         return RunBatch(device, queue, ring, table);
