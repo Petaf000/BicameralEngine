@@ -12,7 +12,10 @@
 // skeletonWalls = false なら骨格の中も気体として流れる(気体の割合 = 凝縮相の体積を除いた分。比べ)。
 // 真実: 面の運動量(OhShellFlow::momentum。層を作った時に 0 = 止まった空気、返す時に捨てる)。運動のエネルギーは数えない(音より遅い極限)。
 // 圧力の反復(T-1201): 既定は毎小刻み 0 から解き始め(pressureWarmStart で前の小刻みの値から。層の状態)、1 回の赤黒で値が 1 つも変わらなければ止める
-//   (= 整数の反復の動かない点。上限 pressureSweeps)。止まった時の値はその整数の式の答えそのもの(決まった回数で打ち切らない。D-428)。
+//   (= 整数の反復の動かない点。上限 pressureSweeps)。収まって止まった時の値はその整数の式の答えそのもの(決まった回数で打ち切らない。D-428)。
+//   ★ ただし上限に当たった小刻みでは成り立っていない(T-1349 の ①): 上限 1,024 回で止まると、その時の値のまま次の段へ進む(数えるだけ =
+//   pressureCapped)。答えは上限の値に依る。1 万ボクセルを超える箱の、層を作った直後の立ち上がり(刻み 5〜11)で当たる。直すのは T-1321
+//   (箱の大きさによらない回数で縮む多重格子)。それまでは、上限に当たった解きの答えは「収まった時の答え」ではない。
 //   回数は状態だけで決まるので決定的(GPU も同じ規則。T-1201)。pressureUntilQuiet = false・pressureWarmStart = false で T-1200 までの形(0 から決まった回数)。
 //   pressureMultigrid(T-1202)で解き始めを多重格子で作る(PressureMultigrid。最後は同じ赤黒を収まるまで。収まるまでの赤黒の費用が 1/3〜1/9)。
 // 保存: 移すのは対の流れだけ(片側から引いた量を反対側に足す)なので、セル + ボクセル + 対の端数はビット単位で変わらない。
@@ -47,6 +50,10 @@ namespace bicameral::test {
         uint64_t pressureSweepsUsed = 0;
         uint32_t pressureMostSweeps = 0;
         uint64_t pressureCapped = 0;
+        // 調べるだけ(T-1349): 上限で止まった解きの、最後の赤黒で動いたボクセルの数の和・動いた幅の最大・2 回前の赤黒の後と同じ値に戻っていた解きの数(周期 2 の行き来)
+        uint64_t cappedLastMoved = 0;
+        int64_t cappedLastStep = 0;
+        uint64_t cappedCycle2 = 0;
         // 解き始めを多重格子で作る(T-1202。最後は同じ赤黒を収まるまで)・その費用の和(細かい格子の赤黒 1 回 = 1000)
         bool pressureMultigrid = false;
         // 調べるだけ(T-1321。研究): 多重格子の規則。段ごとの前と後の赤黒の数(既定 2 = OH_MG_SMOOTH_SWEEPS)と V 字の回数
@@ -775,12 +782,17 @@ namespace bicameral::test {
         };
 
         std::vector<int64_t> atGap;
+        std::array<std::vector<int64_t>, 2> lastTwo;  // T-1349: 最後の 3 回のうち前の 2 回の後の値(周期 2 の見張り)
         uint32_t used = 0;
         bool quiet = false;
+        uint64_t movedCount = 0;
+        int64_t movedStep = 0;
         const uint32_t sweepLimit = toLine && !flow.pressureFinishCompare ? 0 : flow.pressureSweeps;
         quiet = sweepLimit == 0;
         for (uint32_t sweep = 0; sweep < sweepLimit; ++sweep) {
             bool moved = false;
+            movedCount = 0;
+            movedStep = 0;
             for (uint32_t colour = 0; colour < 2; ++colour) {
                 for (uint32_t z = 0; z < box.size[2]; ++z) {
                     for (uint32_t y = 0; y < box.size[1]; ++y) {
@@ -810,6 +822,11 @@ namespace bicameral::test {
 
                             const int64_t value = rx::OhMulDivToward0(sum, 1, std::max<uint64_t>(total, 1));
                             moved = moved || std::abs(value - potential[v]) > flow.pressureQuietTolerance;
+                            if (std::abs(value - potential[v]) > flow.pressureQuietTolerance) {
+                                ++movedCount;
+                                movedStep = std::max(movedStep, std::abs(value - potential[v]));
+                            }
+
                             activeEvaluations += dirty[v];
                             dirty[v] = 0;
                             if (value != potential[v])
@@ -824,6 +841,9 @@ namespace bicameral::test {
             ++used;
             if (flow.gapSweeps != 0 && used == flow.gapSweeps)
                 atGap = potential;
+
+            if (sweep + 3 >= flow.pressureSweeps && sweep + 1 < flow.pressureSweeps)
+                lastTwo[sweep % 2] = potential;
 
             if (flow.pressureUntilQuiet && !moved) {
                 quiet = true;
@@ -847,6 +867,11 @@ namespace bicameral::test {
         flow.pressureActiveWork += (activeEvaluations * 1000) / count;
         flow.pressureMostSweeps = std::max(flow.pressureMostSweeps, used);
         flow.pressureCapped += flow.pressureUntilQuiet && !quiet ? 1u : 0u;
+        if (flow.pressureUntilQuiet && !quiet && flow.pressureSweeps >= 3) {
+            flow.cappedLastMoved += movedCount;
+            flow.cappedLastStep = std::max(flow.cappedLastStep, movedStep);
+            flow.cappedCycle2 += lastTwo[(flow.pressureSweeps - 1) % 2] == potential ? 1u : 0u;
+        }
         if (!atGap.empty())
             MeasurePressureGap(box, atGap, potential, flow);
 
