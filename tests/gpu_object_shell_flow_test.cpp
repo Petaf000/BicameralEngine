@@ -18,7 +18,8 @@
 //   1 つのセルに物が 2・3・8 個(T-1332): セルへの受け渡しは物ごとに粗い量を貯め、刻みの終わりに OhShellApplyCells がセルごとに物の順で足して
 //         1 回だけ当てる(ADR-0500 の集めて書く段)。比べに、熱い層の温度を物ごとに変えた 2・3・8 個 × 2 セル + 1 個の場面を足し、
 //         GPU を 2 回回して状態のハッシュが同じか(回ごとに変わらないか)も見る。
-// 引数は gpu_test_options.h と --measure / --measure-only / --profile / --scale / --threads N / --sweeps N / --rule N。
+//   --grow(T-1331 の小さく試す 2。比べを飛ばす): 骨格を大きくした紙 1 枚で、箱の大きさと赤黒の回数(0 から収まるまで・多重格子)を出す。
+// 引数は gpu_test_options.h と --measure / --measure-only / --profile / --scale / --grow / --threads N / --sweeps N / --rule N。
 #include <cstdlib>
 #include <cstring>
 
@@ -906,12 +907,33 @@ namespace {
         return {};
     }
 
+    // --- 箱の大きさと赤黒の回数(T-1331 の小さく試す 2。捨てる測り)---
+    // 共有の空気の格子は 1 つの箱が大きい(山 1 つで 1 辺 100 ボクセル級)。0 から収まるまで・多重格子の赤黒の回数が箱の大きさでどう増えるかを、
+    // 骨格を大きくした紙 1 枚(物 1 つ = 1 グループ・圧力の値は作業場)で見る。時間は SM 1 つの値なので比べには使わない(回数を見る)。
+    std::expected<void, std::string> Grow(const Context& context) {
+        const std::array<Shape, 4> shapes = {
+            Shape{"紙 24 × 3・層 4 段", 24, 3, 4}, Shape{"紙 48 × 12・層 4 段", 48, 12, 4},
+            Shape{"紙 96 × 24・層 4 段", 96, 24, 4}, Shape{"紙 96 × 48・層 8 段", 96, 48, 8}};
+        const std::array<PressureRule, 2> rules = {PressureRule{"0 から収まるまで(既定)", 1024, 1},
+                                                   PressureRule{"多重格子 + 収まるまで", 1024, 5}};
+        for (const Shape& shape : shapes) {
+            for (const PressureRule& rule : rules) {
+                const auto measured = Measure(context, shape, 1, false, rule);
+                if (!measured)
+                    return std::unexpected(measured.error());
+            }
+        }
+
+        return {};
+    }
+
     int Run(std::span<char*> arguments) {
         std::vector<char*> rest;
         bool measure = false;
         bool compare = true;
         bool profile = false;
         bool scale = false;
+        bool grow = false;
         uint32_t threads = 1024;
         uint32_t measureSweeps = 24;
         int32_t onlyRule = -1;
@@ -929,6 +951,9 @@ namespace {
                 compare = false;
             } else if (text == "--scale") {
                 scale = true;
+                compare = false;
+            } else if (text == "--grow") {
+                grow = true;
                 compare = false;
             } else if (text == "--measure") {
                 measure = true;
@@ -999,6 +1024,13 @@ namespace {
 
             if (auto sharedCells = CompareSharedCells(context); !sharedCells) {
                 Log(Channel::Gpu, Level::Error, "gpu_object_shell_flow_test: FAILED({})", sharedCells.error());
+                return 1;
+            }
+        }
+
+        if (grow) {
+            if (auto grown = Grow(context); !grown) {
+                Log(Channel::Gpu, Level::Error, "gpu_object_shell_flow_test: FAILED({})", grown.error());
                 return 1;
             }
         }
