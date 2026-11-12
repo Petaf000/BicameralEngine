@@ -153,6 +153,11 @@
 - 試験 gpu_field_region に 5(頁を持つ根の 2 段の鎖・一様な根の 1 段を細かく → 2 段目と一様な子を粗く → 1 段目を粗く。毎回 置き場〔pageOf・空き・頁・一様〕と要約が CPU とビット一致)・
   6(一様な子の配り手の値を変えて写し、粗くすると親が頁に広がる + この刻みだけの欄の 0 の頁を持つ子を粗くして頁が返る)。結果は作業ログ。
 
+- **wt2 の T-1240 7 の 5(t-1240-wide-layers-2)との突き合わせ(2026-11-12 wt2 のチケットの引き継ぎメモを読んだ)**: wt2 は TreeSettle に溢れの変種(multires_tree_wide_settle・SameTailLayers)・
+  CoarsenRequest の溢れの変種に WriteWideCoarsenOctantLayers(WriteCoarsenTails の後)・multires_tree_wide_expand・TreeResolve の CoarsenLayersFit を足す。
+  この仕事は TreeSettle の層の比べの直後に CoarsenKeepsUniformCarried の 1 か所・CoarsenRequest の「層の前(#ifndef MR_WIDE_CELLS の前)」に CoarsenCarriedFields・
+  TreeAllocate・TreeRelease・RefineLevel の層の配りの後と親を覆う所。**文字の衝突の見込みは TreeSettle と CoarsenRequest の数行**(両方残せば足りる。順は結果に効かない = どちらも pageNeed を 1 にするだけ・欄と層は別の語)。
+
 ### 段 2 の残り(次の作業役へ。この順)
 1. **影の鎖**: RefineLevel の影(record.request = MR_NO_BLOCK)は CPU の RefineShadow(StartPage → 0 でない値を書く時に頁を作る)。GPU は並べて取れないので、
    影の頁の欄の頁は「親が欄の頁か 0 でない一様の値を持てば取る」に CPU を揃える(ADR-0532 の 3 と同じ「値を作る前に決める」)か、影の鎖は 1 本ずつなのでスレッド 0 が順に取る(番号は CPU と同じ順)。引き戻し(PullBackNode)は SfOwnerPullBackChild。
