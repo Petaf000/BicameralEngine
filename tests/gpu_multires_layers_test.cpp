@@ -17,6 +17,9 @@
 //   9. 層を使う世界で反応が粒を生む表(T-1322・T-1323): 燃える根(層なしで始める = GPU が層の頁を取る)と燃える一様な根(一様の枠の層 →
 //      頁に広げて刻む)を、全部を刻む・伝導つき・活性だけで毎刻み比べる。表は燃えて出た湯気が粒の露になる規則を足したもの。
 //      生まれた粒が層になる(層の和が増える)
+//   10. 溢れを使う世界で反応が粒を生む表(T-1340): 溢れの像の表(元素 X の異性体)の p02(インラインの成分)と q09(9 種目 = 溢れの成分に
+//      生まれる)を粒にし、12 種のセルの根(層なしの頁・層のある頁・層のある一様の枠)で溢れの世界の鎖を毎刻み比べる。
+//      生まれた粒が層になり、溢れの成分の粒も層を持つ(試験が空でない)
 //   8. 一様な親の影の鎖(影の頁へ一様の枠の層を今の値と結んで写す)・一様な親へ層の違う一様な子を粗くする(親を頁に広げて
 //      子の層の和 ÷ 8。T-1240 の 4 段目で試していなかった道)
 // 時間(WARP では測らない): 層のある場面の 1 刻み(全部を刻む)を層の頁あり・なしで測り、層を合わせる段の分を見る(docs/perf.md)。
@@ -1206,6 +1209,126 @@ namespace {
         return {};
     }
 
+    // --- 10. 溢れを使う世界で反応が粒を生む表(T-1340)---
+
+    // 溢れの像の表の p02(込み合う規則がインラインの成分に生む)と q09(q01 → q09 が 9 種目 = 溢れの成分に生む)を粒(ばらける固体)に
+    std::expected<sim::BakedReactionTable, std::string> MakeWideGrainTable() {
+        sim::ReactionTableDefinition definition = test::MakeLimitsTestTable();
+        for (sim::SpeciesDefinition& species : definition.species) {
+            if (species.name != test::LimitsCrowdName(2) && species.name != test::LimitsHeldName(9))
+                continue;
+
+            species.phase = sim::SpeciesPhase::Solid;
+            species.density = 917;
+            species.transport.solidMotion = sim::SolidMotion::Loose;
+            species.transport.reposeAngleDegrees = 35;
+            species.transport.packingPercent = sim::DEFAULT_PACKING_PERCENT;
+        }
+
+        return sim::BakeReactionTable(definition);
+    }
+
+    // 世界の全部の枠のセルの 0 でない層の和(溢れの成分まで)と、溢れの位置(9 番目から)の粒の物質の層の最大
+    struct WideGrainLayers {
+        uint64_t sum = 0;
+        uint64_t tailGrain = 0;
+    };
+
+    WideGrainLayers MeasureWideGrainLayers(const sim::MultiresNest& nest) {
+        WideGrainLayers measured;
+        for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
+            if (nest.blocks[slot].kind == MR_BLOCK_UNUSED)
+                continue;
+
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                const RxWideCell cell = sim::LoadWideNestCell(nest, slot, index);
+                const std::vector<uint64_t> layers = sim::LoadWideNestCellLayers(nest, slot, index);
+                for (uint32_t i = 0; i < layers.size(); ++i) {
+                    measured.sum += layers[i];
+                    const bool grain = cell.species[i] < nest.cellLayers.grain.size() &&
+                                       nest.cellLayers.grain[cell.species[i]] != 0;
+                    if (grain && i >= RX_MAX_CELL_SPECIES)
+                        measured.tailGrain = std::max(measured.tailGrain, layers[i]);
+                }
+            }
+        }
+
+        return measured;
+    }
+
+    std::expected<void, std::string> RunWideGrainBorn(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                      gpu::DebugRing& ring, const sim::BakedReactionTable& table,
+                                                      StepMode mode, bool paged, uint32_t stride) {
+        sim::MultiresNest cpu = MakeWideImageRoot(table, stride, paged, true);
+        sim::EnableCellLayers(cpu, table);
+        sim::GpuMultiresOptions options = WideOptions();
+        options.wideChunks = WideChainChunks(cpu, table);  // 置き場は足りる大きさ(尽きる件は T-1359)
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, options);
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        const std::string scene = std::format("溢れの世界で粒を生む {}・{}・{}", ModeName(mode),
+                                              paged ? "頁" : "一様の枠",
+                                              stride == WIDE_NO_LAYERS ? "層なし" : "層あり");
+        const uint64_t firstSum = MeasureWideGrainLayers(cpu).sum;
+        WideGrainLayers most;
+        for (uint64_t tick = 0; tick < WIDE_TICKS; ++tick) {
+            const std::vector<MrRequest> requests = WideChainRequestsAt(tick);
+            const auto record = [&](ID3D12GraphicsCommandList10* list) {
+                if (tick == 0 && !gpu->RecordUpload(list, cpu))
+                    return false;
+
+                if (!gpu->RecordRequests(list, requests))
+                    return false;
+
+                gpu->RecordProcessRequests(list, ring.GpuAddress());
+
+                return RecordGpuStep(list, *gpu, ring.GpuAddress(), mode, tick);
+            };
+            auto read = Execute(queue, ring, *gpu, record);
+            if (!read)
+                return std::unexpected(std::format("{} 刻み {}: {}", scene, tick, read.error()));
+
+            sim::SubmitRequests(cpu, requests);
+            sim::ProcessRequests(cpu);
+            StepCpu(cpu, table, mode, tick);
+            if (auto compared = Compare(cpu, *read, std::format("{} 刻み {}", scene, tick)); !compared)
+                return std::unexpected(std::format("{}({})", compared.error(), DescribeWideDifference(cpu, *read)));
+
+            if (gpu->ReadLayerShortage() != 0u)
+                return std::unexpected(std::format("{} 刻み {}: 足りるはずの層の頁・組が尽きた", scene, tick));
+
+            const WideGrainLayers measured = MeasureWideGrainLayers(*read);
+            most.sum = std::max(most.sum, measured.sum);
+            most.tailGrain = std::max(most.tailGrain, measured.tailGrain);
+        }
+
+        // 生まれた粒が層になった・溢れの成分(9 種目)の粒も層を持った(試験が空でない)
+        if (most.sum <= firstSum || most.tailGrain == 0)
+            return std::unexpected(std::format("{}: 粒が層にならない(層の和 {} → 最大 {}・溢れの粒の層 最大 {})", scene,
+                                               firstSum, most.sum, most.tailGrain));
+
+        Log(Channel::Gpu, Level::Info, "{}: {} 刻み毎回一致(層の和 {} → 最大 {}・溢れの粒の層 最大 {})", scene,
+            WIDE_TICKS, firstSum, most.sum, most.tailGrain);
+
+        return {};
+    }
+
+    std::expected<void, std::string> RunWideGrainBornScenes(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                            gpu::DebugRing& ring) {
+        const auto baked = MakeWideGrainTable();
+        if (!baked)
+            return std::unexpected(std::format("溢れの世界で粒を生む表: {}", baked.error()));
+
+        for (const auto& [paged, stride] :
+             {std::pair{true, WIDE_NO_LAYERS}, std::pair{true, 3u}, std::pair{false, 3u}}) {
+            if (auto run = RunWideGrainBorn(device, queue, ring, *baked, StepMode::Full, paged, stride); !run)
+                return run;
+        }
+
+        return RunWideGrainBorn(device, queue, ring, *baked, StepMode::Conduction, true, 3);
+    }
+
     std::expected<void, std::string> RunScenes(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring,
                                                const sim::BakedReactionTable& table) {
         if (auto image = TestImage(table); !image)
@@ -1266,6 +1389,9 @@ namespace {
 
         if (auto born = RunGrainBornScenes(device, queue, ring); !born)
             return born;
+
+        if (auto wideBorn = RunWideGrainBornScenes(device, queue, ring); !wideBorn)
+            return wideBorn;
 
         return RunBatch(device, queue, ring, table);
     }

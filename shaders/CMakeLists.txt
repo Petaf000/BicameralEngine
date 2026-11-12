@@ -212,6 +212,8 @@ bicameral_add_shader(sim/multires_field_gather_tree.hlsl PROFILE cs_6_8 ENTRY Ga
 bicameral_add_shader(sim/multires_field_gather_tree.hlsl PROFILE cs_6_8 ENTRY GatherTreeWrite NAME multires_field_gather_tree_write)  # GPU の世界の集めて書く段(T-1252 段 2 の 6 本目)
 bicameral_add_shader(sim/multires_layers.hlsl PROFILE cs_6_8 ENTRY SnapshotGrainCells NAME multires_layers_grain_snapshot)  # 刻む前のセルの写し(T-1323)
 bicameral_add_shader(sim/multires_layers.hlsl PROFILE cs_6_8 ENTRY ReconcileGrownLayers NAME multires_layers_grain_reconcile)  # 生まれた粒を層に足す(T-1323)
+bicameral_add_shader(sim/multires_layers.hlsl PROFILE cs_6_8 ENTRY SnapshotGrainCells NAME multires_layers_grain_snapshot_wide DEFINES MR_WIDE_CELLS=1)  # 刻む前のセルと溢れの領域の写し(T-1340)
+bicameral_add_shader(sim/multires_layers.hlsl PROFILE cs_6_8 ENTRY ReconcileGrownLayers NAME multires_layers_grain_reconcile_wide DEFINES MR_WIDE_CELLS=1)  # 生まれた粒を溢れの成分まで層に足す(T-1340)
 bicameral_add_shader(sim/multires_peek.hlsl PROFILE cs_6_8 ENTRY MirrorWorld NAME multires_peek_mirror)  # 覗き窓の世界の写し(T-0096)
 bicameral_add_shader(sim/multires_peek.hlsl PROFILE cs_6_8 ENTRY ExtractShadow NAME multires_peek_extract)  # 覗き窓の抽出(T-0096)
 bicameral_add_shader(sim/sun_column.hlsl PROFILE cs_6_8 ENTRY SunClear NAME sun_column_clear)  # 太陽の影の柱の出力を 0 に(T-0910)

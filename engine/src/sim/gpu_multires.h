@@ -367,8 +367,12 @@ namespace bicameral::sim {
                                   bool afterStep = false);
         // 刻む前のセルを写す(層を使う世界で反応が粒を生む表だけ。T-1323)
         void RecordGrainSnapshot(ID3D12GraphicsCommandList10* list, D3D12_GPU_VIRTUAL_ADDRESS debugRing);
-        // 刻む前のセルの写し(u1 と同じ大きさ)を、要る世界で初めて写す時に作る
+        // 刻む前のセルの写し(u1 と同じ大きさ。溢れを使う世界は後ろに溢れの領域。T-1340)を、要る世界で初めて写す時に作る
         [[nodiscard]] bool EnsureGrainSnapshot();
+        // 刻む前の写しの溢れの領域(溢れを使う世界だけ。T-1340): 語の数・写すグループの数・u5 と外の定数を結ぶ
+        [[nodiscard]] uint32_t GrainTailWords() const;
+        [[nodiscard]] uint32_t GrainTailGroups() const;
+        void BindGrainSnapshot();
 
         // 層を使う世界の粒の印のある物質を、表の規則が生むか(生むなら生まれた粒を層に足す段を通す。T-1322・T-1323)
         [[nodiscard]] bool ProducesGrain(const MultiresNest& nest) const;
