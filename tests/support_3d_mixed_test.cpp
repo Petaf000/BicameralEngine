@@ -4,8 +4,8 @@
 //      分けたセルどうし・分けたセルと粗いセル・段の棒の端が分けたセル(違う大きさの段の棒)を含む塊
 //   2. 奥行 1 セルの 2 次元の混ざる場面(support_mixed_test の場面)を 3 次元へ(細かいセルは奥行 2 つ)にした場面が 2 次元と同じ答え
 //      (丸めの内 = 最大の値の 0.1 %)・面の外の成分が 0
-//      違う大きさの面の切り口の力(T-1325): 奥行 2 つの細かいセルの面の和の軸と縁の力が 2 次元の FineFaceForces と同じ(最大の力の 0.1 %)・
-//      面の外の力が 0。ずれの力は記録だけ(2 次元の読みは対の中の分け方も粗いセルの面ごとの和も違うことがある。T-1325 の作業ログ)
+//      違う大きさの面の切り口の力(T-1325): 奥行 2 つの細かいセルの面の和の軸・ずれ・縁の力が 2 次元の FineFaceForces と同じ(最大の力の 0.1 %)・
+//      面の外の力が 0(ずれは T-1326 で 2 次元の読みを 3 次元と同じ分け方に直してから比べる)
 //   3. 奥行の途中だけを分けた場面: 帳簿(力 3・回り 3)が毎刻み厳密・2 回の実行でハッシュ一致・全部 0.25 m の塊とのたわみの比
 //   4. (T-1325)違う大きさの面の切り口の力: 一様な歪み(対称 6 つ)で全部 0.25 m の場面の同じ所の面の力と同じ(None と形 A)・
 //      一様な曲げの差は記録だけ(2 次の偽のずれ ⅜ κ s²)・解いた場面で 0 でない・
@@ -293,9 +293,9 @@ namespace {
 
     // --- 2. 奥行 1 セルの 2 次元の混ざる場面 ---
     // 違う大きさの面の切り口の力(T-1325): 奥行 2 つの細かいセルの面の和 = 2 次元の細かい面(奥行 cellMm)。x の面も上の面も
-    // 横の向き t_0 が 2 次元の横の向き(shearMn[0]・edgeMn[0])、t_1 は奥行(面の外)。ずれの力は記録だけ(粗いセルの面〔対の 2 つ〕の和の差):
-    // 2 次元の MixedForces は伸びの 3 つの節の項のうち自分の項の自分の勾配の分だけを足す(対のもう 1 つの項が自分を引く分を数えない)。
-    // 3 次元は細かいセルが受ける力の全部(4 つの平均のずれだけを粗いセルが受けるので 4 つが同じ値)で、釣り合いを TestCutStatics で確かめる
+    // 横の向き t_0 が 2 次元の横の向き(shearMn[0]・edgeMn[0])、t_1 は奥行(面の外)。ずれは面ごと・粗いセルの面〔対の 2 つ〕の和の両方を比べる:
+    // どちらも細かいセルが受ける力の全部を読む(2 次元の MixedForces は T-1326 で伸びの 3 つの節の項の相手の項の分も足す形に直した。
+    // 直す前は対の中で +13.2 / −38.7 × 10^6 mN と分かれ、粗いセルの面の和も 2〜13 % 違った)。釣り合いは TestCutStatics・TestLayerStatics
     void CompareCutFaces(std::string_view name, const sim::SupportLaw& flat, const sim::SupportLaw3D& solid,
                          const sim::SupportScene& scene) {
         int64_t largest = 1;
@@ -342,7 +342,6 @@ namespace {
                                                                   axis == 0 ? fup / 2 : fup};
                             pairShear[pair][0] += got[i];
                             pairShear[pair][1] += want[i];
-                            continue;
                         }
 
                         if (std::abs(got[i] - want[i]) > worst) {
@@ -368,12 +367,13 @@ namespace {
         const double shearRatio = (double)shear / (double)largest;
         const double outsideRatio = (double)outside / (double)largest;
         Log(Channel::Sim, Level::Info,
-            "  {}: 違う大きさの面 {}・切り口の軸と縁の力の 2 次元との差 {:.2e}・粗いセルの面ごとのずれの和の差 "
-            "{:.2e}(記録)・面の外 {:.2e}"
+            "  {}: 違う大きさの面 {}・切り口の軸・ずれ・縁の力の 2 次元との差 {:.2e}・粗いセルの面ごとのずれの和の差 "
+            "{:.2e}・面の外 {:.2e}"
             "(最大の力 {} mN。差の最大 {})",
             name, faces, ratio, shearRatio, outsideRatio, largest, worstText);
         Expect(faces > 0 && nonzero, std::format("{}: 違う大きさの面の切り口の力が 0 でない", name));
-        Expect(ratio <= 1.0e-3, std::format("{}: 切り口の軸と縁の力が 2 次元と同じ(0.1 %)", name));
+        Expect(ratio <= 1.0e-3, std::format("{}: 切り口の軸・ずれ・縁の力が 2 次元と同じ(0.1 %)", name));
+        Expect(shearRatio <= 1.0e-3, std::format("{}: 粗いセルの面ごとのずれの和が 2 次元と同じ(0.1 %)", name));
         Expect(outsideRatio <= 1.0e-3, std::format("{}: 切り口の面の外の力が 0(0.1 %)", name));
     }
 
@@ -597,7 +597,7 @@ namespace {
                         uint32_t cutX, uint32_t coarseX);
 
     // 釣り合い(T-1325): 片持ち梁 8 × 1 m の上の段だけ 0.25 m(奥行 1 セル)。上の段の x ≥ 2 m の塊は、x = 2 m の切る面(細かいセルどうし)の
-    // 軸の力と、下の段との境(違う大きさの面の切り口)のずれの力だけで x の向きに釣り合う: Σ 軸 + Σ ずれ = 0。2 次元の読みは記録だけ
+    // 軸の力と、下の段との境(違う大きさの面の切り口)のずれの力だけで x の向きに釣り合う: Σ 軸 + Σ ずれ = 0。2 次元の読みも同じ(T-1326)
     void TestLayerStatics(std::string_view formName, const sim::SupportOptions& options) {
         const sim::SupportScene flatScene = test::MarkedFine(test::Beam(16, 2, 500, false), 0, 16, 1, 2);
         sim::SupportLaw flat(flatScene, options);
@@ -628,10 +628,12 @@ namespace {
                                  (double)std::max<int64_t>(std::abs(flatAxial), 1);
         Log(Channel::Sim, Level::Info,
             "  上の段の塊の釣り合い・{}: 軸の和 {} mN・境のずれの和 {} mN・残り {:.2e}(2 次元の読み: 軸 {}・ずれ "
-            "{}・残り {:.2e}。記録)",
+            "{}・残り {:.2e})",
             formName, axial, shear, ratio, flatAxial, flatShear, flatRatio);
         Expect(ratio <= 1.0e-4,
                std::format("上の段の塊の釣り合い・{}: 境の切り口のずれの和 + 切る面の軸の和 = 0", formName));
+        Expect(flatRatio <= 1.0e-4,
+               std::format("上の段の塊の釣り合い・{}: 2 次元の読みでも境のずれの和 + 切る面の軸の和 = 0", formName));
     }
 
     void TestCutForces() {
