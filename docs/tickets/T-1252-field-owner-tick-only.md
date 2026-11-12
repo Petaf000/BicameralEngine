@@ -181,3 +181,6 @@
 - 2026-11-12(wt6 作業役・段 2 の 3 本目): GPU の世界の欄の区画(u4 の層の置き場の後ろ・g_external2/3。ADR-0532 の 5)を t-1252-tree-gpu-2 に。rebase main(50a6cad6 = T-1323 の後。gpu_multires.h の衝突は両方残した)。
   試験(release 警告 0。rebase の後): gpu_field_region・gpu_field_region_warp(新)・gpu_multires・gpu_multires_layers(_warp)・gpu_lab_box・field_owner・dxil_alloca_check / rebase の前: gpu_tree_refine_placement(_warp)・gpu_field_gather も合格・archmap --check OK。
   初めの版は一様な根を反応する空気にして刻み 0 で食い違った(CPU は広げる時に配り手の欄の一様の値から頁を作る・GPU の TreeExpand はまだ区画を読まない = 段 2 の残りの 5)。木の段の載せは上の「段 2 の残り」1〜6。
+- 2026-11-12(wt6 作業役・段 2 の 4 本目): GPU の木の段(TreeSettle・TreeAllocate・RefineLevel・CoarsenRequest・TreeRelease)が欄の区画を読み書き(ADR-0532 の 6)を t-1252-tree-gpu-3 に。
+  試験(release 警告 0): gpu_field_region(HW 121 秒・新しい 5・6 を含む)・gpu_field_region_warp・field_owner・dxil_alloca_check 合格・archmap --check OK。
+  欄の無い世界の GPU の組 gpu_multires・gpu_lab_box・gpu_tree_refine_placement・gpu_multires_layers(と warp。lab_box は HW だけ)7 本合格。残りは「段 2 の 4 本目」の「段 2 の残り」1〜6。
