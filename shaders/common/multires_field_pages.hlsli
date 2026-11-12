@@ -8,7 +8,13 @@
 //   [pageOf: セルの頁 → 欄の頁(MF_NO_PAGE = 無い = 全部 0 と読む)× cellPages]
 //   [空きのスタック × capacity(CPU の freePages と同じ並び。上 = 空きの数 − 1 から取る)]
 //   [欄の頁 × MR_BLOCK_CELLS × components × 2 語(int64 の下位・上位。頁の中は CPU の InPage と同じ = セル × 値の数 + 値)]
-// 一様の値(枠 × 値の数)はまだ持たない(木の段に載せる時に足す。T-1252 の「段 2 の残り」)。
+// 一様の値(枠 × 値の数)は GPU の世界の区画(下)で置き場の後ろに持つ(集めて書く段の試験の置き場 1 つは持たない)。
+//
+// GPU の世界の欄の区画(T-1252 段 2 の 3 本目。木の段の u4 の層の置き場の後ろ = 始まりの語は g_external2・欄の数は g_external3。
+// 層を持たない世界は区画が u4 の始まり。sim/gpu_multires.cpp の BindLayers):
+//   [欄の数 N][表 × N × MF_TABLE_WORDS(登録の番号・配り手の番号と印・置き場の始まり・一様の値の始まり。始まりは区画の始まりからの語)]
+//   [欄ごと: 置き場(上の並び。MfStoreWords)][一様の値 × 枠 × 値の数 × 2 語(CPU の MultiresFieldStore::uniform と同じ並び)]
+// GPU に載せる欄は、セル・面の疎な欄のうち配り手の欄(SfOwned)とこの刻みだけの欄(SfTickOnly)だけ(一般の欄は GPU の世界はまだ持たない)。
 //
 // 頁の番号の取り方(CPU と GPU で同じ。ADR-0500 の 3 (a)・ADR-0532): 1 つの段の中で頁の要る所を決まった順
 // (集めて書く段は枠の順)に並べ、k 番目は空きのスタックの上から k 番目(k < 空きの数)、それより後は使った高さ + (k − 空きの数)。
@@ -97,6 +103,34 @@ FX_FN uint32_t MfFreePosition(uint32_t k, uint32_t freeCount) {
 // 新しい頁の番号(k ≥ 空きの数)
 FX_FN uint32_t MfFreshPage(uint32_t k, uint32_t freeCount, uint32_t top) {
     return top + (k - freeCount);
+}
+
+// --- GPU の世界の欄の区画(始まりからの語)---
+FX_CONST uint32_t MF_TABLE_FIELD = 0;    // CPU の登録の番号(MultiresNest::fields の添字)
+FX_CONST uint32_t MF_TABLE_OWNER = 1;    // 配り手の番号(SF_OWNER_*。配り手でなければ SF_NO_OWNER)
+FX_CONST uint32_t MF_TABLE_STORE = 2;    // 置き場の始まり
+FX_CONST uint32_t MF_TABLE_UNIFORM = 3;  // 一様の値の始まり
+FX_CONST uint32_t MF_TABLE_WORDS = 4;
+
+FX_FN uint32_t MfRegionTableAddress(uint32_t entry, uint32_t word) {
+    return 1u + (entry * MF_TABLE_WORDS) + word;
+}
+
+// 一様の値(枠 slot の値 component)の下位の語(上位は + 1)
+FX_FN uint32_t MfUniformAddress(uint32_t uniformStart, uint32_t components, uint32_t slot, uint32_t component) {
+    return uniformStart + (((slot * components) + component) * 2u);
+}
+
+// 欄 1 つの置き場と一様の値の語の数
+FX_FN uint32_t MfFieldEntryWords(uint32_t cellPages, uint32_t capacity, uint32_t components, uint32_t slots) {
+    return MfStoreWords(cellPages, capacity, components) + (slots * components * 2u);
+}
+
+// 区画の語の数の上限(値の数の和 values までの欄。欄 1 つは値を 1 つ以上持つので欄の数 ≤ values)
+FX_FN uint32_t MfRegionWordsBound(uint32_t cellPages, uint32_t capacity, uint32_t slots, uint32_t values) {
+    const uint32_t perField = MF_TABLE_WORDS + MF_HEADER_WORDS + cellPages + capacity;
+
+    return 1u + (values * perField) + (capacity * MR_BLOCK_CELLS * values * 2u) + (slots * values * 2u);
 }
 
 // --- 集めて書く段の作業の並び ---
