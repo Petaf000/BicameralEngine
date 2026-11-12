@@ -54,6 +54,12 @@
 1. 粗くする時の層の切り捨ての余り(成分ごとに 0〜7 µmol)は層から残りへ移る(ADR-0489 の 5)= 「出来事」でない舞う粒。層を使う世界では
    `min(和 ÷ 8 の切り上げ, 粗いセルの量)` にすれば舞う粒は生まれない(CPU と GPU の粗くする段の両方・層の試験のハッシュが変わる)。今は変えていない。
 
+## 司令塔の受け取り(土台の形の変更・2026-11-12 司令塔・docs/design/21 §3 と照らし。本体がマージの時に写した)
+- Q175 (B)「層を使う世界では置いた粒は全部を層として読む。舞う粒は崩れ・吹き上げの出来事からだけ」に合わせ、T-1338 の「土台に足りないもの」2 つを
+  新しい問いにせずおすすめどおり直した: ① 反応で生まれた粒は層に足す・② 層を使う世界では層を渡さない置き口でも粒は全部が層。
+- CPU と GPU 共通の規則。層を使わない世界のビット一致・CPU と GPU のビット一致を試験で確かめる。GPU の同じ規則は T-1323。
+- 上の印 1(粗くする時の切り捨ての余りが舞う粒になる)は T-1324 で直す(min(和 ÷ 8 の切り上げ, 量)・CPU と GPU)。
+
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-11-12 wt2(2 本目): t-1338-grain-layers-default の上の t-1322-grain-layers-born で CPU の ① ② を入れた(GrowGrainLayers・StoreGrownGrainCell・
   SettledGrainLayers・PlaceRootBlock の層なしの置き口・実験室の命令)。試験 multires_layers に TestReactionBornGrainSettles・TestPlaceSettledGrain。
@@ -62,3 +68,4 @@
   phase_layer_world・phase_layer_tree・placement_refine・tree_refine_placement・dxil_alloca_check / GPU(RTX 3070 Ti)gpu_multires_layers〔HW・WARP〕・
   gpu_tree_refine_placement〔HW・WARP〕・gpu_lab_box。archmap --check OK。記録したハッシュの取り直しは要らなかった(層を使う世界で反応を刻む試験は無かった)。
   lab_box(CPU)は ctest で Disabled のまま。rebase main d9eed9db。
+- 2026-11-12 本体(25 回目): main へ --no-ff(t-1338 を含む・t-1338 の印はこれに含めて入れた)。司令塔の受け取りを上に写した。
