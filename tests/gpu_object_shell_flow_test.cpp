@@ -21,7 +21,7 @@
 //   --grow(T-1331 の小さく試す 2。比べを飛ばす): 骨格を大きくした紙 1 枚で、箱の大きさと赤黒の回数(0 から収まるまで・多重格子)を出す。
 //         切り分け(T-1349): --grow-cpu N(CPU だけで N 刻み・上限で止まった解きの中身)・--grow-shape 列 高さ 層(その 1 つだけ)・--grow-sweeps N(0 から決まった N 回だけ)・--grow-ticks 暖機 測る・--grow-groupshared。
 //   分けた刻み(T-1350): 1 つの Dispatch が長くなる箱(ボクセル × 赤黒の上限 × 小刻みが GROUP_VOXEL_SWEEPS を超える)は、1 刻みを小刻みごとの
-//         Dispatch〔⓪〜④ / 赤黒を続きから n 回ずつ / ⑥〜⑨〕に分けて回す(既定 = 自動)。比べに、分けた形(n = 7 で小刻みの途中で区切る)を
+//         Dispatch〔⓪〜④ / 赤黒を続きから n 回ずつ / ⑥〜⑨〕に分けて回す(既定 = 自動)。比べに、分けた形(n = 64 で小刻みの途中で区切る)を
 //         1 つの Dispatch の形と同じハッシュになるかも足した。--large-box: 紙 96 × 48・層 8 段(121,856 ボクセル)を 0 から決まった 1,024 回(上限)で
 //         2 刻み回して CPU とビット一致・一番長い Dispatch の時間を出す(HW だけ。WARP では数時間かかる)。
 //         --split auto|whole|split(測りの形を決める)・--split-sweeps N(分けた形の 1 つの Dispatch の赤黒の回数)。
@@ -85,6 +85,9 @@ namespace {
     constexpr uint64_t GROUP_VOXEL_SWEEPS = 1ull << 25;
     constexpr uint32_t SPLIT_SWEEPS_MAX = (1u << 24) - 1;  // g_split の上の 24 bit
     constexpr uint32_t DISPATCH_TIMESTAMPS = 1024;  // 1 つ目の刻みの Dispatch ごとの時刻(一番長い Dispatch を出す)
+    // 比べの分けた形の 1 つの Dispatch の赤黒の回数(赤黒は平均 69・一番多い 334 回なので、収まるのは区切りの途中にも後の区切りにもなる)。
+    // 小さくすると 1 刻みの Dispatch が増える(上限 1,024 ÷ n × 4)。WARP は Dispatch 1 回が重く、n = 7(597 回 / 刻み)では 1 本の試験が 40 分を超えた(T-1350)
+    constexpr uint32_t COMPARE_SPLIT_SWEEPS = 64;
 
     // 段の印(object_shell_flow.hlsl の OH_STAGE_*。1 つずつだけ回して費用を分ける。T-1223)
     constexpr uint32_t ALL_STAGES = 0xFFFFFFFFu;
@@ -854,14 +857,14 @@ namespace {
         return {};
     }
 
-    // 段ごとの Dispatch に分けた形(T-1350): 赤黒を 7 回ずつに区切り(収まるのは区切りの途中・ちょうど区切り・上限のどれも起きる)、
+    // 段ごとの Dispatch に分けた形(T-1350): 赤黒を COMPARE_SPLIT_SWEEPS 回ずつに区切り(収まるのは区切りの途中・ちょうど区切り・上限のどれも起きる)、
     // CPU とビット一致で、1 つの Dispatch の形(wholeDigests。[規則][groupshared = 0・作業場 = 1])と同じハッシュになる
     std::expected<void, std::string> CompareSplit(const Context& context, const Shape& shape,
                                                   std::span<const PressureRule> rules,
                                                   const std::array<std::array<uint64_t, 2>, 4>& wholeDigests) {
         Context split = context;
         split.split = SplitMode::Split;
-        split.splitSweeps = 7;
+        split.splitSweeps = context.splitSweeps != 0 ? context.splitSweeps : COMPARE_SPLIT_SWEEPS;
         for (size_t r = 0; r < rules.size(); ++r) {
             for (const bool sharedPotential : {true, false}) {
                 const auto compared = RunCompare(split, shape, sharedPotential, rules[r]);
@@ -1199,6 +1202,8 @@ namespace {
         uint32_t measureSweeps = 24;
         int32_t onlyRule = -1;
         bool largeBox = false;
+        bool splitOnly =
+            false;  // --split-only: 比べを紙 24 列・層 2 段の 1 つの Dispatch と分けた形だけに(T-1350 の確かめ)
         SplitMode split = SplitMode::Auto;
         uint32_t splitSweeps = 0;
         for (size_t i = 0; i < arguments.size(); ++i) {
@@ -1236,6 +1241,8 @@ namespace {
             } else if (text == "--large-box") {
                 largeBox = true;
                 compare = false;
+            } else if (text == "--split-only") {
+                splitOnly = true;
             } else if (text == "--split" && i + 1 < arguments.size()) {
                 const std::string_view mode = arguments[++i];
                 split = mode == "whole" ? SplitMode::Whole : (mode == "split" ? SplitMode::Split : SplitMode::Auto);
@@ -1289,7 +1296,7 @@ namespace {
             // 1 つの Dispatch の形のハッシュ(紙 24 列・層 2 段。分けた形と比べる。T-1350)
             std::array<std::array<uint64_t, 2>, 4> wholeDigests{};
             for (size_t r = 0; r < rules.size(); ++r) {
-                for (size_t s = 0; s < shapes.size(); ++s) {
+                for (size_t s = 0; s < (splitOnly ? 1u : shapes.size()); ++s) {
                     for (const bool sharedPotential : {true, false}) {
                         const auto compared = RunCompare(context, shapes[s], sharedPotential, rules[r]);
                         if (!compared) {
@@ -1304,10 +1311,15 @@ namespace {
                 }
             }
 
-            // 段ごとの Dispatch に分けた形(T-1350): 赤黒 7 回ずつで小刻みの途中で区切り、CPU とビット一致・1 つの Dispatch の形と同じハッシュ
+            // 段ごとの Dispatch に分けた形(T-1350): 赤黒 64 回ずつで小刻みの途中で区切り、CPU とビット一致・1 つの Dispatch の形と同じハッシュ
             if (auto splitCompared = CompareSplit(context, shapes[0], rules, wholeDigests); !splitCompared) {
                 Log(Channel::Gpu, Level::Error, "gpu_object_shell_flow_test: FAILED({})", splitCompared.error());
                 return 1;
+            }
+
+            if (splitOnly) {
+                Log(Channel::Gpu, Level::Info, "gpu_object_shell_flow_test: OK(分けた形の比べだけ)");
+                return 0;
             }
 
             // 重みが 32bit に入らないボクセルの道(64bit の欄)も CPU と比べる(試験の印 8 = x が 3 の倍数のボクセルをその道へ。T-1320 段 1)
