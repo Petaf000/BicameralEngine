@@ -49,7 +49,8 @@ namespace bicameral::test {
         // 解き始めを多重格子で作る(T-1202。最後は同じ赤黒を収まるまで)・その費用の和(細かい格子の赤黒 1 回 = 1000)
         bool pressureMultigrid = false;
         // 調べるだけ(T-1321。研究): 多重格子の規則。段ごとの前と後の赤黒の数(既定 2 = OH_MG_SMOOTH_SWEEPS)と V 字の回数
-        // (2 = ① と ② の両方で V 字〔既定〕・1 = ② の寄せの後は V 字の代わりに細かい段の赤黒を 2 × 前後の数だけ)。既定なら答えとハッシュは今のまま
+        // (2 = ① と ② の両方で V 字〔既定〕・1 = ② の寄せの後は V 字の代わりに細かい段の赤黒を 2 × 前後の数だけ・3 以上 = ② の後に V 字を重ねる)。
+        // 既定なら答えとハッシュは今のまま
         uint32_t pressureMultigridSmooth = 2;
         uint32_t pressureMultigridCycles = 2;
         // 調べるだけ(T-1201): 「収まった」とみなす 1 回の赤黒の値の変わりの上限(0 = 1 つも変わらない。GPU は 0 だけ)
@@ -414,7 +415,9 @@ namespace bicameral::test {
         }
 
         if (cycles >= 2) {
-            work += MgCycle(fine, count, smooth);
+            // 3 回以上(T-1321 の調べ): 寄せた右辺のまま V 字を重ねる
+            for (uint32_t cycle = 1; cycle < cycles; ++cycle)
+                work += MgCycle(fine, count, smooth);
         } else {
             // V 字 1 回の規則(T-1321): 寄せは細かい段の赤黒だけで均す
             for (uint32_t s = 0; s < 2 * smooth; ++s)
