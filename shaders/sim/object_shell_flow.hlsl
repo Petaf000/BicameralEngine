@@ -562,8 +562,8 @@ void PrepareResidual(ShellBox box, uint32_t thread) {
         for (uint32_t axis = 0; axis < 3; ++axis) {
             const OhShellFace minusFace = g_faceWork[FaceAt(box, axis, c)];
             const OhShellFace plusFace = g_faceWork[FaceAt(box, axis, c + Unit(axis))];
-            residual += OhFlowSpeed(minusFace.next, minusFace.mass);
-            residual -= OhFlowSpeed(plusFace.next, plusFace.mass);
+            residual += OhFlowPredictedSpeed(minusFace.next, minusFace.mass);  // 上限で止めない(T-1363)
+            residual -= OhFlowPredictedSpeed(plusFace.next, plusFace.mass);
             total += minusFace.weight + plusFace.weight;
             inner[2 * axis] = Axis(c, axis) > 0 ? minusFace.weight : (uint64_t)0;
             inner[(2 * axis) + 1] = Axis(c, axis) + 1 < Axis(box.size, axis) ? plusFace.weight : (uint64_t)0;

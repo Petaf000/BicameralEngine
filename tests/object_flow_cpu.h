@@ -96,6 +96,9 @@ namespace bicameral::test {
         uint32_t pressureDumpEvery = 0;
         // 調べるだけ(T-1362): 0 でなければ、線の答えの V 字がこの回数以上だった解きだけを書き出す(pressureDumpEvery に依らない)
         uint32_t pressureDumpMinCycles = 0;
+        // 調べるだけ(T-1363): 小刻みごとに、層で一番薄いボクセルの見立てと面の速さ(上限で止める前)を 1 行ずつ書き出す
+        std::ostream* flowTrace = nullptr;
+        uint64_t flowTraceSubstep = 0;
 
         // --- 1 刻みの受け渡し(作業。真実ではない。T-1332)---
         reaction::RxCell cellView{};      // 囲むセルの見立て = 刻みの初めのセル + この物の小刻みごとの粗い量
@@ -616,6 +619,49 @@ namespace bicameral::test {
 
     // ⑨ 箱の外へ出た・入った分(ボクセル → セルが正)を対の端数を通して、この物のセルの見立てへ当て、セルへ渡す粗い量に足す
     // (セルそのものは ApplyShellFlowToCells。object_shell_flow.hlsl の ExchangeWithCell と同じ。T-1332)
+    // 調べるだけ(T-1363): 層で一番薄いボクセル(囲むセルとの質量の比)の見立てと、その 6 つの面の上限で止める前の速さ(運動量 ÷ 面の質量)。
+    // 全部の面の上限で止める前の速さの最大と、上限を超えた面の数も
+    template <typename Skeleton>
+    void TraceThinnest(std::ostream& out, OhShellFlow& flow, const OhFlowBox& box,
+                       const std::vector<reaction::OhFlowCell>& cells, const std::vector<int64_t>& excess,
+                       const reaction::OhFlowCell& cellFlow, const std::array<std::vector<uint64_t>, 3>& faceMass,
+                       const std::array<std::vector<int64_t>, 3>& momentum,
+                       const std::array<std::vector<uint8_t>, 3>& wall, Skeleton&& skeleton, const char* label) {
+        size_t thinnest = 0;
+        for (size_t v = 0; v < cells.size(); ++v) {
+            if (!skeleton(v) && (skeleton(thinnest) || cells[v].mass < cells[thinnest].mass))
+                thinnest = v;
+        }
+
+        int64_t fastest = 0;
+        uint64_t beyond = 0;
+        for (uint32_t a = 0; a < 3; ++a) {
+            for (size_t f = 0; f < faceMass[a].size(); ++f) {
+                const int64_t q = momentum[a][f] / static_cast<int64_t>(faceMass[a][f]);
+                fastest = std::max(fastest, std::abs(q));
+                beyond += std::abs(q) > reaction::OH_FLOW_SPEED_LIMIT_Q16 ? 1u : 0u;
+            }
+        }
+
+        const uint32_t c[3] = {static_cast<uint32_t>(thinnest % box.size[0]),
+                               static_cast<uint32_t>((thinnest / box.size[0]) % box.size[1]),
+                               static_cast<uint32_t>(thinnest / (static_cast<size_t>(box.size[0]) * box.size[1]))};
+        out << label << ' ' << flow.flowTraceSubstep << " v " << c[0] << ' ' << c[1] << ' ' << c[2] << " massPpm "
+            << (cells[thinnest].mass * 1000000) / std::max<uint64_t>(cellFlow.mass, 1) << " T "
+            << cells[thinnest].temperature << " excessQ16 " << excess[thinnest] << " open " << cells[thinnest].openQ16
+            << " fastest " << fastest << " beyond " << beyond << " faces";
+        for (uint32_t a = 0; a < 3; ++a) {
+            for (uint32_t side = 0; side < 2; ++side) {
+                uint32_t g[3] = {c[0], c[1], c[2]};
+                g[a] += side;
+                const size_t f = box.Face(a, g);
+                out << ' ' << (wall[a][f] != 0 ? "w" : "") << momentum[a][f] / static_cast<int64_t>(faceMass[a][f]);
+            }
+        }
+
+        out << '\n';
+    }
+
     inline bool ExchangeWithCellView(const OhGasList& gases, OhWorld& world, uint32_t o, OhShellFlow& flow,
                                      const reaction::OhFlow& toCell) {
         const reaction::OhCarryStep step = reaction::OhSplitCarry(world.objects[o], toCell, world.carries[o]);
@@ -765,6 +811,10 @@ namespace bicameral::test {
             });
         }
 
+        if (flow.flowTrace != nullptr)
+            TraceThinnest(*flow.flowTrace, flow, box, cells, excess, cellFlow, faceMass, next, wall, skeleton,
+                          "before");
+
         // --- ③ 圧力の射影: Σ β_f (Ψ_i − Ψ_j) >> 16 = 膨らみたい体積 − 予測の出る体積(箱の外 Ψ = 0)---
         std::array<std::vector<uint64_t>, 3> weight;
         std::vector<int64_t> residual = excess;
@@ -772,7 +822,7 @@ namespace bicameral::test {
             weight[a].resize(box.FaceCount(a));
             forFaces(a, [&](size_t f, Sides s, const uint32_t*) {
                 weight[a][f] = rx::OhFlowFaceWeight(cellFlow.mass, faceMass[a][f]);
-                const int64_t q = rx::OhFlowSpeed(next[a][f], faceMass[a][f]);
+                const int64_t q = rx::OhFlowPredictedSpeed(next[a][f], faceMass[a][f]);  // 上限で止めない(T-1363)
                 if (s.minus != SIZE_MAX)
                     residual[s.minus] -= q;
                 if (s.plus != SIZE_MAX)
@@ -956,6 +1006,11 @@ namespace bicameral::test {
                 flow.fastestQ16 = std::max(flow.fastestQ16, std::abs(speed[a][f]));
             });
         }
+
+        if (flow.flowTrace != nullptr)
+            TraceThinnest(*flow.flowTrace, flow, box, cells, excess, cellFlow, faceMass, next, wall, skeleton, "after");
+        if (flow.flowTrace != nullptr)
+            ++flow.flowTraceSubstep;
 
         // 壁の面の運動量はこの小刻みの膨らみの分だけ(持ち越さない)
         flow.momentum = next;
