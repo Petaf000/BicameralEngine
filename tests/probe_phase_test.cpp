@@ -14,6 +14,9 @@
 //   6. 場所を取らない石(`--stone-without-density`。ctest の probe_phase_porous_stone。T-0654): 石の密度を書かない(場所を取らない固体)と、
 //      水たまり・池・溶けた水が熱い石のセルへ染み込んで湯気になる。場面の結果(湯気の高さ・池・流れ落ち)は見ず、4 の保存だけを確かめる
 //   5. 記録(試験ではなく表示): 静かな池の計算したブロックの数(釣り合ったセルは眠れる。ADR-0290)
+//   8. 場面の線を外す(`--no-scene-lines`。ctest の probe_phase_checks。T-1370): 2・3 の場面の結果(EXPECT_OUTCOME)だけを見ず、
+//      ほかの段(1・4・7・決定性)は全部確かめる。場面の線は現実の伝導率(D-637)で今の仮の世界では成り立たず(T-1368 P1〜P6)、
+//      場面を世界の木へ移すまで(T-1219)probe_phase は止めてあるため、残りの段を毎回見る
 //   7. 溶岩の上の水(T-0622・ADR-0316): 1500 K の石の上の 1 セルいっぱいの 1200 K の水が湯気になっても、どのセルの気体のぶんも
 //      気体の器(2^31 µmol)未満で、4 の保存が崩れない(湯気を増やす規則は器の残りまでに縮められる)
 // 表は試験の表(combustion_test。real_matter・real_reactions を写して熱伝導率に試験の倍率)+ 地球の環境 + 基準の大気(N2・O2)+ 石。
@@ -40,7 +43,8 @@ using namespace bicameral::sim;
 namespace {
 
     int failureCount = 0;
-    bool outcomeChecks = true;  // 場面の結果も確かめる(場所を取らない石の時は保存だけ。T-0654)
+    bool outcomeChecks =
+        true;  // 場面の結果も確かめる(場所を取らない石の時は保存だけ。T-0654。`--no-scene-lines` でも外す。T-1370)
 
     void Expect(bool condition, const char* text, int line) {
         if (condition)
@@ -666,6 +670,10 @@ int main(int argc, char** argv) {
         std::printf("すべて通った\n");
         return 0;
     }
+
+    // --- 8: 場面の線だけを外し、ほかの段は全部(T-1370)---
+    if (hasArgument("--no-scene-lines"))
+        outcomeChecks = false;
 
     TestTable(table);
     TestSteam(table, false);

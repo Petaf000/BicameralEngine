@@ -1,5 +1,5 @@
 // lab_box_test.cpp — 実験室の箱の CPU 側(sim/lab_box。T-0142)を CPU だけで確かめる:
-// コマンドで作るセルが MakeReactionCell と同じ・当てられないコマンドは飛ばす・木を置いて火を付けると燃える(セルロースが減り CO2 が出る)・
+// コマンドで作るセルが MakeReactionCell と同じ・当てられないコマンドは飛ばす・木を置いて火を付けると燃える(セルロースと O2 が減り炭素の酸化物が出る)・
 // コマンドの無い刻みは元素とエネルギーの合計が変わらない・同じコマンドの列なら同じハッシュの列・記録の読み書き・最初に違ったセルを見つける。
 // 表を替えた印(T-0218): セルを変えずに箱をつつく・途中で表を替えると替えた刻みから先だけ変わる・印の入った記録(版 3)と版 2 の読み書き。
 // 表の中身(T-0217): 記録の版 4 は使った表の中身を持ち、読み書きで同じ・壊れた中身は断る・版 3 も読める。
@@ -10,7 +10,8 @@
 // 一部を細かくした箱(T-0314・ADR-0137): 細かくする印で根の一部を 2 段細かくすると、組の数・ブロックの数が見込みどおり・
 // 細かいセルは同じ濃度(量の単位 8^-k)・保存量が変わらない・細かいセルに置く/箱のセルに置くと覆う葉全部に・粗い葉の一部には当てない・
 // 細かい所の木が燃える・コマンドの無い刻みは保存・枠の無い箱は細かくならない・記録の版 6 は枠の数を持つ。
-// 細かくした所の熱(T-0351): 熱い点の広がりの増え方が、陰解法ではレベル 0 の理論の値と小刻み(世界の陽解法)に合い、陰解法なしは遅い。
+// 細かくした所の熱(T-0351): 熱い点の広がりの増え方が、陰解法ではレベル 0 の理論の値と小刻み(世界の陽解法)に合い、陰解法なしは遅い
+// (解き方の試験なので、頭打ちが箱の 2 段の中で起きる前の伝導率の倍率の表で回す。ADR-0505・T-1369)。
 // 失敗すると失敗した条件と行を表示して 1 を返す(ctest が落ちる)。
 #include <algorithm>
 #include <array>
@@ -197,15 +198,28 @@ namespace {
         const std::vector<uint64_t> hashes = RunFire(table, commands, first);
         EXPECT(RunFire(table, commands, second) == hashes);  // 決定性
 
+        // --- 燃えた印: セルロースと O2 が減り、炭素の酸化物(CO2 + CO)が出る ---
+        // 付けたセルは熱分解(この表では発熱)で 3000 K を超え、孔の O2 で出た CO2 は炭が大過剰の熱いセルで
+        // Boudouard(C + CO2 → 2CO)により数刻みで CO になる(T-1368 L1)。どちらの酸化物で出るかは温度で決まるので、和で見る
         const uint32_t cellulose = table.SpeciesId("cellulose");
+        const uint32_t oxygen = table.SpeciesId("oxygen");
         const uint32_t carbonDioxide = table.SpeciesId("carbon_dioxide");
+        const uint32_t carbonMonoxide = table.SpeciesId("carbon_monoxide");
+        MultiresNest placedNest = MakeLabBoxNest(table);
+        StepLabBox(placedNest, table, 0, CommandsOf(commands, 0));
         const uint64_t placed = 8 * FindMaterial(materials, "木")->contents[0].amount;
-        std::printf("lab_box_test: %llu 刻みでセルロース %llu → %llu µmol、CO2 %llu µmol\n",
-                    static_cast<unsigned long long>(RUN_TICKS), static_cast<unsigned long long>(placed),
-                    static_cast<unsigned long long>(TotalOf(first, cellulose)),
-                    static_cast<unsigned long long>(TotalOf(first, carbonDioxide)));
+        const uint64_t oxides = TotalOf(first, carbonDioxide) + TotalOf(first, carbonMonoxide);
+        std::printf(
+            "lab_box_test: %llu 刻みでセルロース %llu → %llu µmol・O2 %llu → %llu µmol・CO2 %llu µmol・CO %llu µmol\n",
+            static_cast<unsigned long long>(RUN_TICKS), static_cast<unsigned long long>(placed),
+            static_cast<unsigned long long>(TotalOf(first, cellulose)),
+            static_cast<unsigned long long>(TotalOf(placedNest, oxygen)),
+            static_cast<unsigned long long>(TotalOf(first, oxygen)),
+            static_cast<unsigned long long>(TotalOf(first, carbonDioxide)),
+            static_cast<unsigned long long>(TotalOf(first, carbonMonoxide)));
         EXPECT(TotalOf(first, cellulose) < placed);
-        EXPECT(TotalOf(first, carbonDioxide) > 0);
+        EXPECT(TotalOf(first, oxygen) < TotalOf(placedNest, oxygen));
+        EXPECT(oxides > 0);
 
         // --- 記録の読み書き ---
         const LabRecording recording{
@@ -326,26 +340,45 @@ namespace {
         EXPECT(std::ranges::equal(DenseCellImage(nest), cellsBefore, sameCell));
 
         // --- 刻み SWAP_TICK の始めに速い表へ: その前は替えない時と同じ、後は違う ---
+        // 現実の伝導率(D-637)では火を付けたセルから燃え広がらず、刻み SWAP_TICK には燃えている所が無い(T-1368 L2)。
+        // 替わり目に、まだ燃えていない木のセルを燃え始めの温度(燃焼が孔の O2 で頭打ちにならない所)にし、替えない側にも同じコマンドを流す
+        // (gpu_lab_box_test の SWAP_IGNITE_CELL と同じ)。そのセルは熱分解の暴走で 10 刻みほどでどちらの表でもセルロースを使い切り、
+        // 刻み RUN_TICKS には同じ量になるので、セルロースは替えた刻みの終わり(ハッシュを比べるのと同じ刻み)で比べる(T-1369)
+        constexpr LabCellPosition SWAP_IGNITE_CELL = {.x = 4, .y = 3, .z = 3};
+        constexpr uint32_t WARM_IGNITE_MILLIKELVIN = 600000;
+        const Command warm = MakeLabTemperatureCommand(SWAP_TICK, 10, SWAP_IGNITE_CELL, WARM_IGNITE_MILLIKELVIN);
+        std::vector<Command> plainCommands = MakeFireCommands(materials);
+        plainCommands.push_back(warm);
         std::vector<Command> commands = MakeFireCommands(materials);
         commands.push_back(mark);
-        MultiresNest plain = MakeLabBoxNest(table);
-        MultiresNest swapped = MakeLabBoxNest(table);
-        const std::vector<uint64_t> plainHashes = RunFire(table, MakeFireCommands(materials), plain);
-        std::vector<uint64_t> swappedHashes;
-        for (uint64_t tick = 0; tick < RUN_TICKS; ++tick) {
-            const BakedReactionTable& now = tick < SWAP_TICK ? table : *faster;
-            StepLabBox(swapped, now, tick, CommandsOf(commands, tick));
-            swappedHashes.push_back(HashWholeNest(swapped));
-        }
+        commands.push_back(warm);
 
         const uint32_t cellulose = table.SpeciesId("cellulose");
-        std::printf("lab_box_test: 刻み %llu で表を替えた: セルロース %llu µmol(替えない時 %llu)\n",
-                    static_cast<unsigned long long>(SWAP_TICK),
-                    static_cast<unsigned long long>(TotalOf(swapped, cellulose)),
-                    static_cast<unsigned long long>(TotalOf(plain, cellulose)));
+        const auto run = [&](const BakedReactionTable& later, const std::vector<Command>& list, MultiresNest& nest,
+                             uint64_t& celluloseAtCompare) {
+            std::vector<uint64_t> hashes;
+            for (uint64_t tick = 0; tick < RUN_TICKS; ++tick) {
+                StepLabBox(nest, tick < SWAP_TICK ? table : later, tick, CommandsOf(list, tick));
+                hashes.push_back(HashWholeNest(nest));
+                if (tick == SWAP_TICK)
+                    celluloseAtCompare = TotalOf(nest, cellulose);
+            }
+
+            return hashes;
+        };
+        MultiresNest plain = MakeLabBoxNest(table);
+        MultiresNest swapped = MakeLabBoxNest(table);
+        uint64_t plainCellulose = 0;
+        uint64_t swappedCellulose = 0;
+        const std::vector<uint64_t> plainHashes = run(table, plainCommands, plain, plainCellulose);
+        const std::vector<uint64_t> swappedHashes = run(*faster, commands, swapped, swappedCellulose);
+
+        std::printf("lab_box_test: 刻み %llu で表を替えた: その刻みの終わりのセルロース %llu µmol(替えない時 %llu)\n",
+                    static_cast<unsigned long long>(SWAP_TICK), static_cast<unsigned long long>(swappedCellulose),
+                    static_cast<unsigned long long>(plainCellulose));
         EXPECT(std::ranges::equal(std::span(swappedHashes).first(SWAP_TICK), std::span(plainHashes).first(SWAP_TICK)));
         EXPECT(swappedHashes[SWAP_TICK] != plainHashes[SWAP_TICK]);
-        EXPECT(TotalOf(swapped, cellulose) < TotalOf(plain, cellulose));
+        EXPECT(swappedCellulose < plainCellulose);
 
         // --- 印の入った記録(版 3)と、版 2 の見出しの記録 ---
         const LabRecording recording{
@@ -397,7 +430,7 @@ namespace {
 
     // 計器と比べる段取り(T-0221。CPU だけ。GPU の箱で流すのは window_lab_compare)
     void TestGauge(const BakedReactionTable& table, const std::vector<LabMaterial>& materials) {
-        constexpr uint64_t GAUGE_TICKS = RUN_TICKS;  // 60 刻みではまだ CO2 が出ない(待ちの丸め)
+        constexpr uint64_t GAUGE_TICKS = RUN_TICKS;
         constexpr uint64_t SAVE_POINT_TICK = 2;
         const LabCellPosition cell{.x = 3, .y = 3, .z = 3};
         const LabRecording recording{.tickCount = GAUGE_TICKS, .commands = MakeFireCommands(materials)};
@@ -408,7 +441,7 @@ namespace {
 
         // --- 置いた量・火を付けた温度 ---
         const uint32_t cellulose = table.SpeciesId("cellulose");
-        const uint32_t carbonDioxide = table.SpeciesId("carbon_dioxide");
+        const uint32_t carbonMonoxide = table.SpeciesId("carbon_monoxide");
         const uint64_t wood = FindMaterial(materials, "木")->contents[0].amount;
         EXPECT(samples->front().cellAmounts[cellulose] == wood);
         EXPECT(samples->front().boxAmounts[cellulose] == 8 * wood);
@@ -416,13 +449,14 @@ namespace {
         EXPECT((*samples)[IGNITE_TICK].maxTemperatureMilliKelvin >= 1000000);
 
         // --- 反応の速さを足すと量の差になる ---
+        // 見る物は CO: 付けたセルの CO2 は数刻みで Boudouard により CO になり、刻み GAUGE_TICKS に残るのは CO(T-1368 L4)
         int64_t produced = 0;
         for (size_t i = 0; i < samples->size(); ++i)
-            produced += LabGaugeRate(*samples, i, carbonDioxide, true);
+            produced += LabGaugeRate(*samples, i, carbonMonoxide, true);
 
-        EXPECT(LabGaugeRate(*samples, 0, carbonDioxide, true) == 0);
-        EXPECT(produced == static_cast<int64_t>(samples->back().boxAmounts[carbonDioxide]) -
-                               static_cast<int64_t>(samples->front().boxAmounts[carbonDioxide]));
+        EXPECT(LabGaugeRate(*samples, 0, carbonMonoxide, true) == 0);
+        EXPECT(produced == static_cast<int64_t>(samples->back().boxAmounts[carbonMonoxide]) -
+                               static_cast<int64_t>(samples->front().boxAmounts[carbonMonoxide]));
         EXPECT(produced > 0);
 
         // --- 保存点で切る・A は元の実験と同じ・B(隣の木を熱くする)は保存点の刻みから違う ---
@@ -876,7 +910,16 @@ int main() {
     TestVersionFourRecording();
     TestRefinedBox(*table, materials);
     TestRefinedGauge(*table, materials);
-    TestRefinedHeatSpeed(*table, materials);
+
+    // 解き方(陰解法・小刻み)の試験は前の伝導率の倍率の表で回す: 現実の伝導率(D-637)では薄い空気の基準のレベルが 6 で、
+    // 2 段までの箱に頭打ちが起きない(ADR-0505 の決定 2・T-1368 L5)
+    const auto fastTable = BakeReactionTable(MakeFastConductionTestTable());
+    if (!fastTable) {
+        std::printf("FAILED: 伝導の速い表をベイクできない(%s)\n", fastTable.error().c_str());
+        return 1;
+    }
+
+    TestRefinedHeatSpeed(*fastTable, MakeLabMaterials(*fastTable));
 
     if (failureCount > 0) {
         std::printf("lab_box_test: %d 件失敗\n", failureCount);
