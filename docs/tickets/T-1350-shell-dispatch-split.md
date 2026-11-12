@@ -80,3 +80,6 @@
   費用: 今の場面は自動で変わらない。強制で分けると groupshared の 46 個で +15 %・1000 個 層 4 段で +8 %。
 - 2026-11-12(wt5・2): WARP の ctest が 40 分止まった = STATUS_STACK_OVERFLOW(段の関数を 2 か所から呼んでシェーダーが倍の長さ)。FlowStages の 1 か所から呼ぶ形に直し、
   比べの分けた形を n = 7 → 64・WARP は 2 本に。`--split-only` を足した(HW 合格・WARP 全部 707 秒で合格)。
+- 2026-11-12(wt5・引き継ぎメモ): ブランチ t-1350-shell-dispatch-split(t-1349-shell-large-box ← t-1331-shared-air-grid の上)。rebase main → release → object_shell・gpu_object_shell_flow(HW)・
+  gpu_object_shell_flow_warp(rebase 前に合格 605 秒)を流してから印 runner/ready/t-1350-shell-dispatch-split.txt。gpu_object_shell_flow_large は rebase 前に合格(HW・309 秒・ほかと重なり)。
+  残り: なし(T-1350 の完了条件は全部)。次の芯は T-1321(① 上限に当たる)と T-1331(1 つの箱を複数のグループで = 赤黒の Dispatch を広げる)。
