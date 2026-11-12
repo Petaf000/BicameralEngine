@@ -45,6 +45,9 @@ namespace bicameral::sim {
         // 0 でない時は quietBelowMk を使わない(冷たい物も負の側で放つ)。参照の温度 2^31 mK 未満
         uint32_t referenceMk = 0;
         bool negativePart = false;
+        // 面の受け渡しの形(T-1365 研究・ADR-0535 (b)。reaction::RC_FACE_*。0 = 今の崖〔RcMaskAcross〕)。CPU リファレンスだけ
+        // (GPU は 0 のまま。形が決まってから)。0 でない時、写しの光の値の τ は RcFaceDepthQ32(32 で飽和させない)で作る
+        uint32_t faceCoupling = 0;
     };
 
     // 段 0(レベル 0 のセル)の密な写し。添字 = IndexOf
