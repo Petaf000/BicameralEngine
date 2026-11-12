@@ -19,7 +19,10 @@
 
 ## 分け方の芯(2026-11-12 wt5)
 - **1 刻み = 小刻みごとに 〔⓪〜④・解き始め〕→〔赤黒を続きから最大 n 回〕× 足りる数 →〔⑥〜⑨(最後の小刻みは ⑩ と数え上げも)〕の Dispatch**(ルート定数 g_split の段・小刻み・n)。
-  どの段も今の 1 つの Dispatch の形と同じ関数(SubstepPrepare・PressureSweeps・SubstepFinish)を呼ぶ。
+  どの段も今の 1 つの Dispatch の形と同じ関数(SubstepPrepare・PressureSweeps・SubstepFinish)を、**同じ 1 か所(FlowStages の小刻みの回し)から**呼ぶ
+  (1 つの Dispatch = 全部の段 × 全部の小刻み・分けた形 = 1 つの段 × 1 つの小刻み)。
+  ★ 最初は 1 つの Dispatch の形と分けた形を別の関数に書いて段の関数を 2 か所から呼んだら、WARP で STATUS_STACK_OVERFLOW(0xC00000FD)で落ちた
+  (シェーダーの JIT の見込み。ctest の中では落ちた後に止まったまま 40 分の上限まで GPU の順番を持った)。1 か所から呼ぶ形にして WARP も通った。
 - **段をまたぐ状態は作業場(UAV)か、段の初めに作り直せる groupshared だけ**:
   セルの見立て(⓪。g_cellViews は小刻みの ⑨ まで変わらないので段ごとに読み直す)・赤黒の「汚れた」印(全部を計算し直す = 印で飛ばすのとビット単位で同じ。T-1202)・
   圧力の値(groupshared の形なら段の初めに作業場から読み、終わりに書く。32bit から写すので値は同じ)。
@@ -58,17 +61,22 @@
 | 1000 個・層 4 段・散らばり・多重格子 | 158.975 ms | 163.193 ms | +4.2(+3 %) |
 - 分けた分の費用は主に groupshared の形の圧力の値の写し(段ごとに作業場から読み・書く)。Dispatch とバリアの数(2 → 13)そのものは 1 物で +0.1 ms。
 - **今の場面(groupshared に載る箱)は自動で 1 つの Dispatch のまま**なので、既定の費用もハッシュも変わらない(比べの全部のハッシュが前と同じ形で、分けた形 n = 7 も同じハッシュ)。
-- 段ごとの形で n = 7(上限 1,024 回なら 1 小刻み 147 回の赤黒の Dispatch)にしても、収まった物はすぐ返るので比べは通る(1 刻み 597 回の Dispatch)。
+- 段ごとの形で n = 7(上限 1,024 回なら 1 小刻み 147 回の赤黒の Dispatch)にしても、収まった物はすぐ返るので比べは通る(HW。1 刻み 597 回の Dispatch)。
+  比べの既定は n = 64(1 刻み 73 回)。WARP の `--split-only`(4 つの規則 × 2 + 3 個で 1 セル・n = 64)は全部ビット一致で 707 秒
+  (分けた形の 1 本が 1 つの Dispatch の形の 2〜6 倍。ほかの作業ツリーのビルドと重なる)。ctest の WARP では 2 本だけ(決まった回数・groupshared と
+  収まるまで・作業場、n = 上限 = 区切り 1 つ)にして上限 1,800 秒に収める。区切りをまたぐのは HW の比べ。
 - **未確認**: 1000 個の小さい箱が全部上限に当たると、1 つの Dispatch(1000 グループ)は約 2 s 級になる見込み(3,168 × 4 × 1,024 × 7.1 ns × 1000 ÷ 46)。
   グループの境で横取りできる GPU なら 1 グループの長さ(約 92 ms)だけが TDR に効くので止まらない見込みだが、確かめていない(わざと起こす確かめはしない)。
 
 ## メモ・参考
-- 触った関数(並走の wt3 T-1321 と同じ object_shell_flow.hlsl): OhShellFlowTick を FlowWholeTick・FlowSplitStage と段の関数(SubstepPrepare・PressureSweeps・SubstepFinish・
+- 触った関数(並走の wt3 T-1321 と同じ object_shell_flow.hlsl): OhShellFlowTick を FlowStages(1 つの Dispatch と分けた形の両方)と段の関数(SubstepPrepare・PressureSweeps・SubstepFinish・
   AddSweepStats・AddObjectStats・AddFailures)に分けた。段そのもの(PrepareVoxels〜WakeChanged・Mg*)は触っていない。T-1321 が MgSolveStart・MgCycle を変えても、呼ぶ所は SubstepPrepare の 1 か所。
-- 試験: gpu_object_shell_flow(比べに分けた形 n = 7 を足した: 4 つの規則 × groupshared / 作業場 + 3 個で 1 セル。1 つの Dispatch の形とハッシュが同じ)・
+- 試験: gpu_object_shell_flow(比べに分けた形 n = 64 を足した: 4 つの規則 × groupshared / 作業場 + 3 個で 1 セル。1 つの Dispatch の形とハッシュが同じ。WARP は 2 本)・
   gpu_object_shell_flow_large(新・HW だけ)・測りは `--split auto|whole|split`・`--split-sweeps N`。
 
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-11-12(wt5): 段ごとの Dispatch に分けた形(g_split・FlowSplitStage)。自動 = 一番大きい箱 × 上限 × 4 が 2^25 を超える時だけ。HW で比べの全部(分けた形 n = 7 のハッシュが 1 つの Dispatch と同じ)・
   gpu_object_shell_flow_large(12 万ボクセル・決まった 1,024 回・CPU とビット一致・一番長い Dispatch 327 ms)・object_shell 合格。12 万ボクセルの「収まるまで」も止まらず 1 刻み 3.58 s。
   費用: 今の場面は自動で変わらない。強制で分けると groupshared の 46 個で +15 %・1000 個 層 4 段で +8 %。
+- 2026-11-12(wt5・2): WARP の ctest が 40 分止まった = STATUS_STACK_OVERFLOW(段の関数を 2 か所から呼んでシェーダーが倍の長さ)。FlowStages の 1 か所から呼ぶ形に直し、
+  比べの分けた形を n = 7 → 64・WARP は 2 本に。`--split-only` を足した(HW 合格・WARP 全部 707 秒で合格)。

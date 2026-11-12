@@ -1361,12 +1361,7 @@ ShellBox ShellBoxOf(OhObject object, uint32_t objectIndex) {
     return box;
 }
 
-// 圧力の値を作業場(層の状態)と groupshared の間で写す(groupshared の形だけ)
-void LoadSharedPotential(OhObject object, ShellBox box, uint32_t thread) {
-    for (uint32_t v = thread; v < object.voxelCount; v += OH_SHELL_THREADS)
-        gs_potential[v] = (int32_t)g_voxelWork[box.begin + v].potential;
-}
-
+// 圧力の値を groupshared から作業場(層の状態)へ写す(groupshared の形だけ)
 void StoreSharedPotential(OhObject object, ShellBox box, uint32_t thread) {
     for (uint32_t v = thread; v < object.voxelCount; v += OH_SHELL_THREADS)
         g_voxelWork[box.begin + v].potential = gs_potential[v];
@@ -1496,116 +1491,102 @@ uint32_t GroupFailures() {
     return (gs_failed != 0 ? OH_SPLIT_FAILED : 0u) | (gs_overflow != 0 ? OH_SPLIT_OVERFLOW : 0u);
 }
 
-// 1 刻みを 1 つの Dispatch で(既定)
-void FlowWholeTick(GpuShellTable table, GpuShellGases gases, OhObject object, uint32_t objectIndex, ShellBox box,
-                   uint32_t thread, uint64_t tick, uint32_t pass, uint64_t gravity) {
-    // 温めた始まり: 圧力の値を作業場(層の状態)から groupshared へ
-    const bool warmStart = (g_pressureMode & OH_PRESSURE_WARM_START) != 0;
-    for (uint32_t v = thread; v < object.voxelCount; v += OH_SHELL_THREADS)
-        g_voxelWork[box.begin + v].changed = 0;
-
-    if (warmStart && g_sharedPotential != 0)
-        LoadSharedPotential(object, box, thread);
-
-    const bool untilQuiet = (g_pressureMode & OH_PRESSURE_UNTIL_QUIET) != 0;
-    const uint32_t sweepLimit = (g_stageMask & OH_STAGE_PRESSURE) != 0 ? g_pressureSweeps : 0u;
-    uint32_t sweepsUsed = 0;
-    uint32_t mostSweeps = 0;
-    uint32_t capped = 0;
-    for (uint32_t substep = 0; substep < g_substeps; ++substep) {
-        SubstepPrepare(table, gases, box, thread, objectIndex, gravity);
-        bool quiet;
-        const uint32_t used = PressureSweeps(box, thread, sweepLimit, quiet);
-        sweepsUsed += used;
-        mostSweeps = max(mostSweeps, used);
-        capped += untilQuiet && !quiet ? 1u : 0u;
-        SubstepFinish(table, gases, object, box, thread, objectIndex);
-    }
-
-    // 温めた始まり: 圧力の値を作業場(層の状態)へ戻す
-    if (warmStart && g_sharedPotential != 0)
-        StoreSharedPotential(object, box, thread);
-
-    if ((g_stageMask & OH_STAGE_WAKE) != 0)
-        WakeChanged(object, box, thread, tick, pass);
-
-    if (thread != 0)
-        return;
-
-    AddSweepStats(g_substeps, sweepsUsed, mostSweeps, capped);
-    AddObjectStats(objectIndex);
-    AddFailures(GroupFailures());
-}
-
-// 段ごとの Dispatch に分けた刻みの 1 段(T-1350)。段をまたぐ状態は作業場(UAV)に置き、groupshared は段の初めに作り直す:
-// セルの見立て(⓪。g_cellViews は小刻みの ⑨ まで変わらない)・赤黒の印(全部を計算し直す)・圧力の値(groupshared の形なら作業場から)。
-// 赤黒の続きの回数と収まったかは g_stats の後ろの作業場に。数え上げは足し算と最大なので段ごとに足す(失敗の印だけは刻みの終わりに 1 回)
-void FlowSplitStage(GpuShellTable table, GpuShellGases gases, OhObject object, uint32_t objectIndex, ShellBox box,
-                    uint32_t thread, uint64_t tick, uint32_t pass, uint64_t gravity) {
+// 1 刻み(OH_SPLIT_WHOLE)か、段ごとの Dispatch に分けた刻みの 1 段(T-1350)。どちらも同じ段の関数を 1 か所から呼ぶ
+// (1 つの Dispatch の形と分けた形で段の関数を 2 回ずつ書くと、シェーダーが倍の長さになり WARP の JIT がスタックを溢れさせた)。
+// 分けた形: 段をまたぐ状態は作業場(UAV)に置き、groupshared は段の初めに作り直す — セルの見立て(⓪。g_cellViews は小刻みの ⑨ まで
+// 変わらないので段ごとに読み直す)・赤黒の印(全部を計算し直す = 印で飛ばすのとビット単位で同じ。T-1202)・圧力の値(groupshared の形なら
+// 段の初めに作業場から読み、終わりに書く)。赤黒の続きの回数と収まったかは g_stats の後ろの作業場に。数え上げは足し算と最大なので段ごとに
+// 足す(失敗の印だけは刻みの終わりに 1 回)
+void FlowStages(GpuShellTable table, GpuShellGases gases, OhObject object, uint32_t objectIndex, ShellBox box,
+                uint32_t thread, uint64_t tick, uint32_t pass, uint64_t gravity) {
     const uint32_t phase = SplitPhase();
-    const uint32_t substep = SplitSubstep();
+    const bool whole = phase == OH_SPLIT_WHOLE;
     const uint32_t scratch = SplitScratch(objectIndex);
     const bool untilQuiet = (g_pressureMode & OH_PRESSURE_UNTIL_QUIET) != 0;
     const uint32_t sweepLimit = (g_stageMask & OH_STAGE_PRESSURE) != 0 ? g_pressureSweeps : 0u;
-    // 赤黒の続き(全スレッドが同じ値を読む。書くのは終わりの同期の後の 1 スレッドだけ)
-    const uint32_t usedBefore = g_stats[scratch + 0];
-    const bool quietBefore = g_stats[scratch + 1] != 0;
+    // 赤黒の続き(分けた形だけ。全スレッドが同じ値を読む。書くのは終わりの同期の後の 1 スレッドだけ)
+    const uint32_t usedBefore = whole ? 0u : g_stats[scratch + 0];
+    const bool quietBefore = !whole && g_stats[scratch + 1] != 0;
     if (phase == OH_SPLIT_SWEEPS && (quietBefore || usedBefore >= sweepLimit))
         return;
 
-    if (phase == OH_SPLIT_PREPARE && substep == 0) {
-        for (uint32_t v = thread; v < object.voxelCount; v += OH_SHELL_THREADS)
+    const uint32_t first = whole ? 0u : SplitSubstep();
+    const uint32_t last = whole ? g_substeps : first + 1;
+    const bool tickBegins = whole || (phase == OH_SPLIT_PREPARE && first == 0);
+    const bool tickEnds = whole || (phase == OH_SPLIT_FINISH && last == g_substeps);
+    // 圧力の値の groupshared と作業場の写し: 1 つの Dispatch なら温めた始まりの時だけ刻みの初めと終わりに、分けた形は段ごとに
+    const bool warmStart = (g_pressureMode & OH_PRESSURE_WARM_START) != 0;
+    const bool carryShared = g_sharedPotential != 0 && (warmStart || !whole);
+    for (uint32_t v = thread; v < object.voxelCount; v += OH_SHELL_THREADS) {
+        if (tickBegins)
             g_voxelWork[box.begin + v].changed = 0;
+
+        if (carryShared)
+            gs_potential[v] = (int32_t)g_voxelWork[box.begin + v].potential;
     }
 
-    if (g_sharedPotential != 0)
-        LoadSharedPotential(object, box, thread);
-
-    uint32_t used = 0;
+    const bool doPrepare = whole || phase == OH_SPLIT_PREPARE;
+    const bool doSweeps = whole || phase == OH_SPLIT_SWEEPS;
+    const bool doFinish = whole || phase == OH_SPLIT_FINISH;
+    const uint32_t sweepCount = whole ? sweepLimit : min(SplitSweeps(), sweepLimit - usedBefore);
+    uint32_t sweepsUsed = 0;
+    uint32_t mostSweeps = 0;
+    uint32_t capped = 0;
     bool quiet = false;
-    if (phase == OH_SPLIT_PREPARE) {
-        SubstepPrepare(table, gases, box, thread, objectIndex, gravity);
-    } else if (phase == OH_SPLIT_SWEEPS) {
-        if (thread == 0)
+    for (uint32_t substep = first; substep < last; ++substep) {
+        if (doPrepare)
+            SubstepPrepare(table, gases, box, thread, objectIndex, gravity);
+        else if (thread == 0)
             PrepareCell(table, gases, g_cellViews[objectIndex]);
 
-        ResetPressureMarks(thread);
-        AllMemoryBarrierWithGroupSync();
-        used = PressureSweeps(box, thread, min(SplitSweeps(), sweepLimit - usedBefore), quiet);
-    } else {
-        if (thread == 0)
-            PrepareCell(table, gases, g_cellViews[objectIndex]);
+        if (doSweeps) {
+            if (!whole) {
+                ResetPressureMarks(thread);
+                AllMemoryBarrierWithGroupSync();
+            }
 
-        SubstepFinish(table, gases, object, box, thread, objectIndex);
+            const uint32_t used = PressureSweeps(box, thread, sweepCount, quiet);
+            sweepsUsed += used;
+            mostSweeps = max(mostSweeps, used);
+            capped += untilQuiet && !quiet ? 1u : 0u;
+        }
+
+        if (doFinish)
+            SubstepFinish(table, gases, object, box, thread, objectIndex);
     }
 
     AllMemoryBarrierWithGroupSync();
-    if (g_sharedPotential != 0)
+    if (carryShared)
         StoreSharedPotential(object, box, thread);
 
-    const bool lastFinish = phase == OH_SPLIT_FINISH && substep + 1 == g_substeps;
-    if (lastFinish && (g_stageMask & OH_STAGE_WAKE) != 0)
+    if (tickEnds && (g_stageMask & OH_STAGE_WAKE) != 0)
         WakeChanged(object, box, thread, tick, pass);
 
     if (thread != 0)
         return;
 
-    // 失敗の印は刻みの間ためて、最後の段で 1 回だけ数える(1 つの Dispatch の形と同じ数)
+    AddObjectStats(objectIndex);
+    if (whole) {
+        AddSweepStats(g_substeps, sweepsUsed, mostSweeps, capped);
+        AddFailures(GroupFailures());
+        return;
+    }
+
+    // 分けた形: 失敗の印は刻みの間ためて、最後の段で 1 回だけ数える(1 つの Dispatch の形と同じ数)
     uint32_t failures = 0;
     InterlockedOr(g_stats[scratch + 2], GroupFailures(), failures);
     failures |= GroupFailures();
-    AddObjectStats(objectIndex);
     if (phase == OH_SPLIT_PREPARE) {
         g_stats[scratch + 0] = 0;
         g_stats[scratch + 1] = 0;
     } else if (phase == OH_SPLIT_SWEEPS) {
-        g_stats[scratch + 0] = usedBefore + used;
+        g_stats[scratch + 0] = usedBefore + sweepsUsed;
         g_stats[scratch + 1] = quiet ? 1u : 0u;
     } else {
         AddSweepStats(1, usedBefore, usedBefore, untilQuiet && !quietBefore ? 1u : 0u);
     }
 
-    if (!lastFinish)
+    if (!tickEnds)
         return;
 
     AddFailures(failures);
@@ -1644,10 +1625,7 @@ void FlowSplitStage(GpuShellTable table, GpuShellGases gases, OhObject object, u
         gs_overflow = 0;
     }
 
-    if (SplitPhase() == OH_SPLIT_WHOLE)
-        FlowWholeTick(table, gases, object, objectIndex, box, thread, tick, pass, gravity);
-    else
-        FlowSplitStage(table, gases, object, objectIndex, box, thread, tick, pass, gravity);
+    FlowStages(table, gases, object, objectIndex, box, thread, tick, pass, gravity);
 }
 
 // --- 集めて書く段(ADR-0500 の 3・T-1332): セル 1 つ = 1 スレッド。OhShellFlowTick の後(バリアを挟む)---

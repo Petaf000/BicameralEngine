@@ -86,7 +86,7 @@ namespace {
     constexpr uint32_t SPLIT_SWEEPS_MAX = (1u << 24) - 1;  // g_split の上の 24 bit
     constexpr uint32_t DISPATCH_TIMESTAMPS = 1024;  // 1 つ目の刻みの Dispatch ごとの時刻(一番長い Dispatch を出す)
     // 比べの分けた形の 1 つの Dispatch の赤黒の回数(赤黒は平均 69・一番多い 334 回なので、収まるのは区切りの途中にも後の区切りにもなる)。
-    // 小さくすると 1 刻みの Dispatch が増える(上限 1,024 ÷ n × 4)。WARP は Dispatch 1 回が重く、n = 7(597 回 / 刻み)では 1 本の試験が 40 分を超えた(T-1350)
+    // 小さくすると 1 刻みの Dispatch が増える(上限 1,024 ÷ n × 4)
     constexpr uint32_t COMPARE_SPLIT_SWEEPS = 64;
 
     // 段の印(object_shell_flow.hlsl の OH_STAGE_*。1 つずつだけ回して費用を分ける。T-1223)
@@ -711,6 +711,7 @@ namespace {
         // --- 1 刻みの Dispatch の形(--split・--split-sweeps。T-1350)---
         SplitMode split = SplitMode::Auto;
         uint32_t splitSweeps = 0;
+        bool warp = false;  // WARP は Dispatch 1 回が重い(分けた形の比べを軽くする。T-1350)
     };
 
     const char* SplitName(const Gpu& gpuState) {
@@ -865,8 +866,16 @@ namespace {
         Context split = context;
         split.split = SplitMode::Split;
         split.splitSweeps = context.splitSweeps != 0 ? context.splitSweeps : COMPARE_SPLIT_SWEEPS;
+        // WARP: 分けた形の 1 本が 1 つの Dispatch の形の 2〜6 倍かかる(1 刻み 13〜73 回の Dispatch。WARP の試験の上限 1,800 秒に収めるため)ので、
+        // 決まった回数(groupshared)と収まるまで(作業場・区切り 1 つの中で収まる)の 2 本だけ。区切りをまたぐのは HW で確かめる
+        if (context.warp)
+            split.splitSweeps = context.splitSweeps != 0 ? context.splitSweeps : SPLIT_SWEEPS_MAX;
+
         for (size_t r = 0; r < rules.size(); ++r) {
             for (const bool sharedPotential : {true, false}) {
+                if (context.warp && (r > 1 || sharedPotential != (r == 0)))
+                    continue;
+
                 const auto compared = RunCompare(split, shape, sharedPotential, rules[r]);
                 if (!compared)
                     return std::unexpected(
@@ -879,6 +888,9 @@ namespace {
                                     shape.name, rules[r].name, *compared, whole));
             }
         }
+
+        if (context.warp)
+            return {};
 
         // 1 つのセルに物が 3 個(集めて書く段と一緒に)
         const CompareScene scene{.copies = 7, .objectsPerCell = 3, .vary = true};
@@ -1286,7 +1298,8 @@ namespace {
                               .warmTicks = warmTicks,
                               .measureTicks = measureTicks,
                               .split = split,
-                              .splitSweeps = splitSweeps};
+                              .splitSweeps = splitSweeps,
+                              .warp = options->adapter == gpu::AdapterKind::Warp};
         if (compare) {
             const std::array<Shape, 2> shapes = {Shape{"紙 24 列・層 2 段", 24, 3, 2},
                                                  Shape{"紙 24 列・層 4 段", 24, 3, 4}};
