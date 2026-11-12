@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "common/multires_layers.hlsli"
+#include "common/multires_wide.hlsli"
 #include "core/log.h"
 #include "core/singleton.h"
 #include "gpu/debug_ring.h"
@@ -813,7 +814,7 @@ namespace {
 
     // 溢れの世界の鎖の要求(gpu_multires_test の RefineWideRequests の点: 根の八分の一 2 の中の 2 段)。
     // WIDE_REFINE_TICK に 2 段を 1 つの要求で細かくし、WIDE_COARSEN_TICK から 1 刻み 1 段ずつ粗くする。
-    // 9 段の鎖(test::MultiresScenario::Real)は溢れを使う世界で層なしでも刻み 10 に食い違った(T-1240 で分けた残り: T-1341)
+    // 9 段の鎖(test::MultiresScenario::Real)は RunWideDeepChain(T-1341。既定の溢れの塊の置き場では足りないので大きくする)
     constexpr uint64_t WIDE_REFINE_TICK = 3;
     constexpr uint64_t WIDE_COARSEN_TICK = 8;
     constexpr uint64_t WIDE_TICKS = 12;
@@ -892,6 +893,138 @@ namespace {
 
         Log(Channel::Gpu, Level::Info, "{}: {} 刻み毎回一致(層の和 {} → {}・層のある頁 最大 {})", scene, WIDE_TICKS,
             firstSum, RootLayerSum(cpu), mostLayered);
+
+        return {};
+    }
+
+    // --- 溢れを使う世界の 9 段の鎖(T-1341): test::MultiresScenario::Real の鎖(9 段を 1 つの要求で・1 刻み 1 段ずつ粗くする)を
+    //     毎刻み比べる。食い違ったら数える器と溢れの塊の置き場を書く。
+    //     溢れの塊の置き場は既定(GpuMultiresOptions::wideChunks = 0 → 170 塊)では足りない: 鎖の 9 頁と根の全部のセルが 13 種
+    //     (溢れ 5 = 1 面 9 塊)になり、頁は両面の塊を持つので 10 頁 × 2 面 × 9 塊 = 180 塊 > 170。GPU は配れなかった頁を
+    //     待たせて数え(MR_COUNTER_LIMIT_PRODUCTS。T-0236)、上限の無い CPU と刻み 10 に食い違った。細かくする段の誤りではない。
+    //     ここでは置き場を「全部の頁の両面が表の物質を全部持てる分」にして、待たせない世界で比べる ---
+
+    // 9 段の鎖の要求(test::MultiresScenario::Real と同じ点・同じ 9 段を 1 つの要求で。WARP の時間に収めるため、細かくする前と
+    // 細かいままの刻みを縮めた: DEEP_REFINE_TICK に細かくし、DEEP_COARSEN_TICK から 1 刻み 1 段ずつ粗くして戻す)
+    constexpr uint64_t DEEP_REFINE_TICK = 2;
+    constexpr uint64_t DEEP_COARSEN_TICK = 6;
+    constexpr uint64_t DEEP_TICKS = DEEP_COARSEN_TICK + test::MULTIRES_LEVELS + 1;
+
+    std::vector<MrRequest> DeepChainRequestsAt(uint64_t tick) {
+        const sim::MultiresPoint point = test::MakeMultiresPoint(test::MULTIRES_LEVELS);
+        if (tick == DEEP_REFINE_TICK)
+            return {test::MakeMultiresRequest(MR_REQUEST_REFINE, point, point.level)};
+
+        if (tick >= DEEP_COARSEN_TICK && tick < DEEP_COARSEN_TICK + test::MULTIRES_LEVELS) {
+            const auto level = static_cast<int32_t>(test::MULTIRES_LEVELS - (tick - DEEP_COARSEN_TICK));
+            return {test::MakeMultiresRequest(MR_REQUEST_COARSEN, point, level)};
+        }
+
+        return {};
+    }
+
+    // 全部の頁の両面が表の物質を全部(溢れ = 表の物質 − インライン)持てる塊の数(待たせない置き場)
+    uint32_t WideChainChunks(const sim::MultiresNest& nest, const sim::BakedReactionTable& table) {
+        const auto species = std::min(static_cast<uint32_t>(table.species.size()), RX_GPU_WIDE_SPECIES);
+
+        return nest.capacity.pages * 2 * MrWideChunksFor(MR_BLOCK_CELLS * (species - RX_MAX_CELL_SPECIES));
+    }
+
+    // レベル level の本物のブロックのセルの成分の最大(溢れを含む)
+    uint32_t MostSpeciesAtLevel(const sim::MultiresNest& nest, int32_t level) {
+        uint32_t most = 0;
+        for (uint32_t slot = 0; slot < nest.capacity.worldBlocks; ++slot) {
+            const MrBlock& block = nest.blocks[slot];
+            if (block.kind != MR_BLOCK_REAL || block.level != level)
+                continue;
+
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index)
+                most = std::max(most, sim::LoadWideNestCell(nest, slot, index).speciesCount);
+        }
+
+        return most;
+    }
+
+    // CPU の木の頁が今の溢れ(1 面)に要る塊の和(GPU の置き場の両面の目安は × 2)
+    uint32_t CpuWideChunkNeed(const sim::MultiresNest& nest) {
+        uint32_t chunks = 0;
+        for (uint32_t slot = 0; slot < nest.capacity.worldBlocks + nest.capacity.observerBlocks; ++slot) {
+            const MrBlock& block = nest.blocks[slot];
+            if (block.kind == MR_BLOCK_UNUSED || MrIsUniform(block))
+                continue;
+
+            uint32_t entries = 0;
+            for (uint32_t index = 0; index < MR_BLOCK_CELLS; ++index) {
+                const uint32_t species = sim::LoadWideNestCell(nest, slot, index).speciesCount;
+                entries += species > RX_MAX_CELL_SPECIES ? species - RX_MAX_CELL_SPECIES : 0u;
+            }
+
+            chunks += MrWideChunksFor(entries);
+        }
+
+        return chunks;
+    }
+
+    std::string DescribeWideCounters(const sim::MultiresNest& cpu, const sim::MultiresNest& read,
+                                     const sim::GpuMultires& gpu) {
+        std::string text;
+        for (uint32_t i = 0; i < MR_COUNTER_COUNT; ++i) {
+            if (cpu.counters[i] != read.counters[i])
+                text += std::format("器 {} cpu {} / gpu {}・", i, cpu.counters[i], read.counters[i]);
+        }
+
+        if (const auto use = gpu.ReadWideChunkUse(); use)
+            text += std::format("塊 全部 {}・空き {}・頁 {}・端数 {}・一様 {}", use->capacity, use->freeChunks,
+                                use->pageChunks, use->fractionChunks, use->uniformChunks);
+
+        return text + std::format("・CPU の頁の 1 面に要る塊 {}", CpuWideChunkNeed(cpu));
+    }
+
+    std::expected<void, std::string> RunWideDeepChain(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                      gpu::DebugRing& ring, const sim::BakedReactionTable& table,
+                                                      bool paged, bool layered) {
+        sim::MultiresNest cpu = MakeWideImageRoot(table, layered ? 3 : WIDE_NO_LAYERS, paged, true);
+        sim::GpuMultiresOptions options = WideOptions();
+        options.wideChunks = WideChainChunks(cpu, table);
+        auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, options);
+        if (!gpu)
+            return std::unexpected(gpu.error());
+
+        const std::string scene = std::format("溢れの世界の 9 段の鎖({}・{}・塊 {})", paged ? "頁" : "一様の枠",
+                                              layered ? "層あり" : "層なし", options.wideChunks);
+        const uint64_t firstSum = RootLayerSum(cpu);
+        uint32_t mostNeed = 0;
+        uint32_t deepest = 0;
+        for (uint64_t tick = 0; tick < DEEP_TICKS; ++tick) {
+            const std::vector<MrRequest> requests = DeepChainRequestsAt(tick);
+            const auto record = [&](ID3D12GraphicsCommandList10* list) {
+                if (tick == 0 && !gpu->RecordUpload(list, cpu))
+                    return false;
+
+                return RecordWideTick(list, *gpu, ring.GpuAddress(), requests, tick);
+            };
+            auto read = Execute(queue, ring, *gpu, record);
+            if (!read)
+                return std::unexpected(std::format("{} 刻み {}: {}", scene, tick, read.error()));
+
+            StepWideCpu(cpu, table, requests, tick);
+            mostNeed = std::max(mostNeed, CpuWideChunkNeed(cpu));
+            deepest = std::max(deepest, MostSpeciesAtLevel(cpu, static_cast<int32_t>(test::MULTIRES_LEVELS)));
+            if (auto compared = Compare(cpu, *read, std::format("{} 刻み {}", scene, tick)); !compared)
+                return std::unexpected(std::format("{}({}・{})", compared.error(), DescribeWideDifference(cpu, *read),
+                                                   DescribeWideCounters(cpu, *read, *gpu)));
+
+            if (gpu->ReadLayerShortage() != 0u)
+                return std::unexpected(std::format("{} 刻み {}: 足りるはずの層の頁が尽きた", scene, tick));
+        }
+
+        // 最も細かい段(9)のセルが溢れを持った(試験が溢れの鎖を通った)
+        if (deepest <= RX_MAX_CELL_SPECIES)
+            return std::unexpected(std::format("{}: 段 9 のセルの成分が {}(溢れの鎖になっていない)", scene, deepest));
+
+        Log(Channel::Gpu, Level::Info,
+            "{}: {} 刻み毎回一致(段 9 の成分 最大 {}・頁の 1 面に要る塊 最大 {}・層の和 {} → {})", scene, DEEP_TICKS,
+            deepest, mostNeed, firstSum, RootLayerSum(cpu));
 
         return {};
     }
@@ -1084,6 +1217,12 @@ namespace {
 
         if (auto wide = TestWideImage(*limits); !wide)
             return wide;
+
+        // 9 段の鎖(T-1341): 層なしの頁・層のある頁・層のある一様の枠
+        for (const auto& [paged, layered] : {std::pair{true, false}, std::pair{true, true}, std::pair{false, true}}) {
+            if (auto deep = RunWideDeepChain(device, queue, ring, *limits, paged, layered); !deep)
+                return deep;
+        }
 
         // 層を使わない溢れの世界(層の段を通らない = 前と同じ)→ 層のある溢れの世界(頁・一様の枠)
         for (const auto& [paged, layered] : {std::pair{true, false}, std::pair{true, true}, std::pair{false, true}}) {
