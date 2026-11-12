@@ -1,6 +1,6 @@
 # T-1252 登録に「配り手」と「寿命」・粗くする時のセルの配りの口・集めて書く段(土台。段 1 CPU / 段 2 GPU。ADR-0500 改訂)
 
-- Status: In Progress(段 1 CPU の主な形は済み・2026-10-29 本体の作業役 18 回目。ブランチ t-1252-registry-owner。残りは下の「段 1 の残り」と段 2)
+- Status: In Progress(2026-11-12 wt6: 段 2 の 1 段目 = GPU の欄の頁の置き場の並びと集めて書く段の Compute が CPU と頁の番号までビット一致〔ブランチ t-1252-registry-owner-gpu・ADR-0532〕。木の段への載せは下の「段 2 の残り」。段 1 CPU の主な形は済み・2026-10-29 本体の作業役 18 回目)
 - 種類: 工学(土台の共通部分。並走の作業役は自分の都合で広げない = CLAUDE.md §1 の 9)
 - PC: 必須
 - 見積もり: チャット 2〜4 回分(段 1 CPU 1〜2 / 段 2 GPU 1〜2)
@@ -62,6 +62,37 @@
   光の配り(面の側の子だけ)は一様な親でも子ごとに違うので、T-1227 では「配り手の欄が 0 でない一様な親は細かくする前に頁に広げる」が要る(CoarsenKeepsUniform と同じ控えめの形)。T-1227 で足す。
 - 頁の予算は欄ごと(MultiresFieldStore::pageBudget。状態に入らない。0 = 決めない = 今まで通り)。世界の作りでどう決めるかは使い手(T-1227)。
 
+## 段 2 の 1 段目(2026-11-12 wt6 作業役。ブランチ t-1252-registry-owner-gpu。ADR-0532)
+- **入った**: `shaders/common/multires_field_pages.hlsli`(欄 1 つの GPU の置き場 = [頭 12 語][pageOf × セルの頁][空きのスタック × 容量][頁 × 512 × 値の数 × 2 語]・
+  作業の並び [blockOf][枠ごとの段の結果][値]・頁の番号の取り方 MfPagesAvailable / MfTakesFreePage / MfFreePosition / MfFreshPage)/
+  `shaders/sim/multires_field_gather.hlsl`(GatherMark → GatherAssign〔1 グループ・枠の順の塊ごとのプレフィックス和〕→ GatherWrite)/
+  `engine/src/sim/gpu_multires_fields.{h,cpp}`(CPU の置き場・作業 ⇔ GPU の像。疎の欄だけ・密は断る)/ 試験 `gpu_field_gather`・`gpu_field_gather_warp`。
+- **頁の番号の決め(ADR-0532 の 2)**: 1 つの段の中で頁の要る所を決まった順に並べ、k 番目は空きのスタックの上から k 番目・その後は高さ + (k − 空きの数)。
+  = CPU の EnsurePage を同じ順に呼んだ番号(CPU は変えていない)。取れる数 = min(容量, 予算)− 使っている数。CPU の freePages の並び・使った高さ・空きの頁の古い値まで像に写す。
+- **試験(release・RTX 3070 Ti / WARP。各 1 秒未満)**: A 空きのスタック [1, 3] のある置き場に頁を持つ枠 1・持たない枠 4(12 値・同じセルへ 2 回)→ 書いた 5・取った 4(空きから 2・高さの上 2)/
+  B 予算 = 使っている数 + 2 → 取った 2・尽きた 2(作業に残る)/ C 根 700 個(枠 708・1 スレッドの塊 2)に乱数 → 書いた 290・取った 229 /
+  D 一様な枠 2 つへ足す → GPU の印(WANTED)が CPU の広げた枠と同じ。A〜C は pageOf・空きのスタック・使った高さ・頁の値・作業の残り・報告の数が CPU とビット一致。
+  ほか: field_owner・dxil_alloca_check(古い phase_layer_faces.asm を _to_delete へ移してから)合格・release 警告 0・archmap --check OK。
+- **新しい印の欄が無い世界**: sim/gpu_multires の段は 1 行も変えていない(この段はまだ GpuMultires から呼ばない)= gpu_multires・gpu_lab_box・gpu_tree_refine_placement は流していない(変えた道が無い)。
+
+## 段 2 の残り(次の作業役へ。この順)
+1. **【印】木の段の頁の取り方を CPU と揃える(ADR-0532 の 3。土台の共通部分 = nest_fields の変更なので司令塔の確かめが先)**:
+   CPU は要求ごとに「親の頁を取る → 子の頁を返す」が交互(次の要求が返した頁を使う)。GPU の木の段は段ごとに全部の要求を並べるので、
+   一旦の形 = CPU の nest_fields も木の 1 回の処理の中で「取る」を段の順(細かくする鎖・粗くする・広げる)に要求の順で・「返す」を処理の終わりに枠の順で。
+   配り手の欄は「頁が要るか」を値を作る前に決める(細かくする子 = 親の八分の一に 0 でない値がある・粗くする親 = 子に 0 でない値がある。全部 0 の頁は眠る判定の ReleaseZeroPages)。
+   値と状態の要約(ハッシュ)は変わらない(頁の番号と空きの並び・MeasureNestFields のバイトだけ)。field_owner に「頁の像が段の順の取り方と同じ」を足す。
+2. **GpuMultires に置き場を持たせる**: 配り手の欄・この刻みだけの欄(疎のセルの欄)を 1 つのバッファに並べる(欄ごとの始まりの語の表を頭に)。RecordUpload / Read で MakeGpuFieldImage / ApplyGpuFieldImage。
+   **結ぶ口 = u5**(木の段は u4 = 層の置き場だけを使い、u5・g_external2・g_external3 は空いている。BindLayers で u5 = 欄の置き場・g_external2 = 欄の数)。ルート署名の語は増えない(64/64 のまま)。
+   一様の値(枠 × 値の数)を置き場の並びに足す(配り手の一様の配り SfOwnerRefineUniform・CoarsenKeepsUniform の配り手の比べが読む)。
+3. **粗くする段のセルの配りの口**: multires_graph.hlsl の CoarsenRequest(811 行あたり)の一般の段の後に SfOwnerCoarsen(owner の分かれ = T-0397)。保存量の余りは世界の帳簿の「粗くした端数・出」の列へ(CPU の CoarsenOwners)。
+   一様な親で配り手が一様のまま粗くならない時は TreeResolve の pageNeed(層の CoarsenKeepsUniformLayers と同じ所)。相の層の配り(セルを読む)は T-1231 の GPU。
+4. **細かくする側**: RefineLevel の置かれ方の段(ADR-0499)の後に SfOwnerRefineChild / SfOwnerRefineUniform・親の八分の一を 0 に。影は RefineShadow・引き戻しは SfOwnerPullBackChild。
+   wt2 の T-1323 が同じ木の段(RecordExpandPass・反応の段・層を合わせる段)を触るので、足す場所(RefineLevel の層の配りの後)を T-1323 のチケットと突き合わせる。
+5. **集めて書く段を GpuMultires の段に**: 印の段の WANTED → TreeExpand(物の熱の OhNestMarkExpand と同じ形)で広げてから印・取る・書くを回す。書いた枠をつつく(CPU の PokeBlock)。
+   枠ごとの (頁, 種類) は g_blocks から読む(今の試験の t0 の 2 語の代わり)。広げる時の欄の頁(一様の値が 0 でない配り手の欄)も同じ取り方で(CPU の ExpandWantedPages の順)。
+6. 試験: field_owner の場面(配り手の往復・影・この刻みだけ)を GPU の木で・pageOf まで CPU とビット一致(HW・WARP)/ 新しい印の欄が無い世界は今とビット一致(gpu_multires・gpu_lab_box・gpu_tree_refine_placement)。
+- 量の見込み: チャット 2〜3 回(未確認)。1 の決めが先(番号の揃え方が木の段の作りを決める)。
+
 ## 作業ログ(チャットごとに 3〜5 行、新しいものを下に)
 - 2026-10-29(本体 16 回目・設計): ADR-0500 の改訂で作った。
 - 2026-10-29(本体 18 回目・段 1): 登録の印 2 つ・配り手の表(試験用 1 つ)・セルの配りの口(細かく/粗く・影)・集めて書く段・この刻みだけの読む口と境目の検査・SF_MAX_COMPONENTS 12 を CPU に。
@@ -73,3 +104,5 @@
 - 2026-10-29(本体 18 回目・マージ): warm_start_save の落ちはこの仕事のせいではなかった。原因は T-1206(440ddf8b。固定した面を面の点の形に)で、その後は保存点 20 の刻みで持つ向きを捨てても答えが変わらない(試験が弱くなった)。main の 8f483c47 で試験の保存点を 10 に(2・5・10・15 では捨てるとずれる)。
   rebase main(NEXT・perf の衝突は両方残した)→ release ビルド警告 0 → field_owner・multires・multires_state・multires_sparse・field_storage・placement_refine・tree_refine_placement・multires_uniform・window_lab・warm_start_save・float_check 5 本 合格・archmap --check OK → main へ --no-ff。
   **段 1 の残り**(セルの真実を書く道を 1 つにまとめて busyTick を書く所)は T-1228 段 2 と一緒に(段 2 の GPU は wt2)。Status は段 1 の主な形が main に入った状態のまま In Progress。
+- 2026-11-12(wt6 作業役・段 2 の 1 段目): GPU の欄の頁の置き場の並び・集めて書く段の Compute・CPU ⇔ GPU の像(ADR-0532)。gpu_field_gather(HW・WARP)で頁の番号・空きのスタックまで CPU とビット一致。
+  木の段への載せは「段 2 の残り」(1 は印 = CPU の頁を返す順の変更の確かめが先)。GpuMultires は変えていない。
