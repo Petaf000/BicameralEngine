@@ -1,6 +1,6 @@
 # T-1252 登録に「配り手」と「寿命」・粗くする時のセルの配りの口・集めて書く段(土台。段 1 CPU / 段 2 GPU。ADR-0500 改訂)
 
-- Status: In Progress(2026-11-12 wt6: 段 2 の 1 段目 = GPU の欄の頁の置き場の並びと集めて書く段の Compute が CPU と頁の番号までビット一致〔ブランチ t-1252-registry-owner-gpu・ADR-0532〕。木の段への載せは下の「段 2 の残り」。段 1 CPU の主な形は済み・2026-10-29 本体の作業役 18 回目)
+- Status: In Progress(2026-11-12 wt6: 段 2 の 3 本目 = GPU の世界の欄の区画まで〔t-1252-tree-gpu-2〕。段 2 の 1 段目 = GPU の欄の頁の置き場の並びと集めて書く段の Compute が CPU と頁の番号までビット一致〔ブランチ t-1252-registry-owner-gpu・ADR-0532〕。木の段への載せは下の「段 2 の残り」。段 1 CPU の主な形は済み・2026-10-29 本体の作業役 18 回目)
 - 種類: 工学(土台の共通部分。並走の作業役は自分の都合で広げない = CLAUDE.md §1 の 9)
 - PC: 必須
 - 見積もり: チャット 2〜4 回分(段 1 CPU 1〜2 / 段 2 GPU 1〜2)
@@ -153,3 +153,6 @@
 - 2026-11-12(wt6 作業役・段 2 の 2 本目): 段 2 の残りの 1(CPU の配り手の欄の頁を割り当ての段で取る・解放の段で返す)を t-1252-tree-gpu に。ADR-0532 に司令塔の受け取りと入った形。
   試験(release 警告 0): field_owner(番号の試験を足した)・multires・multires_state・multires_sparse・field_storage・placement_refine・tree_refine_placement・multires_uniform・multires_layers・
   multires_activity・window_lab・phase_layer_world・warm_start_save 合格。2(GpuMultires に置き場)以降は次の作業役へ(上の「段 2 の 2 本目」の T-1323 との突き合わせを先に読む)。
+- 2026-11-12(wt6 作業役・段 2 の 3 本目): GPU の世界の欄の区画(u4 の層の置き場の後ろ・g_external2/3。ADR-0532 の 5)を t-1252-tree-gpu-2 に。rebase main(50a6cad6 = T-1323 の後。gpu_multires.h の衝突は両方残した)。
+  試験(release 警告 0。rebase の後): gpu_field_region・gpu_field_region_warp(新)・gpu_multires・gpu_multires_layers(_warp)・gpu_lab_box・field_owner・dxil_alloca_check / rebase の前: gpu_tree_refine_placement(_warp)・gpu_field_gather も合格・archmap --check OK。
+  初めの版は一様な根を反応する空気にして刻み 0 で食い違った(CPU は広げる時に配り手の欄の一様の値から頁を作る・GPU の TreeExpand はまだ区画を読まない = 段 2 の残りの 5)。木の段の載せは上の「段 2 の残り」1〜6。
