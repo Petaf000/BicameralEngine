@@ -92,7 +92,7 @@ FX_FN uint64_t RcAbsorptanceQ16(uint64_t depthQ32) {
 // 面 1 つが熱で放つ量(帯ごと。σT⁴ × 帯の割合 × その帯の α (1 − 照り返し)。Kirchhoff: 当たった光を吸う割合 = 放つ割合。
 // 光線は当たったセルに α (1 − ρ) を吸わせるので、同じ温度の物どうしは差し引き 0。23 §3.3「坂を下る」)。
 // RcCellEmission はそのうち面の向こうに依らない分(セルの温度と自分の光の値だけで決まり、6 面で同じ。T-1161)。
-// 面の量は RcMaskAcross で向こうが通さない帯を 0 にしたもの(= RcFaceEmission。セルごとに 1 回求めて 6 面で使う)
+// 面の量は RcMaskAcross で両側とも通さない帯を 0 にしたもの(= RcFaceEmission。セルごとに 1 回求めて 6 面で使う)
 // RcCellEmission を温度だけで決まる分(黒体の帯ごとの量)と光の値だけで決まる分(帯ごとの放射率 α (1 − ρ)。Q16)に分けたもの。
 // 同じ温度・同じ光の値を何度も使う呼ぶ側(仮の世界の写しの段が参照の温度と前後の値で比べる。T-1228)が 1 回ずつ求めて使い回す
 FX_FN RcBands RcBlackBands(uint32_t temperatureMk) {
@@ -128,12 +128,18 @@ FX_FN RcBands RcCellEmission(uint32_t temperatureMk, RcCellLight light) {
     return RcEmissionOf(RcBlackBands(temperatureMk), RcEmissivityQ16(light));
 }
 
-// 面の向こうのセルがその帯を通さない(τ が飽和)なら、その帯はその面から放たない(触れている物どうしは伝導の仕事。
-// 向こうからもこの面へは届かないので、釣り合いは崩れない)
-FX_FN RcBands RcMaskAcross(RcBands bands, RcCellLight across) {
+// 面の両側のセルがともにその帯を通さない(τ が飽和)なら、その帯はその面から放たない(触れている物どうしは伝導の仕事)。
+// 条件は両側の小さい方の τ で決める(両側で同じ条件なので、向こうからもこの面へは届かず釣り合う)。向こうだけを見る形
+// (T-0877〜T-1365)は、片側だけ通さない面で通さない側だけが放ち、同じ温度でも熱が流れた(T-1367・ADR-0535 追記)
+// (小さい方を選んでから比べず、両側を比べる: 64bit の選びと比べを並べない。T-1078)
+FX_FN bool RcBandSealed(uint64_t ownDepthQ32, uint64_t acrossDepthQ32) {
+    return ownDepthQ32 >= RD_DEPTH_SATURATED_Q32 && acrossDepthQ32 >= RD_DEPTH_SATURATED_Q32;
+}
+
+FX_FN RcBands RcMaskAcross(RcBands bands, RcCellLight own, RcCellLight across) {
     RcBands masked;
-    masked.shortBand = across.depthShortQ32 >= RD_DEPTH_SATURATED_Q32 ? 0 : bands.shortBand;
-    masked.longBand = across.depthLongQ32 >= RD_DEPTH_SATURATED_Q32 ? 0 : bands.longBand;
+    masked.shortBand = RcBandSealed(own.depthShortQ32, across.depthShortQ32) ? 0 : bands.shortBand;
+    masked.longBand = RcBandSealed(own.depthLongQ32, across.depthLongQ32) ? 0 : bands.longBand;
 
     return masked;
 }
@@ -142,8 +148,8 @@ FX_FN RcBands RcMaskAcross(RcBands bands, RcCellLight across) {
 // セルを「面から温度 T で放つ塊」と見る形は、面の両側が光学的に厚い時、中の放射が拡散で運ぶ量(Rosseland: 4σΔ(T⁴) ÷ 3τ)の
 // 3τ/4 倍ほどを渡す。面から放つ量に係数 g(τ)(Q16)を掛けて τ に対して連続に細くする(放つ量を減らすだけなので保存はそのまま)。
 // τ = 面の両側の小さい方: 片側が透ける面は物の表面なので全部渡し、両側が厚い時だけ中の拡散になる。両側で同じ g なので、
-// 隣どうしの出入りは同じ温度で釣り合う(RcMaskAcross は片側だけ飽和の面で、飽和した側だけが放つ)
-FX_CONST uint32_t RC_FACE_CLIFF = 0;      // 向こうが τ ≥ 32 なら 0・未満なら全部(T-0877。既定)
+// 隣どうしの出入りは同じ温度で釣り合う(RcMaskAcross も両側の小さい方の τ で決める。T-1367)
+FX_CONST uint32_t RC_FACE_CLIFF = 0;      // 両側とも τ ≥ 32 なら 0・それ以外は全部(T-0877・T-1367。既定)
 FX_CONST uint32_t RC_FACE_ROSSELAND = 1;  // g = min(1, 4 ÷ 3τ)
 FX_CONST uint32_t RC_FACE_TWO_FLUX = 2;   // g = 1 ÷ (1 + 3τ ÷ 4)
 // 係数の形が読む τ の上限(Q32 で 2^56 = τ 2^24)。RcCellLight にこの τ を入れても、τ ≥ 32 を飽和として読む所(RcPassBand・
@@ -180,7 +186,7 @@ FX_FN uint64_t RcCoupledBand(uint64_t amount, uint32_t form, uint64_t ownDepthQ3
 // 面から放つ量(form = RC_FACE_*。0 は RcMaskAcross とビット単位で同じ)
 FX_FN RcBands RcCoupleAcross(RcBands bands, RcCellLight own, RcCellLight across, uint32_t form) {
     if (form == RC_FACE_CLIFF)
-        return RcMaskAcross(bands, across);
+        return RcMaskAcross(bands, own, across);
 
     RcBands coupled;
     coupled.shortBand = RcCoupledBand(bands.shortBand, form, own.depthShortQ32, across.depthShortQ32);
@@ -190,7 +196,7 @@ FX_FN RcBands RcCoupleAcross(RcBands bands, RcCellLight own, RcCellLight across,
 }
 
 FX_FN RcBands RcFaceEmission(uint32_t temperatureMk, RcCellLight light, RcCellLight across) {
-    return RcMaskAcross(RcCellEmission(temperatureMk, light), across);
+    return RcMaskAcross(RcCellEmission(temperatureMk, light), light, across);
 }
 
 // 参照の温度との差の放つ量(T-1102・ADR-0461)。referenceWord の下 31bit = 参照の温度(mK。0 なら今のまま)・bit 31 = 負の側。
@@ -233,7 +239,7 @@ FX_FN RcBands RcCellEmissionRelative(uint32_t temperatureMk, uint32_t referenceW
 
 FX_FN RcBands RcFaceEmissionRelative(uint32_t temperatureMk, uint32_t referenceWord, RcCellLight light,
                                      RcCellLight across) {
-    return RcMaskAcross(RcCellEmissionRelative(temperatureMk, referenceWord, light), across);
+    return RcMaskAcross(RcCellEmissionRelative(temperatureMk, referenceWord, light), light, across);
 }
 
 // 黒体が水平な面へ放つ強さ(帯ごとの mW/m²)。RcFaceBlackEmission(0.25 m²・1/60 s・2^−16 mJ)を W/m² に直す: × 240 ÷ 2^16。

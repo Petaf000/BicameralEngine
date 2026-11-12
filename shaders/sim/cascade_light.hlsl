@@ -422,7 +422,7 @@ bool ListedEmitter(RcGpuParams params, uint32_t cell) {
             if (grid.Contains(acrossX, acrossY, acrossZ))
                 across = grid.Light(acrossX, acrossY, acrossZ);
 
-            const RcBands bands = RcMaskAcross(cellBands, across);
+            const RcBands bands = RcMaskAcross(cellBands, light, across);
 
             // 放つ面の量は使った後に RcClearFaces が 0 に戻すので、量のある面だけ書いて列に足す
             const uint32_t sourceFace = (cell * RC_FACES) + face;
