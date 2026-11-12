@@ -1,6 +1,17 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-11-12(本体の作業役 26 回目・claude/50 の再開の巡目。前は 25 回目)
+最終更新: 2026-11-12(本体の作業役 27 回目・claude/50 の再開の巡目。前は 26 回目)
+
+## この仕事でしたこと(2026-11-12・本体の作業役・27 回目: runner/ready の印 4 本のマージ・試験・push・gpu_object_shell_flow を main で)
+- **入れた(--no-ff・来た順・どれも既定の切り替えではない・衝突なし)**: wt6 t-1252-tree-gpu-2 76786922(6424e26d・push 済み)/ wt3 t-1321-shell-mg-rules f7cbdd90(d784c9f7・push 済み。T-1321 研究の打ち切り = 今の規則のまま・調べる口だけ・既定 0)/
+  wt6 t-1252-tree-gpu-3 2562770e(GPU の木の段が欄の区画を読み書き・ADR-0532 の 6)/ wt4 t-1083-conductance-cost 975e7d81(文書だけ。T-1083・T-1084 Done 仮)。
+- **試験(release・警告 0・RTX 3070 Ti)**: tree-gpu-2 の後 = CPU 11 本(field_owner・field_storage・multires・multires_layers・tree_refine_placement・float_check 系 5・dxil_alloca_check)+ GPU 11 本(gpu_field_region〔HW・WARP〕・gpu_multires・gpu_multires_layers〔HW・WARP〕・gpu_lab_box・gpu_field_gather〔HW・WARP〕・gpu_tree_refine_placement〔HW・WARP〕・gpu_object_shell_flow〔HW。T-1320 段 1 が入った main で 1 回 = 割り当ての 2〕)合格・archmap --check OK /
+  t-1321 の後 = object_shell(1028 秒)・float_check 系 5・dxil_alloca_check・gpu_object_shell_flow(HW 120 秒)合格 / tree-gpu-3 + t-1083 の後 = CPU 9 本(field_owner・tree_refine_placement・multires_layers・float_check 系 5・dxil_alloca_check)+ GPU 8 本(gpu_multires・gpu_multires_layers〔HW・WARP〕・gpu_lab_box・gpu_field_region〔HW・WARP〕・gpu_tree_refine_placement〔HW・WARP〕)合格・archmap --check OK。
+- **記録**: ROADMAP(T-1252 段 2 の 3 本目・4 本目・T-1321 Done = 打ち切り・T-1083・T-1084 Done・T-1346 / T-1347 の行〔wt4 が作業中〕)・ADR-0454 の 4(割り算は 128bit ÷ 64bit 最大 4 回 + 整数の平方根。「1〜2 回」は数え違い)・NEXT。印 4 本を done/ へ。
+- **司令塔へ(T-1321 の根)**: 物の殻の流れで収まるまでの赤黒は多重格子の誤差ではなく、整数の式の動かない点へ寄せる仕上げで決まる(箱の差し渡しで増える = T-1349 の上限 1024 と同じ根)。残る道は T-1349 案 2 + T-1350(段ごとの Dispatch)か、仕上げの答えを変える設計の変更(D-677 に触れる → 【エンジン】の問いは司令塔が作る。T-1321 のチケット)。
+- **流していない**: gpu_object_shell_flow_warp(wt5 の T-1350 の後)・gpu_field_gather 以外の WARP の重い組・support_fracture_* 6 本(巡目の約束)。
+- **気を付けること(次の本体)**: wt2 の t-1240-wide-layers-2 は multires_tree.hlsl の TreeSettle・CoarsenRequest の数行で t-1252-tree-gpu-3 と文字で衝突する見込み(両方残す)。
+- 次の番号は **D-696・ADR-0479・Q188**(本体)。
 
 ## この仕事でしたこと(2026-11-12・本体の作業役・26 回目: runner/ready の印 6 本〔registry-owner-gpu は tree-gpu に含めて〕+ t-1324 のマージ・試験・push)
 - **入れた(--no-ff・来た順・どれも既定の切り替えではない = まとめて 1 回のビルドと試験)**: wt5 t-1320-shell-trim 364c2091(9b374214。perf.md の末尾の衝突は両方残した)/ wt4 t-1328-grid-emit-bits c0649ffa(文書だけ)/
