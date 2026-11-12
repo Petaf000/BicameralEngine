@@ -148,12 +148,18 @@ namespace {
         if (auto checked = CheckNoMismatch(session); !checked)
             return checked;
 
-        const uint32_t cellulose = session.Table().SpeciesId("cellulose");
+        // --- 燃えた印: セルロースが減り、炭素の酸化物(CO2 + CO)が出る(CPU の lab_box_test と同じ。T-1369)---
+        // 付けたセルの CO2 は炭が大過剰の熱いセルで Boudouard により CO になるので、和で見る(T-1368 L1)
+        const sim::BakedReactionTable& table = session.Table();
+        const uint32_t cellulose = table.SpeciesId("cellulose");
         const uint64_t placed = 8 * wood->contents[0].amount;
         const uint64_t left = TotalOf(session.Gpu(), cellulose);
-        Log(Channel::Gpu, Level::Info, "gpu_lab_box_test: {} 刻みでセルロース {} → {} µmol(GPU)", RUN_TICKS, placed,
-            left);
-        if (left >= placed)
+        const uint64_t carbonDioxide = TotalOf(session.Gpu(), table.SpeciesId("carbon_dioxide"));
+        const uint64_t carbonMonoxide = TotalOf(session.Gpu(), table.SpeciesId("carbon_monoxide"));
+        Log(Channel::Gpu, Level::Info,
+            "gpu_lab_box_test: {} 刻みでセルロース {} → {} µmol・CO2 {} µmol・CO {} µmol(GPU)", RUN_TICKS, placed, left,
+            carbonDioxide, carbonMonoxide);
+        if (left >= placed || carbonDioxide + carbonMonoxide == 0)
             return std::unexpected("燃えていない");
 
         return {};

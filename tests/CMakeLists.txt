@@ -236,11 +236,16 @@ add_executable(probe_phase_test probe_phase_test.cpp)  # 水の相変化を反�
 target_precompile_headers(probe_phase_test PRIVATE ${PROJECT_SOURCE_DIR}/engine/src/pch.h)  # probe_sim.h が D3D12 の型を使う
 target_link_libraries(probe_phase_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)
 add_test(NAME probe_phase COMMAND probe_phase_test)
-# 薄い水たまり・氷が受ける熱が 0.5 m のセルの中心どうしの伝導では現実の伝導率(T-1066)で 1〜2 桁小さい。熱の道の長さ(T-1110)まで止める(保存は probe_phase_porous_stone が見る)
+# 薄い水たまり・氷が受ける熱が 0.5 m のセルの中心どうしの伝導では現実の伝導率(T-1066)で 1〜2 桁小さく、場面の線が成り立たない(T-1368 P1〜P6)。
+# 場面を世界の木へ移すまで(T-1219)止める(場面の線以外の段は probe_phase_checks・保存は probe_phase_porous_stone が見る)
 set_tests_properties(probe_phase PROPERTIES DISABLED TRUE)
 set_tests_properties(probe_phase PROPERTIES TIMEOUT 1800)
 add_test(NAME probe_phase_porous_stone COMMAND probe_phase_test --stone-without-density)  # 場所を取らない石へ水が染み込む時の保存(T-0654)
 set_tests_properties(probe_phase_porous_stone PROPERTIES TIMEOUT 1800)
+# 場面の線(湯気・池・氷の結果)だけを外した probe_phase(T-1370): 1 セルの釣り合い・潜熱・密度のある石の保存・溶岩の上の水・決定性を毎回見る。
+# 場面の線を戻すのは場面を世界の木へ移す時(T-1219)
+add_test(NAME probe_phase_checks COMMAND probe_phase_test --no-scene-lines)
+set_tests_properties(probe_phase_checks PROPERTIES TIMEOUT 1800)
 # 1 セルの体積を相で分け合う(T-0593・T-0612・ADR-0268): 砂の壁が気体と水を塞ぐ・少しなら通る・燃えて減ると通る・水が空気を押し出す
 add_executable(phase_layer_test phase_layer_test.cpp)  # 凝縮相と気体が混ざるセルの 2 つのエネルギー(D-665・ADR-0486。T-1160。CPU だけ)
 target_link_libraries(phase_layer_test PRIVATE bicameral_test_reaction_table bicameral_sim bicameral_core)
@@ -548,8 +553,6 @@ add_test(NAME multires_edge COMMAND multires_edge_test)
 add_executable(lab_box_test lab_box_test.cpp)  # 実験室の箱の CPU 側(T-0142)
 target_link_libraries(lab_box_test PRIVATE bicameral_multires bicameral_core)
 add_test(NAME lab_box COMMAND lab_box_test)
-# 実験の箱(多重解像度)に放射の段が無く、現実の伝導率(T-1066)で木の火が広がらない・頭打ちの場面が出ない。多重解像度の放射(T-1155)と頭打ちの組み直しまで止める
-set_tests_properties(lab_box PROPERTIES DISABLED TRUE)
 
 add_executable(multires_subcycle_test multires_subcycle_test.cpp)  # 細かいレベルの熱の刻み(T-0108)
 target_link_libraries(multires_subcycle_test PRIVATE bicameral_multires bicameral_core)
