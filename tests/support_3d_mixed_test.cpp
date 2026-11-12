@@ -4,14 +4,22 @@
 //      分けたセルどうし・分けたセルと粗いセル・段の棒の端が分けたセル(違う大きさの段の棒)を含む塊
 //   2. 奥行 1 セルの 2 次元の混ざる場面(support_mixed_test の場面)を 3 次元へ(細かいセルは奥行 2 つ)にした場面が 2 次元と同じ答え
 //      (丸めの内 = 最大の値の 0.1 %)・面の外の成分が 0
+//      違う大きさの面の切り口の力(T-1325): 奥行 2 つの細かいセルの面の和の軸と縁の力が 2 次元の FineFaceForces と同じ(最大の力の 0.1 %)・
+//      面の外の力が 0。ずれの力は記録だけ(2 次元の読みは対の中の分け方も粗いセルの面ごとの和も違うことがある。T-1325 の作業ログ)
 //   3. 奥行の途中だけを分けた場面: 帳簿(力 3・回り 3)が毎刻み厳密・2 回の実行でハッシュ一致・全部 0.25 m の塊とのたわみの比
+//   4. (T-1325)違う大きさの面の切り口の力: 一様な歪み(対称 6 つ)で全部 0.25 m の場面の同じ所の面の力と同じ(None と形 A)・
+//      一様な曲げの差は記録だけ(2 次の偽のずれ ⅜ κ s²)・解いた場面で 0 でない・
+//      釣り合い: 片持ち梁を切る面の切り口のずれの力の和 = 先の重さ(粗い面の和との比 = 重さの比。奥行の手前だけ分けた梁も)・
+//      上の段だけ分けた梁の上の段を横に切った塊で、境の切り口のずれの力の和 + 切る面の軸の力の和 = 0(2 次元の読みは記録)
 // 引数: [--ticks n](既定 300)
 #include <algorithm>
 #include <array>
 #include <cstdint>
 #include <cstdlib>
 #include <format>
+#include <map>
 #include <span>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -284,6 +292,91 @@ namespace {
     }
 
     // --- 2. 奥行 1 セルの 2 次元の混ざる場面 ---
+    // 違う大きさの面の切り口の力(T-1325): 奥行 2 つの細かいセルの面の和 = 2 次元の細かい面(奥行 cellMm)。x の面も上の面も
+    // 横の向き t_0 が 2 次元の横の向き(shearMn[0]・edgeMn[0])、t_1 は奥行(面の外)。ずれの力は記録だけ(粗いセルの面〔対の 2 つ〕の和の差):
+    // 2 次元の MixedForces は伸びの 3 つの節の項のうち自分の項の自分の勾配の分だけを足す(対のもう 1 つの項が自分を引く分を数えない)。
+    // 3 次元は細かいセルが受ける力の全部(4 つの平均のずれだけを粗いセルが受けるので 4 つが同じ値)で、釣り合いを TestCutStatics で確かめる
+    void CompareCutFaces(std::string_view name, const sim::SupportLaw& flat, const sim::SupportLaw3D& solid,
+                         const sim::SupportScene& scene) {
+        int64_t largest = 1;
+        int64_t worst = 0;
+        std::map<std::array<uint32_t, 3>, std::array<int64_t, 2>> pairShear;  // 粗いセルの面 → 3 次元・2 次元のずれの和
+        int64_t outside = 0;
+        uint32_t faces = 0;
+        bool nonzero = false;
+        std::string worstText;
+        for (uint32_t fup = 0; fup < 2 * scene.height; ++fup) {
+            for (uint32_t fx = 0; fx < 2 * scene.width; ++fx) {
+                for (uint32_t axis = 0; axis < 2; ++axis) {
+                    const uint32_t nextX = fx + (axis == 0 ? 1 : 0);
+                    const uint32_t nextUp = fup + (axis == 1 ? 1 : 0);
+                    if (nextX >= 2 * scene.width || nextUp >= 2 * scene.height ||
+                        flat.IsFine(fx, fup) == flat.IsFine(nextX, nextUp))
+                        continue;
+
+                    const sim::SupportFaceForces expected = flat.FineFaceForces(fx, fup, axis);
+                    if (expected.intact == 0)
+                        continue;  // 面が無い
+
+                    sim::SupportFaceForces3D sum;
+                    for (const uint32_t fz : {0u, 1u}) {
+                        const sim::SupportFaceForces3D each = solid.FineFaceForces(fx, fup, fz, axis);
+                        sum.axialMn += each.axialMn;
+                        sum.shearMn[0] += each.shearMn[0];
+                        sum.shearMn[1] += each.shearMn[1];
+                        sum.bendMn[0] += each.bendMn[0];
+                        sum.torsionMn += each.torsionMn;
+                        sum.edgeMn[0][0] += each.edgeMn[0][0];
+                        sum.edgeMn[0][1] += each.edgeMn[0][1];
+                    }
+
+                    const std::array<int64_t, 4> want = {expected.axialMn, expected.shearMn, expected.lowSideMn,
+                                                         expected.highSideMn};
+                    const std::array<int64_t, 4> got = {sum.axialMn, sum.shearMn[0], sum.edgeMn[0][0],
+                                                        sum.edgeMn[0][1]};
+                    for (size_t i = 0; i < want.size(); ++i) {
+                        largest = std::max(largest, std::abs(want[i]));
+                        nonzero = nonzero || got[i] != 0;
+                        if (i == 1) {
+                            const std::array<uint32_t, 3> pair = {axis, axis == 0 ? fx : fx / 2,
+                                                                  axis == 0 ? fup / 2 : fup};
+                            pairShear[pair][0] += got[i];
+                            pairShear[pair][1] += want[i];
+                            continue;
+                        }
+
+                        if (std::abs(got[i] - want[i]) > worst) {
+                            worst = std::abs(got[i] - want[i]);
+                            worstText = std::format("軸 {}・細かい座標 ({}, {})・値 {}: 3 次元 {}・2 次元 {} mN", axis,
+                                                    fx, fup, i, got[i], want[i]);
+                        }
+                    }
+
+                    for (const int64_t value : {sum.shearMn[1], sum.bendMn[0], sum.torsionMn})
+                        outside = std::max(outside, std::abs(value));
+
+                    ++faces;
+                }
+            }
+        }
+
+        int64_t shear = 0;
+        for (const auto& [pair, sums] : pairShear)
+            shear = std::max(shear, std::abs(sums[0] - sums[1]));
+
+        const double ratio = (double)worst / (double)largest;
+        const double shearRatio = (double)shear / (double)largest;
+        const double outsideRatio = (double)outside / (double)largest;
+        Log(Channel::Sim, Level::Info,
+            "  {}: 違う大きさの面 {}・切り口の軸と縁の力の 2 次元との差 {:.2e}・粗いセルの面ごとのずれの和の差 "
+            "{:.2e}(記録)・面の外 {:.2e}"
+            "(最大の力 {} mN。差の最大 {})",
+            name, faces, ratio, shearRatio, outsideRatio, largest, worstText);
+        Expect(faces > 0 && nonzero, std::format("{}: 違う大きさの面の切り口の力が 0 でない", name));
+        Expect(ratio <= 1.0e-3, std::format("{}: 切り口の軸と縁の力が 2 次元と同じ(0.1 %)", name));
+        Expect(outsideRatio <= 1.0e-3, std::format("{}: 切り口の面の外の力が 0(0.1 %)", name));
+    }
+
     void TestDepthOne(std::string_view name, const sim::SupportScene& scene, const sim::SupportOptions& options) {
         sim::SupportLaw flat(scene, options);
         sim::SupportLaw3D solid(test::Extruded(scene), options);
@@ -326,6 +419,7 @@ namespace {
             (double)largest / 65536.0 / 1.0e6, ratioOf(difference), ratioOf(depthDifference), ratioOf(outside));
         Expect(ratioOf(difference) <= 1.0e-3, std::format("{}: 奥行 1 セルが 2 次元と同じ(0.1 %)", name));
         Expect(ratioOf(outside) <= 1.0e-3, std::format("{}: 面の外の成分が 0(0.1 %)", name));
+        CompareCutFaces(name, flat, solid, scene);
     }
 
     // --- 3. 奥行の途中だけを分けた場面(3 次元の形): 帳簿・決定性・全部 0.25 m の塊とのたわみ ---
@@ -411,6 +505,317 @@ namespace {
         Expect(std::abs(mixedRatio - 1.0) <= 0.05, "奥行の手前だけ分けた片持ち梁の先のたわみが全部 0.25 m と ±5 %");
     }
 
+    // --- 4. 違う大きさの面の切り口の力(T-1325)---
+    // 法則の節の位置(細かいセルの半分の単位。分けていないセルの多い場面〔全部 0.25 m〕は全部が細かいセルの単位)に場を置いた値
+    template <class Displacement, class Turn>
+    Values FieldOf(const sim::SupportLaw3D& law, const Displacement& displacement, const Turn& turn) {
+        const sim::EquilibriumBlockSystem& system = law.BlockSystem();
+        Values x((size_t)law.CellCount() * K, 0);
+        for (uint32_t cell = 0; cell < law.CellCount(); ++cell) {
+            const sim::EquilibriumNode& node = system.nodes[cell];
+            const bool fine = !law.Mixed() || node.level == 1;
+            const int64_t scale = fine ? 2 : 4;
+            const int64_t offset = fine ? 1 : 2;
+            const int64_t arm = fine ? 1 : 2;
+            const std::array<int64_t, 3> p = {scale * node.x + offset, scale * node.y + offset,
+                                              scale * node.z + offset};
+            const std::array<int64_t, 3> u = displacement(p);
+            const std::array<int64_t, 3> theta = turn(p);
+            for (uint32_t axis = 0; axis < 3; ++axis) {
+                x[(size_t)cell * K + axis] = u[axis];
+                x[(size_t)cell * K + sim::SUPPORT3_TURN + axis] = theta[axis] * arm;
+            }
+        }
+
+        return x;
+    }
+
+    // 違う大きさの面の切り口の力と、全部 0.25 m の場面の同じ所の面の力の差
+    struct CutError {
+        int64_t worst = 0;     // 全部の値(軸・ずれ 2・曲げ 2・ねじれ・縁 4・角 4)の差の最大
+        int64_t edge = 0;      // 縁と角の差の最大
+        int64_t shear = 0;     // ずれの差の最大
+        int64_t largest = 1;   // 全部 0.25 m の面の値の最大
+        uint32_t faces = 0;    // 比べた切り口(細かいセルの面)
+        bool nonzero = false;  // 切り口の力に 0 でない値がある
+        std::string worstText;
+    };
+
+    CutError CompareCuts(const sim::SupportLaw3D& mixed, const sim::SupportLaw3D& fine,
+                         const sim::SupportScene3D& scene) {
+        CutError error;
+        for (uint32_t fz = 0; fz < 2 * scene.depth; ++fz) {
+            for (uint32_t fup = 0; fup < 2 * scene.height; ++fup) {
+                for (uint32_t fx = 0; fx < 2 * scene.width; ++fx) {
+                    for (uint32_t axis = 0; axis < sim::SUPPORT3_AXES; ++axis) {
+                        std::array<uint32_t, 3> next = {fx, fup, fz};
+                        ++next[axis];
+                        if (mixed.IsFine(fx, fup, fz) == mixed.IsFine(next[0], next[1], next[2]))
+                            continue;
+
+                        const sim::SupportFaceForces3D got = mixed.FineFaceForces(fx, fup, fz, axis);
+                        if (got.intact == 0)
+                            continue;  // 面が無い
+
+                        const sim::SupportFaceForces3D want = fine.FaceForces(fx, fup, fz, axis);
+                        const auto values = [](const sim::SupportFaceForces3D& f) {
+                            return std::array<int64_t, 14>{
+                                f.axialMn,     f.shearMn[0],   f.shearMn[1],   f.bendMn[0],    f.bendMn[1],
+                                f.torsionMn,   f.edgeMn[0][0], f.edgeMn[0][1], f.edgeMn[1][0], f.edgeMn[1][1],
+                                f.cornerMn[0], f.cornerMn[1],  f.cornerMn[2],  f.cornerMn[3]};
+                        };
+                        const std::array<int64_t, 14> a = values(got);
+                        const std::array<int64_t, 14> b = values(want);
+                        for (size_t i = 0; i < a.size(); ++i) {
+                            const int64_t differ = std::abs(a[i] - b[i]);
+                            error.largest = std::max(error.largest, std::abs(b[i]));
+                            error.nonzero = error.nonzero || a[i] != 0;
+                            if (i >= 6)
+                                error.edge = std::max(error.edge, differ);
+
+                            if (i == 1 || i == 2)
+                                error.shear = std::max(error.shear, differ);
+
+                            if (differ > error.worst) {
+                                error.worst = differ;
+                                error.worstText = std::format(
+                                    "軸 {}・細かい座標 ({}, {}, {})・値 {}: 混ざる {}・全部 0.25 m {} mN", axis, fx,
+                                    fup, fz, i, a[i], b[i]);
+                            }
+                        }
+
+                        ++error.faces;
+                    }
+                }
+            }
+        }
+
+        return error;
+    }
+
+    void TestCutStatics(std::string_view name, const sim::SupportScene3D& scene, const sim::SupportOptions& options,
+                        uint32_t cutX, uint32_t coarseX);
+
+    // 釣り合い(T-1325): 片持ち梁 8 × 1 m の上の段だけ 0.25 m(奥行 1 セル)。上の段の x ≥ 2 m の塊は、x = 2 m の切る面(細かいセルどうし)の
+    // 軸の力と、下の段との境(違う大きさの面の切り口)のずれの力だけで x の向きに釣り合う: Σ 軸 + Σ ずれ = 0。2 次元の読みは記録だけ
+    void TestLayerStatics(std::string_view formName, const sim::SupportOptions& options) {
+        const sim::SupportScene flatScene = test::MarkedFine(test::Beam(16, 2, 500, false), 0, 16, 1, 2);
+        sim::SupportLaw flat(flatScene, options);
+        for (uint32_t tick = 0; tick < ticks; ++tick)
+            flat.Step();
+
+        sim::SupportLaw3D law(test::Extruded(flatScene), options);
+        Run(law, std::format("上の段だけ 0.25 m・{}", formName));
+        constexpr uint32_t CUT = 8;  // 細かい x(2 m)
+        int64_t axial = 0;
+        int64_t shear = 0;
+        int64_t flatAxial = 0;
+        int64_t flatShear = 0;
+        for (uint32_t fup = 2; fup < 4; ++fup) {
+            flatAxial += flat.FineFaceForces(CUT - 1, fup, 0).axialMn;
+            for (uint32_t fz = 0; fz < 2; ++fz)
+                axial += law.FineFaceForces(CUT - 1, fup, fz, 0).axialMn;
+        }
+
+        for (uint32_t fx = CUT; fx < 32; ++fx) {
+            flatShear += flat.FineFaceForces(fx, 1, 1).shearMn;
+            for (uint32_t fz = 0; fz < 2; ++fz)
+                shear += law.FineFaceForces(fx, 1, fz, 1).shearMn[0];
+        }
+
+        const double ratio = (double)std::abs(axial + shear) / (double)std::max<int64_t>(std::abs(axial), 1);
+        const double flatRatio = (double)std::abs(flatAxial + flatShear) /
+                                 (double)std::max<int64_t>(std::abs(flatAxial), 1);
+        Log(Channel::Sim, Level::Info,
+            "  上の段の塊の釣り合い・{}: 軸の和 {} mN・境のずれの和 {} mN・残り {:.2e}(2 次元の読み: 軸 {}・ずれ "
+            "{}・残り {:.2e}。記録)",
+            formName, axial, shear, ratio, flatAxial, flatShear, flatRatio);
+        Expect(ratio <= 1.0e-4,
+               std::format("上の段の塊の釣り合い・{}: 境の切り口のずれの和 + 切る面の軸の和 = 0", formName));
+    }
+
+    void TestCutForces() {
+        const sim::SupportScene3D scene = MixedBlock();
+        const sim::SupportScene3D fineScene = AllFine(scene);
+        sim::SupportOptions formA;
+        formA.mixedPairMaterial = sim::MixedPairMaterial::NeighborStrain;
+        sim::SupportLaw3D fine(fineScene, {});
+        const std::pair<const char*, sim::SupportOptions> forms[] = {{"None(既定)", {}}, {"形 A", formA}};
+        constexpr int64_t SCALE = int64_t{1} << 24;
+        const auto none = [](const std::array<int64_t, 3>&) {
+            return std::array<int64_t, 3>{};
+        };
+        for (const auto& [formName, options] : forms) {
+            sim::SupportLaw3D mixed(scene, options);
+
+            // 一様な歪み(対称): u_i = Σ_j ε_ij p_j・φ = 0
+            for (uint32_t i = 0; i < 3; ++i) {
+                for (uint32_t j = i; j < 3; ++j) {
+                    const auto strain = [&](const std::array<int64_t, 3>& p) {
+                        std::array<int64_t, 3> u{};
+                        u[i] += SCALE * p[j];
+                        if (i != j)
+                            u[j] += SCALE * p[i];
+
+                        return u;
+                    };
+                    mixed.SetBlockValues(FieldOf(mixed, strain, none));
+                    fine.SetBlockValues(FieldOf(fine, strain, none));
+                    const CutError error = CompareCuts(mixed, fine, scene);
+                    const double ratio = (double)error.worst / (double)error.largest;
+                    Log(Channel::Sim, Level::Info,
+                        "  {}・一様な歪み ({}, {}): 切り口 {}・差 {:.2e}(最大の力 {} mN。差の最大 {})", formName, i, j,
+                        error.faces, ratio, error.largest, error.worstText);
+                    Expect(error.faces > 0 && error.nonzero,
+                           std::format("{}・一様な歪み ({}, {}): 切り口の力が 0 でない", formName, i, j));
+                    Expect(ratio <= 1.0e-5,
+                           std::format("{}・一様な歪み ({}, {}): 切り口の力が全部 0.25 m と同じ", formName, i, j));
+                }
+            }
+
+            // 一様な曲げ(TestPatch と同じ場。a ≠ b): 記録だけ(違う大きさの面の 2 次の偽のずれ ⅜ κ s²。T-1294)
+            constexpr int64_t BEND = int64_t{1} << 16;
+            const auto cross = [](const std::array<int64_t, 3>& a, const std::array<int64_t, 3>& b) {
+                return std::array<int64_t, 3>{a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2],
+                                              a[0] * b[1] - a[1] * b[0]};
+            };
+            for (uint32_t a = 0; a < 3; ++a) {
+                for (uint32_t b = 0; b < 3; ++b) {
+                    if (a == b)
+                        continue;
+
+                    std::array<int64_t, 3> ea{};
+                    ea[a] = 1;
+                    std::array<int64_t, 3> eb{};
+                    eb[b] = 1;
+                    const auto bendU = [&](const std::array<int64_t, 3>& p) {
+                        const std::array<int64_t, 3> around = cross(ea, p);
+                        const std::array<int64_t, 3> side = cross(ea, eb);
+                        std::array<int64_t, 3> u{};
+                        for (uint32_t c = 0; c < 3; ++c)
+                            u[c] = 2 * BEND * p[b] * around[c] - BEND * p[b] * p[b] * side[c];
+
+                        return u;
+                    };
+                    const auto bendTurn = [&](const std::array<int64_t, 3>& p) {
+                        std::array<int64_t, 3> theta{};
+                        theta[a] = 2 * BEND * p[b];
+                        return theta;
+                    };
+                    mixed.SetBlockValues(FieldOf(mixed, bendU, bendTurn));
+                    fine.SetBlockValues(FieldOf(fine, bendU, bendTurn));
+                    const CutError error = CompareCuts(mixed, fine, scene);
+                    const auto ratioOf = [&](int64_t value) {
+                        return (double)value / (double)error.largest;
+                    };
+                    Log(Channel::Sim, Level::Info,
+                        "  {}・一様な曲げ(軸 {} の回り・軸 {} に沿って。記録): 切り口 {}・差 {:.2e}・縁と角 "
+                        "{:.2e}・ずれ {:.2e}"
+                        "(最大の力 {} mN。差の最大 {})",
+                        formName, a, b, error.faces, ratioOf(error.worst), ratioOf(error.edge), ratioOf(error.shear),
+                        error.largest, error.worstText);
+                }
+            }
+        }
+
+        // 解いた場面(下を固定して重さで縮む塊)で切り口の力が 0 でない
+        sim::SupportScene3D held = scene;
+        for (uint32_t z = 0; z < 4; ++z) {
+            for (uint32_t x = 0; x < 4; ++x)
+                held.clamps[x + (size_t)6 * (0 + (size_t)5 * z)] |= sim::Support3Clamp(sim::SUPPORT3_UP, -1);
+        }
+
+        sim::SupportLaw3D solved(held, {});
+        Run(solved, "下を固定した塊(違う大きさのセル入り)");
+        uint32_t cuts = 0;
+        uint32_t nonzero = 0;
+        for (uint32_t fz = 0; fz < 8; ++fz) {
+            for (uint32_t fup = 0; fup < 10; ++fup) {
+                for (uint32_t fx = 0; fx < 12; ++fx) {
+                    for (uint32_t axis = 0; axis < sim::SUPPORT3_AXES; ++axis) {
+                        std::array<uint32_t, 3> next = {fx, fup, fz};
+                        ++next[axis];
+                        if (solved.IsFine(fx, fup, fz) == solved.IsFine(next[0], next[1], next[2]))
+                            continue;
+
+                        const sim::SupportFaceForces3D face = solved.FineFaceForces(fx, fup, fz, axis);
+                        if (face.intact == 0)
+                            continue;
+
+                        ++cuts;
+                        nonzero += face.axialMn != 0 || face.shearMn[0] != 0 || face.shearMn[1] != 0 ? 1 : 0;
+                    }
+                }
+            }
+        }
+
+        Log(Channel::Sim, Level::Info, "  解いた場面: 切り口 {}・力が 0 でない切り口 {}", cuts, nonzero);
+        Expect(cuts > 0 && nonzero == cuts, "解いた場面で切り口の力が 0 でない");
+
+        // 釣り合い: 根の半分を 0.25 m(奥行 1 セル)・根の 2 m の奥行の手前だけ 0.25 m(奥行 2 セル)
+        sim::SupportScene3D root = test::Extruded(test::MarkedFine(test::Beam(16, 2, 500, false), 0, 8, 0, 2));
+        sim::SupportScene3D front = test::Extruded(test::Beam(16, 2, 500, false), 2);
+        front.fine.assign(front.solid.size(), 0);
+        for (uint32_t up = 0; up < 2; ++up) {
+            for (uint32_t x = 0; x < 4; ++x)
+                front.fine[x + (size_t)16 * up] = 1;
+        }
+
+        for (const auto& [formName, options] : forms) {
+            TestLayerStatics(formName, options);
+            TestCutStatics(std::format("根の半分を 0.25 m・{}", formName), root, options, 16, 9);
+            TestCutStatics(std::format("根の 2 m の奥行の手前だけ 0.25 m・{}", formName), front, options, 8, 9);
+        }
+    }
+
+    // 釣り合い(T-1325): 片持ち梁(左を固定)を x の面で切ると、切る面のずれの力の和 = 先の重さ。細かい座標 cutX − 1 と cutX の間の
+    // 面(違う大きさの面は切り口・分けていないセルどうしは粗い面を細かい座標で 1 回)の和を、粗い座標 coarseX と +1 の間の粗い面の和と比べる
+    void TestCutStatics(std::string_view name, const sim::SupportScene3D& scene, const sim::SupportOptions& options,
+                        uint32_t cutX, uint32_t coarseX) {
+        sim::SupportLaw3D law(scene, options);
+        Run(law, name);
+        const auto columns = [&](uint32_t fromX) {
+            uint32_t count = 0;
+            for (uint32_t z = 0; z < scene.depth; ++z) {
+                for (uint32_t up = 0; up < scene.height; ++up) {
+                    for (uint32_t x = fromX; x < scene.width; ++x)
+                        count += scene.solid[x + (size_t)scene.width * (up + (size_t)scene.height * z)] != 0 ? 1 : 0;
+                }
+            }
+
+            return count;
+        };
+
+        int64_t cutShear = 0;
+        int64_t cutAxial = 0;
+        for (uint32_t fz = 0; fz < 2 * scene.depth; ++fz) {
+            for (uint32_t fup = 0; fup < 2 * scene.height; ++fup) {
+                const bool fine = law.IsFine(cutX - 1, fup, fz) || law.IsFine(cutX, fup, fz);
+                if (!fine && ((fup & 1) != 0 || (fz & 1) != 0))
+                    continue;  // 粗い面は細かい座標の偶数の所で 1 回
+
+                const sim::SupportFaceForces3D face = law.FineFaceForces(cutX - 1, fup, fz, 0);
+                cutShear += face.shearMn[0];
+                cutAxial += face.axialMn;
+            }
+        }
+
+        int64_t coarseShear = 0;
+        for (uint32_t z = 0; z < scene.depth; ++z) {
+            for (uint32_t up = 0; up < scene.height; ++up)
+                coarseShear += law.FaceForces(coarseX, up, z, 0).shearMn[0];
+        }
+
+        const double expected = (double)columns(cutX / 2) / (double)columns(coarseX + 1);
+        const double ratio = (double)cutShear / (double)coarseShear;
+        Log(Channel::Sim, Level::Info,
+            "  {}: 切る面のずれの和 {} mN・粗い面 {} mN・比 {:.6f}(重さの比 {:.6f})・軸の力の和 {} mN", name, cutShear,
+            coarseShear, ratio, expected, cutAxial);
+        Expect(std::abs(ratio / expected - 1.0) <= 1.0e-4, std::format("{}: 切り口のずれの力の和 = 先の重さ", name));
+        Expect(std::abs((double)cutAxial) <= 1.0e-4 * std::abs((double)coarseShear),
+               std::format("{}: 切り口の軸の力の和が 0", name));
+    }
+
     sim::SupportScene WallBeam() {
         return test::WallBeam();
     }
@@ -443,6 +848,9 @@ namespace {
 
         Log(Channel::Sim, Level::Info, "3. 奥行の途中だけを分けた場面");
         TestPartialDepth();
+
+        Log(Channel::Sim, Level::Info, "4. 違う大きさの面の切り口の力(T-1325)");
+        TestCutForces();
 
         if (failureCount != 0) {
             Log(Channel::Sim, Level::Error, "support_3d_mixed_test: FAILED ({} 件)", failureCount);

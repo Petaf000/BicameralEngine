@@ -19,7 +19,12 @@
 //     K_q = 対の外した硬さ K(4 つの平均の形で辺の対が外す分 = 面の点のばね 2b の直列 b)と C の材料 E s = 3 b_p の直列。
 //     ねじれの分(ω_n r_q)も同じ r で読むので、一様な歪み・回り・一様な曲げ・ねじれで P = m(つぎはぎの検査を壊さない)。曲げの形 B は 3 次元に入れない
 //   違う大きさのセルが絡む角の斜めの棒(3 歩の階段)は置かない(T-1294 の残り。細かいセルどうしと粗いセルどうしだけ)
-// 剛体の動きでは全部の項が 0(ρ は面の点の位置そのもの)。一様な歪みでは違う大きさの面の力が全部細かい場面と同じ(support_3d_test)。
+// 剛体の動きでは全部の項が 0(ρ は面の点の位置そのもの)。一様な歪みでは違う大きさの面の力が全部細かい場面と同じ(support_3d_mixed_test)。
+// 切り口の力(MixedForces。T-1325): 細かいセル F_k の面の位置の切り口(幅 s)。項 ½ c p² が F_k の節へ当てる力 c p g_k(g_k = 項の F_k の勾配)を
+//   面が運ぶ(4 つで共有するずれと回りの項も F_k の勾配の分だけ = 4 つの面の和が粗いセルの受ける力)。軸・ずれ = ν Σ c p g_k,(n・t)。
+//   ずれ・伸び・形 A の項は面の点 = 切り口そのものに働くので、切り口の曲げの回りに入らない(2 次元の MixedForces の面の点の形と同じ)。
+//   曲げとねじれは回りの項だけ: F_k の回りの力 c p × 2 = 回りの力 ÷ (s/2)(同じ大きさの面の bendMn と同じ単位)。縁の力 = N ± 3 × 曲げの力
+//   (6M/s。2 次元の 2 (f_high − f_low) と同じ値)。エネルギーはずれと回りの項を 4 分の 1・伸びは自分の項・形 A は対の 2 つで半分ずつ
 #include <algorithm>
 #include <map>
 
@@ -28,6 +33,7 @@
 #include "sim/support_law_3d.h"
 
 using namespace bicameral::fx;
+using namespace bicameral::multires;
 
 namespace bicameral::sim {
 
@@ -47,6 +53,26 @@ namespace bicameral::sim {
                 return 0;
 
             return FxDivU128By64(FxMulU64Full(a, b), a + b).quotient;
+        }
+
+        // 力 c × 差(support_law_3d.cpp の Flow と同じ)
+        int64_t Flow(uint64_t coefficient, int64_t difference) {
+            return ImFaceFlow(ImWide(coefficient), difference);
+        }
+
+        // ½ × 力 × 伸び(mN × 2^-16 nm → pJ。support_law_3d.cpp の SpringWork と同じ)
+        int64_t SpringWork(int64_t forceMn, int64_t difference) {
+            return (int64_t)FxShiftRightU128(FxMulU64Full(FxAbsU64(forceMn), FxAbsU64(difference)), 17);
+        }
+
+        // 項の力 c p が勾配 g の成分へ当てる分 c p g(係数に |g| を掛けてから丸める)
+        int64_t Share(uint64_t coefficient, int64_t projection, int64_t gradient) {
+            if (gradient == 0)
+                return 0;
+
+            const uint64_t scale = (uint64_t)(gradient < 0 ? -gradient : gradient);
+
+            return Flow(coefficient * scale, gradient < 0 ? -projection : projection);
         }
 
         uint64_t Scaled(uint64_t coefficient, uint32_t intact) {
@@ -116,6 +142,7 @@ namespace bicameral::sim {
 
     // --- 項: 違う大きさの面(粗いセルから分けた隣を見る)・細かいセルの面と固定した面・段の棒 ---
     void SupportLaw3D::BuildMixedTerms() {
+        m_mixedFaceAt.assign(m_cells.size() * SUPPORT3_AXES, NO_CELL);
         for (uint32_t cell = 0; cell < m_cells.size(); ++cell) {
             if (m_cellFine[cell] != 0)
                 continue;
@@ -194,6 +221,7 @@ namespace bicameral::sim {
         const uint32_t q = axis == 2 ? 1 : 2;
         const size_t fineWidth = 2 * (size_t)m_scene.width;
         const size_t fineHeight = 2 * (size_t)m_scene.height;
+        const MixedFace face{.firstTerm = (uint32_t)m_multiTerms.size(), .axis = axis, .side = side, .intact = intact};
 
         // --- 4 つの面の点の相対の動き G_k の勾配(粗いセルの分と細かいセルの分)---
         std::array<uint32_t, QUAD> fines{};
@@ -231,6 +259,8 @@ namespace bicameral::sim {
         // --- ずれ: 4 つの和 ---
         for (const uint32_t across : {p, q}) {
             MultiTerm shear = term(b / 8);
+            shear.kind = MultiKind::Shear;
+            shear.index = across;
             for (uint32_t k = 0; k < QUAD; ++k) {
                 for (uint32_t c = 0; c < SUPPORT3_COMPONENTS; ++c) {
                     shear.gradients[0][c] += coarseOf[k][across][c];
@@ -255,6 +285,8 @@ namespace bicameral::sim {
         // --- 伸び: k ごとに 4 つの平均のずれの歪みを引く ---
         for (uint32_t k = 0; k < QUAD; ++k) {
             MultiTerm axial = term(b / 288);
+            axial.kind = MultiKind::Axial;
+            axial.index = k;
             for (uint32_t c = 0; c < SUPPORT3_COMPONENTS; ++c)
                 axial.gradients[0][c] = 12 * coarseOf[k][axis][c];
 
@@ -279,6 +311,8 @@ namespace bicameral::sim {
             const uint64_t c = turn == axis ? b * SUPPORT3_TORSION_NUMERATOR / (SUPPORT3_TORSION_DENOMINATOR * 48)
                                             : b / 24;
             MultiTerm bend = term(c);
+            bend.kind = MultiKind::Turn;
+            bend.index = turn;
             bend.gradients[0][SUPPORT3_TURN + turn] = -(int64_t)QUAD;
             for (uint32_t k = 0; k < QUAD; ++k)
                 bend.gradients[1 + k][SUPPORT3_TURN + turn] = 2;
@@ -286,7 +320,12 @@ namespace bicameral::sim {
             AddMultiTerm(bend);
         }
 
-        ++m_mixedFaceCount;
+        // --- 切り口の力が読む範囲(T-1325)---
+        const uint32_t faceIndex = (uint32_t)m_mixedFaces.size();
+        m_mixedFaces.push_back(face);
+        m_mixedFaces.back().endTerm = (uint32_t)m_multiTerms.size();
+        for (const uint32_t fine : fines)
+            m_mixedFaceAt[(size_t)fine * SUPPORT3_AXES + axis] = faceIndex;
     }
 
     // 形 A の項(冒頭)。4 倍の勾配 4 (P − m) = 2 (G_U − G_L)_p − d (F_N − F_C)(F = 繊維の 2 倍。壁は + 2d F_C)・係数 K_q ÷ (16 × 読める側の数)
@@ -334,7 +373,9 @@ namespace bicameral::sim {
         for (uint32_t i = 0; i < count; ++i) {
             const Side& each = sides[i];
             const bool clamped = each.neighbor == NO_CELL;
-            MultiTerm term{.count = clamped ? 3u : 4u, .coefficient = Scaled(keep / (16 * count), each.intact)};
+            MultiTerm term{.count = clamped ? 3u : 4u,
+                           .coefficient = Scaled(keep / (16 * count), each.intact),
+                           .kind = MultiKind::Strain};
             term.nodes = {coarse, lower, upper, clamped ? coarse : each.neighbor, 0};
             for (uint32_t c = 0; c < SUPPORT3_COMPONENTS; ++c) {
                 term.gradients[1][c] = -2 * fine[across][c];
@@ -518,6 +559,62 @@ namespace bicameral::sim {
                 }
             }
         }
+    }
+
+    // 違う大きさの面の細かいセル fine の切り口の力(冒頭の「切り口の力」。T-1325)
+    SupportFaceForces3D SupportLaw3D::MixedForces(uint32_t fine, const MixedFace& face) const {
+        const uint32_t normal = face.axis;
+        const std::array<uint32_t, 2> across = {normal == 0 ? 1u : 0u, normal == 2 ? 1u : 2u};
+        const int64_t
+            toFace = face.side;  // 細かいセルが +軸の側(高い側)なら面の力 = 細かいセルが受ける力の逆の向きの読み
+        SupportFaceForces3D forces{.axis = normal, .intact = face.intact};
+        std::array<int64_t, 2> opening{};
+        for (uint32_t at = face.firstTerm; at < face.endTerm; ++at) {
+            const MultiTerm& term = m_multiTerms[at];
+            uint32_t node = 0;
+            while (node < term.count && term.nodes[node] != fine)
+                ++node;
+
+            if (node == term.count)
+                continue;  // 形 A の対の項で自分の細かいセルが入らない
+
+            const Gradient& gradient = term.gradients[node];
+            const int64_t projection = MultiProjection(term);
+            const int64_t work = SpringWork(Flow(term.coefficient, projection), projection);
+
+            // --- 軸とずれ(面の点の力)---
+            forces.axialMn += toFace * Share(term.coefficient, projection, gradient[normal]);
+            for (uint32_t i = 0; i < 2; ++i)
+                forces.shearMn[i] += toFace * Share(term.coefficient, projection, gradient[across[i]]);
+
+            switch (term.kind) {
+                case MultiKind::Axial: forces.energyPj += term.index + 1 == node ? work : 0; break;
+                case MultiKind::Strain: forces.energyPj += work / 2; break;
+                case MultiKind::Shear: forces.energyPj += work / QUAD; break;
+                case MultiKind::Turn: forces.energyPj += work / QUAD; break;
+            }
+
+            if (term.kind != MultiKind::Turn)
+                continue;
+
+            // --- 回り(曲げ 2・ねじれ)。t_i の回りの曲げは t_j の縁を開く(BondForces と同じ向き)---
+            const uint32_t turn = term.index;
+            const int64_t turnGradient = gradient[SUPPORT3_TURN + turn];
+            const int64_t force = toFace * Share(term.coefficient, projection, turnGradient);
+            if (turn == normal) {
+                forces.torsionMn += force;
+                continue;
+            }
+
+            const uint32_t i = turn == across[0] ? 0 : 1;
+            forces.bendMn[i] += force;
+            opening[1 - i] += Epsilon(normal, turn, across[1 - i]) * toFace *
+                              Share(3 * term.coefficient, projection, turnGradient);
+        }
+
+        FillEdges(forces, opening);
+
+        return forces;
     }
 
     int64_t SupportLaw3D::MultiProjection(const MultiTerm& term) const {
