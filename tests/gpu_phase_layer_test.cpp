@@ -6,7 +6,11 @@
 // 区間ごとにセルと Ec を読み戻して比べる。どのセルもエネルギー(和)と元素が初めとビット単位で同じことも見る(面の流れが無いので)。
 // 混ざらないセル → 混ざったセル(露が付く: PlEvenCondensedEnergy)と、混ざったセル → 混ざらないセル(露が乾く: Ec を捨てる)の
 // 両方の変わり目が区間の中で起きたことと、層の熱が負にならないこと(薄い層の吸熱の反応。ADR-0497 の 5)も確かめる。
+// 区間ごとに、その初めのセルと Ec で混ざったセルの伝導の面を部分ごとに流す式(shaders/common/transport_conduction_parts.hlsli。
+// 陽の面の流れ・層の上の面・粗い側へ送る分・陰の系の組の面 TxPartPairsOf)も GPU(shaders/sim/phase_layer_faces.hlsl)で計算して
+// CPU とビット一致を確かめる(T-1230 段 2 ③ の 1 段目。世界の木の段へつなぐ前に式そのものを RTX で確かめる)。
 // 引数は gpu_test_options.h。
+#include "common/transport_conduction_parts.hlsli"
 #include "core/aliases.h"
 #include "core/log.h"
 #include "core/singleton.h"
@@ -20,6 +24,7 @@
 
 using namespace bicameral;
 using namespace bicameral::reaction;
+using namespace bicameral::multires;
 
 namespace {
 
@@ -38,6 +43,11 @@ namespace {
     // u0 セル・u1 Ec / b0 定数 7 個 / デバッグのリング / t0〜t5 表と初めの値
     constexpr gpu::RootSignatureLayout ROOT_LAYOUT{
         .uavCount = 2, .rootConstantCount = 7, .debugRing = true, .srvCount = 6};
+
+    // 面の式の確かめ(phase_layer_faces.hlsl): u0 面ごとの値 / b0 定数 1 個 / デバッグのリング / t0〜t3 表・t4 セル・t5 Ec
+    constexpr gpu::RootSignatureLayout FACE_ROOT_LAYOUT{
+        .uavCount = 1, .rootConstantCount = 1, .debugRing = true, .srvCount = 6};
+    constexpr uint32_t FACE_PROBE_VALUES = 20;  // phase_layer_faces.hlsl の PROBE_VALUES と同じ
 
     // --- 場面 ---------------------------------------------------------------------------------------
     struct LoneScene {
@@ -250,6 +260,190 @@ namespace {
         return result;
     }
 
+    // --- 面の式(混ざったセルの伝導の面を部分ごとに。T-1230 段 2 ③ の 1 段目)------------------------------------
+    struct FacePipeline {
+        ComPtr<ID3D12RootSignature> rootSignature;
+        ComPtr<ID3D12PipelineState> pipeline;
+        std::array<ComPtr<ID3D12Resource>, 4> tables;  // 物質・規則・索引・速度(アップロードのヒープのまま読む)
+        ComPtr<ID3D12Resource> probes;
+        ComPtr<ID3D12Resource> probeReadback;
+    };
+
+    std::expected<FacePipeline, std::string> CreateFacePipeline(ID3D12Device5* device,
+                                                                const sim::BakedReactionTable& table) {
+        const auto bytecode = gpu::LoadShader("sim/phase_layer_faces.cso");
+        if (!bytecode)
+            return std::unexpected(bytecode.error());
+
+        FacePipeline result;
+        result.rootSignature = gpu::CreateRootSignature(device, FACE_ROOT_LAYOUT);
+        if (!result.rootSignature)
+            return std::unexpected("面の式のルート署名を作れない");
+
+        result.pipeline = gpu::CreateComputePipeline(device, result.rootSignature.Get(), *bytecode);
+        result.tables = {
+            CreateUploadBuffer(device, std::span(table.species)), CreateUploadBuffer(device, std::span(table.rules)),
+            CreateUploadBuffer(device, std::span(table.ruleIndex)), CreateUploadBuffer(device, std::span(table.rates))};
+        const uint64_t probeBytes = uint64_t{CELL_COUNT} * FACE_PROBE_VALUES * sizeof(int64_t);
+        result.probes = gpu::CreateBuffer(device, probeBytes, gpu::BufferKind::UnorderedAccess);
+        result.probeReadback = gpu::CreateBuffer(device, probeBytes, gpu::BufferKind::Readback);
+        const bool tablesCreated = std::ranges::all_of(result.tables,
+                                                       [](const auto& buffer) { return buffer != nullptr; });
+        if (!result.pipeline || !tablesCreated || !result.probes || !result.probeReadback)
+            return std::unexpected("面の式のパイプラインかバッファを作れない");
+
+        return result;
+    }
+
+    // 区間の初めのセルと Ec(CPU の値 = 前の区間で GPU と一致を確かめた値)で面の式を GPU で計算して読み戻す
+    std::expected<std::vector<int64_t>, std::string> RunFaces(ID3D12Device5* device, gpu::ImmediateQueue& queue,
+                                                              const FacePipeline& pipeline, gpu::DebugRing& debugRing,
+                                                              const LoneScene& scene) {
+        const ComPtr<ID3D12Resource> cells = CreateUploadBuffer(device, std::span(scene.cells));
+        const ComPtr<ID3D12Resource> energies = CreateUploadBuffer(device, std::span(scene.condensedEnergies));
+        if (!cells || !energies)
+            return std::unexpected("面の式の入力を作れない");
+
+        ID3D12GraphicsCommandList10* list = queue.Begin();
+        if (list == nullptr)
+            return std::unexpected("コマンドリストを始められない");
+
+        const uint32_t faceCount = CELL_COUNT;
+        debugRing.RecordBegin(list);
+        list->SetComputeRootSignature(pipeline.rootSignature.Get());
+        list->SetPipelineState(pipeline.pipeline.Get());
+        list->SetComputeRootUnorderedAccessView(0, pipeline.probes->GetGPUVirtualAddress());
+        list->SetComputeRoot32BitConstants(FACE_ROOT_LAYOUT.RootConstantIndex(), 1, &faceCount, 0);
+        list->SetComputeRootUnorderedAccessView(FACE_ROOT_LAYOUT.DebugRingIndex(), debugRing.GpuAddress());
+        for (uint32_t i = 0; i < pipeline.tables.size(); ++i)
+            list->SetComputeRootShaderResourceView(FACE_ROOT_LAYOUT.SrvIndex(i),
+                                                   pipeline.tables[i]->GetGPUVirtualAddress());
+
+        list->SetComputeRootShaderResourceView(FACE_ROOT_LAYOUT.SrvIndex(4), cells->GetGPUVirtualAddress());
+        list->SetComputeRootShaderResourceView(FACE_ROOT_LAYOUT.SrvIndex(5), energies->GetGPUVirtualAddress());
+        list->Dispatch(CELL_COUNT / THREADS_PER_GROUP, 1, 1);
+        gpu::RecordCopyToReadback(list, pipeline.probes.Get(), pipeline.probeReadback.Get());
+        debugRing.RecordReadbackAndReset(list);
+        if (!queue.ExecuteAndWait())
+            return std::unexpected("GPU での実行に失敗(面の式)");
+
+        const gpu::DebugRingContents debugOutput = debugRing.Drain();
+        if (debugOutput.assertCount > 0)
+            return std::unexpected(std::format("GPU の FX_ASSERT が {} 件(面の式)", debugOutput.assertCount));
+
+        std::vector<int64_t> probes(size_t{CELL_COUNT} * FACE_PROBE_VALUES);
+        if (!gpu::ReadBuffer(pipeline.probeReadback.Get(), std::as_writable_bytes(std::span(probes))))
+            return std::unexpected("読み戻せない(面の式)");
+
+        return probes;
+    }
+
+    // 面 face の値の CPU リファレンス(phase_layer_faces.hlsl の Main と同じ関数を同じ順に)
+    std::array<int64_t, FACE_PROBE_VALUES> ProbeFace(const sim::BakedReactionTable& table, const LoneScene& scene,
+                                                     uint32_t face) {
+        const auto view = table.View();
+        const uint32_t other = ((face * 389u) + 17u) % CELL_COUNT;
+        const uint32_t direction = face % 6u;
+        const uint32_t gap = (face / 6u) % 3u;
+        const auto level = static_cast<int32_t>((face / 7u) % 12u);
+        const uint32_t repeatShift = gap != 0 ? 2u * ((face / 5u) % 2u) : 0u;
+        const uint32_t row = (face / 18u) & ((1u << gap) - 1u);
+        const RxCell& selfCell = scene.cells[face];
+        const RxCell& otherCell = scene.cells[other];
+        const int64_t selfEnergy = scene.condensedEnergies[face];
+
+        // --- 片側と、粗い側を細かい面の段へ写す ---
+        const PlPartSide self = PlPartSideOf(view, selfCell, selfEnergy, direction);
+        PlPartSide otherSide = PlPartSideOf(view, otherCell, scene.condensedEnergies[other], direction ^ 1u);
+        if (gap != 0)
+            otherSide = TxPartSideOnRow(otherSide, gap, row);
+
+        // --- 陽の面の流れ・層の上の面・粗い側へ送る分 ---
+        const PlFaceFlow flow = TxPartFaceFlow(self, otherSide, level, gap, repeatShift);
+        const PlLayer layer = PlLayerOf(view, selfCell);
+        int64_t inner = 0;
+        if (layer.mixed != 0) {
+            const TxCellParts parts = TxMakeCellParts(PlPartsOf(view, selfCell, selfEnergy), layer);
+            inner = TxPartInnerFlow(parts.lateral.lower, parts.lateral.upper, parts.seriesConductance, level);
+        }
+
+        int64_t sent = flow.total;
+        int64_t coarseWhole = 0;
+        if (gap != 0) {
+            const MrCrossTransfer transfer = MrSplitCrossFlow(flow.total, gap, (face & 1u) != 0);
+            sent = -transfer.fineDelta;
+            coarseWhole = transfer.coarseDelta.whole;
+        }
+
+        // --- 陰の系の組の面 ---
+        const TxPartPairs pairs = TxPartPairsOf(self, otherSide, level, gap);
+        const PlPairOverlaps overlaps = PlPairOverlapsOf(self, otherSide);
+        const auto word = [](uint32_t high, uint32_t low) {
+            return static_cast<int64_t>(FX_U64(high, low));
+        };
+
+        return {flow.total,
+                flow.selfCondensed,
+                flow.neighborCondensed,
+                inner,
+                sent,
+                TxScaleCondensed(flow.selfCondensed, sent, flow.total),
+                TxCoarseCondensedWhole(TxScaleCondensed(flow.neighborCondensed, sent, flow.total), gap),
+                static_cast<int64_t>(pairs.lowerLower.conductance),
+                pairs.lowerLower.explicitFlow,
+                static_cast<int64_t>(pairs.upperUpper.conductance),
+                pairs.upperUpper.explicitFlow,
+                static_cast<int64_t>(pairs.lowerUpper.conductance),
+                pairs.lowerUpper.explicitFlow,
+                static_cast<int64_t>(pairs.upperLower.conductance),
+                pairs.upperLower.explicitFlow,
+                word(overlaps.upperUpper, overlaps.lowerLower),
+                word(overlaps.upperLower, overlaps.lowerUpper),
+                word(self.splitQ16, otherSide.splitQ16),
+                word(layer.mixed, PlLayerOf(view, otherCell).mixed),
+                coarseWhole};
+    }
+
+    // 面の式が通った道の数(どれも 0 なら場面が部分の道を通っていない)
+    struct FaceCoverage {
+        uint32_t bothMixed = 0;        // 両側が混ざったセル
+        uint32_t condensedFlows = 0;   // 層の分が 0 でない面(自分か相手)
+        uint32_t splitRows = 0;        // 違うレベルの面で、写した段の中に層の境がある(TxPartSideOnRow の端数の道)
+        uint32_t innerFlows = 0;       // 層の上の面が流れた
+        uint32_t coarseCondensed = 0;  // 粗い側の層へ送った分が 0 でない
+        uint32_t pairFaces = 0;        // 陰の系の組の面(係数 0 でない組)
+    };
+
+    int CompareFaces(const sim::BakedReactionTable& table, const LoneScene& scene, std::span<const int64_t> probes,
+                     uint32_t segment, FaceCoverage& coverage) {
+        int mismatchCount = 0;
+        for (uint32_t face = 0; face < CELL_COUNT; ++face) {
+            const std::array<int64_t, FACE_PROBE_VALUES> cpu = ProbeFace(table, scene, face);
+            const std::span<const int64_t> gpuValues = probes.subspan(size_t{face} * FACE_PROBE_VALUES,
+                                                                      FACE_PROBE_VALUES);
+            const uint64_t mixedWord = static_cast<uint64_t>(cpu[18]);
+            const uint32_t splitWord = static_cast<uint32_t>(cpu[17]);
+            coverage.bothMixed += mixedWord == FX_U64(1, 1) ? 1 : 0;
+            coverage.condensedFlows += cpu[1] != 0 || cpu[2] != 0 ? 1 : 0;
+            coverage.splitRows += (face / 6u) % 3u != 0 && splitWord != 0 && splitWord < PL_FULL_Q16 ? 1 : 0;
+            coverage.innerFlows += cpu[3] != 0 ? 1 : 0;
+            coverage.coarseCondensed += cpu[6] != 0 ? 1 : 0;
+            for (uint32_t pair = 0; pair < 4; ++pair)
+                coverage.pairFaces += cpu[7 + (2 * pair)] != 0 ? 1 : 0;
+
+            if (std::ranges::equal(cpu, gpuValues))
+                continue;
+
+            if (mismatchCount++ < MAX_REPORTED_MISMATCHES) {
+                const auto at = static_cast<size_t>(std::ranges::mismatch(cpu, gpuValues).in1 - cpu.begin());
+                Log(Channel::Gpu, Level::Error, "面の式の食い違い: 区間 {} 面 {} の値 {}: cpu {} / gpu {}", segment,
+                    face, at, cpu[at], gpuValues[at]);
+            }
+        }
+
+        return mismatchCount;
+    }
+
     // --- CPU と比べる ---------------------------------------------------------------------------------
     struct Coverage {
         uint32_t becameMixed = 0;    // 区間の初めに混ざらず、終わりに混ざったセル
@@ -344,8 +538,23 @@ namespace {
         if (!debugRing)
             return std::unexpected(debugRing.error());
 
+        const auto facePipeline = CreateFacePipeline(device, table);
+        if (!facePipeline)
+            return std::unexpected(facePipeline.error());
+
         Coverage coverage;
+        FaceCoverage faceCoverage;
         for (uint32_t segment = 0; segment < SEGMENT_COUNT; ++segment) {
+            // --- 区間の初めの値で面の式(CPU の値 = 前の区間までで GPU と一致を確かめた値)---
+            const auto probes = RunFaces(device, *queue, *facePipeline, *debugRing, cpu);
+            if (!probes)
+                return std::unexpected(probes.error());
+
+            const int faceMismatches = CompareFaces(table, cpu, *probes, segment, faceCoverage);
+            if (faceMismatches != 0)
+                return std::unexpected(
+                    std::format("区間 {} の初めの面の式で {} 面が食い違う", segment, faceMismatches));
+
             const auto started = chr::steady_clock::now();
             const auto gpuResult = RunSegment(*queue, *pipeline, *debugRing, segment);
             if (!gpuResult)
@@ -372,6 +581,17 @@ namespace {
             return std::unexpected("混ざったセルで気体だけの規則が進んでいない(2 回目の反応を通っていない)");
         if (coverage.becameMixed == 0 || coverage.becameUnmixed == 0)
             return std::unexpected("混ざり方の変わり目の両方が起きていない(場面が核の道を通っていない)");
+
+        Log(Channel::Gpu, Level::Info,
+            "  面の式(累計 {} 面): 両側が混ざった {}・層の分 {}・段の中の境 {}・層の上の面 {}・粗い側の層 "
+            "{}・陰の組の面 {}",
+            CELL_COUNT * SEGMENT_COUNT, faceCoverage.bothMixed, faceCoverage.condensedFlows, faceCoverage.splitRows,
+            faceCoverage.innerFlows, faceCoverage.coarseCondensed, faceCoverage.pairFaces);
+        const bool facesCovered = faceCoverage.bothMixed != 0 && faceCoverage.condensedFlows != 0 &&
+                                  faceCoverage.splitRows != 0 && faceCoverage.innerFlows != 0 &&
+                                  faceCoverage.coarseCondensed != 0 && faceCoverage.pairFaces != 0;
+        if (!facesCovered)
+            return std::unexpected("面の式の場面が部分の道のどれかを通っていない");
 
         uint64_t digest = 0;
         for (uint32_t index = 0; index < CELL_COUNT; ++index) {

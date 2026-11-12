@@ -51,6 +51,7 @@ multires_wide_conduct_mark 16
 multires_wide_conduct_prepare 1
 object_heat_react 15
 phase_layer_cells 6
+phase_layer_faces 6
 physics_build_manifolds 8
 physics_collect_heat 10
 physics_graph 83
