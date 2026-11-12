@@ -535,7 +535,9 @@ namespace bicameral::sim {
         }
 
         // 子 2³ の層を成分ごとに和 ÷ 8 の切り捨てで(粗いセル coarse の成分と同じ位置。T-1220。ADR-0481 の 5 の 4)。
-        // 子の層 ≤ 子の量なので 層の和 ÷ 8 ≤ 量の和 ÷ 8 ≤ 粗いセルの量(端数は量の側にだけ入る)。切り捨ての余りは層から残りへ移る
+        // 子の層 ≤ 子の量なので 層の和 ÷ 8 ≤ 量の和 ÷ 8 ≤ 粗いセルの量(端数は量の側にだけ入る)。切り捨ての余りは層から残りへ移る。
+        // 層を使う世界(cellLayers.enabled)は切り上げて量で抑える(余り 0〜7 µmol を舞う粒にしない。ADR-0489 の 3 (B)「舞う粒は
+        // 崩れ・吹き上げの出来事からだけ」。T-1324)
         std::vector<uint64_t> CoarsenLayers(const MultiresNest& nest, uint32_t childSlot, uint32_t local,
                                             const RxWideCell& coarse) {
             std::vector<uint64_t> sums(coarse.speciesCount, 0);
@@ -551,8 +553,9 @@ namespace bicameral::sim {
                 }
             }
 
+            const uint64_t roundUp = nest.cellLayers.enabled ? MR_CHILDREN_PER_CELL - 1 : 0;
             for (uint32_t k = 0; k < coarse.speciesCount; ++k)
-                sums[k] = std::min(sums[k] / MR_CHILDREN_PER_CELL, coarse.amounts[k]);
+                sums[k] = std::min((sums[k] + roundUp) / MR_CHILDREN_PER_CELL, coarse.amounts[k]);
 
             return sums;
         }

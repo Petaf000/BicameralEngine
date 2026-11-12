@@ -9,6 +9,7 @@
 //   - 費用: 層のある頁の 1 セルのバイトと、書く道の時間(表示だけ。docs/perf.md 用)
 // 2 段目(T-1220。ADR-0489。反応しない物質 12 種の表):
 //   - 細かくする / 粗くする(インライン・溢れの世界): 子は親と同じ量と層(子の層の和 = 親の層 × 8)・粗くすると量は元に戻り層は成分ごとに和 ÷ 8 の切り捨て
+//     (層を使う世界は切り上げを量で抑える。T-1324)
 //   - 一様の枠: 層まで一様な頁は層ごと畳む・一様な子へ写す・同じ層なら一様な親のまま・頁に広げると写す・要約と保存点に入る
 //   - 溢れ: インライン ↔ 溢れの間で物質が動いても層は物質についていく・要約と保存点
 //   - 層を使う世界の眠る: 粒の物質の残り(舞う粒)のある頁は畳まない(気体などほかの物質の残りは数えない)
@@ -454,14 +455,18 @@ namespace {
     }
 
     // 細かくする(子は親と同じ量・同じ層)→ 子の層を変える → 粗くする(層は成分ごとに和 ÷ 8 の切り捨て・量は元に戻る)
-    void TestRefineCoarsen(const BakedReactionTable& table, bool wide) {
+    // layerWorld(層を使う世界。T-1324): 粗くする層は和 ÷ 8 の切り上げを量で抑える(余りを舞う粒にしない。ADR-0489 の 3 (B))
+    void TestRefineCoarsen(const BakedReactionTable& table, bool wide, bool layerWorld = false) {
         const uint32_t count = wide ? INERT_SPECIES : 4;
-        const std::string_view name = wide ? "溢れの世界" : "インラインの世界";
+        const std::string name = std::format("{}{}", wide ? "溢れの世界" : "インラインの世界",
+                                             layerWorld ? "・層を使う世界" : "");
         const auto cellOf = [&](uint32_t index) {
             return MakeInertCell(table, count, index);
         };
         LayeredWorld world = MakeLayeredRoot(table, wide, cellOf, SomeLayers);
         MultiresNest& nest = world.nest;
+        if (layerWorld)
+            EnableCellLayers(nest, table);
 
         Request(nest, MR_REQUEST_REFINE);
         const uint32_t child = ChildOfRoot(nest);
@@ -505,8 +510,11 @@ namespace {
                     expected[local][i] += layers[i];
             }
 
-            for (uint64_t& layer : expected[local])
-                layer /= MR_CHILDREN_PER_CELL;
+            const RxWideCell parent = cellOf(MrOctantCell(octant, local));
+            for (uint32_t i = 0; i < count; ++i) {
+                const uint64_t roundUp = layerWorld ? MR_CHILDREN_PER_CELL - 1 : 0;
+                expected[local][i] = std::min((expected[local][i] + roundUp) / MR_CHILDREN_PER_CELL, parent.amounts[i]);
+            }
         }
 
         // --- 粗くする ---
@@ -979,6 +987,8 @@ namespace {
         const BakedReactionTable inert = MakeInertTable();
         TestRefineCoarsen(inert, false);
         TestRefineCoarsen(inert, true);
+        TestRefineCoarsen(inert, false, true);
+        TestRefineCoarsen(inert, true, true);
         TestUniformLayers(inert, false);
         TestUniformLayers(inert, true);
         TestOverflowRebind(inert);

@@ -11,6 +11,7 @@
 //      (粗くする・畳む・広げるの層は T-1240 の 3 段目)
 //   6. 層の頁が尽きる場面: 層の頁を小さくした世界では、層のある所を細かくする要求を断って数える(木と量は細かくしない世界と同じ)
 //   5 は粗くする刻み(COARSEN_TICK から 1 段ずつ)まで比べる(T-1240 の 3 段目: 子の層の和 ÷ 8・子の層の頁を返す)。
+//      本物の鎖は層を使う世界でも(粗くする層は和 ÷ 8 の切り上げを量で抑える。T-1324)
 //   7. 一様の枠の層(T-1240 の 3・4 段目): 層まで同じ静かな頁を畳む(層ごと一様の枠の層へ)→ 一様な根を本物の鎖で細かくする(子は親と同じ
 //      一様の枠の層)→ 粗くして戻す。燃える一様な根(一様の枠の層)を刻むと頁に広げる(一様の枠の層を頁へ)。毎刻み比べる
 //   9. 層を使う世界で反応が粒を生む表(T-1322・T-1323): 燃える根(層なしで始める = GPU が層の頁を取る)と燃える一様な根(一様の枠の層 →
@@ -355,15 +356,19 @@ namespace {
         return count;
     }
 
-    // --- 5. 細かくする場面(本物の鎖・影の鎖)---
+    // --- 5. 細かくする場面(本物の鎖・影の鎖)。layerWorld = 層を使う世界(粗くする層は和 ÷ 8 の切り上げを量で抑える。T-1324)---
     std::expected<void, std::string> RunChain(ID3D12Device5* device, gpu::ImmediateQueue& queue, gpu::DebugRing& ring,
-                                              const sim::BakedReactionTable& table, test::MultiresScenario scenario) {
+                                              const sim::BakedReactionTable& table, test::MultiresScenario scenario,
+                                              bool layerWorld = false) {
         sim::MultiresNest cpu = MakeScene(table, true);
+        if (layerWorld)
+            sim::EnableCellLayers(cpu, table);
         auto gpu = sim::GpuMultires::Create(device, table, cpu.capacity, GpuOptions(StepMode::Full, CHAIN_LAYER_PAGES));
         if (!gpu)
             return std::unexpected(gpu.error());
 
-        const std::string scene = scenario == test::MultiresScenario::Real ? "本物の鎖" : "影の鎖";
+        const std::string scene = std::format("{}{}", scenario == test::MultiresScenario::Real ? "本物の鎖" : "影の鎖",
+                                              layerWorld ? "・層を使う世界" : "");
         uint32_t layered = 0;
         uint32_t mostLayered = 0;
         for (uint64_t tick = 0; tick < CHAIN_TICKS; ++tick) {
@@ -817,6 +822,9 @@ namespace {
             if (auto chain = RunChain(device, queue, ring, table, scenario); !chain)
                 return chain;
         }
+
+        if (auto chain = RunChain(device, queue, ring, table, test::MultiresScenario::Real, true); !chain)
+            return chain;
 
         if (auto shortage = RunShortage(device, queue, ring, table); !shortage)
             return shortage;

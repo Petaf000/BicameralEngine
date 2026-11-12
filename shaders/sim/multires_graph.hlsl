@@ -746,6 +746,7 @@ uint32_t CoarsenParentLayerPage(uint32_t request, MrRequestState state, MrBlock 
 #ifndef MR_WIDE_CELLS
 // 子 2³(親の八分の一のセル t の子)の層を物質で結んで和 ÷ 8 の切り捨て、粗いセル coarse の量で抑えて target へ書く
 // (組 c = coarse の成分 c。CPU の CoarsenLayers: 子の層 ≤ 子の量なので 層の和 ÷ 8 ≤ 粗いセルの量。切り捨ての余りは残りへ)。
+// 層を使う世界(LayerGrainFloats)は切り上げて量で抑える(余りを舞う粒にしない。ADR-0489 の 3 (B)。T-1324)。
 // 和は決まった数の回しで成分の位置を選ぶ(動的な添字で構造体の配列を読まない。T-0397)
 void WriteCoarsenedLayers(MrBlock child, uint32_t childSlot, uint32_t t, RxCell coarse, uint32_t target) {
     uint64_t sums[RX_MAX_CELL_SPECIES];
@@ -775,11 +776,12 @@ void WriteCoarsenedLayers(MrBlock child, uint32_t childSlot, uint32_t t, RxCell 
         }
     }
 
+    const uint64_t roundUp = LayerGrainFloats() ? MR_CHILDREN_PER_CELL - 1 : 0u;
     FX_UNROLL
     for (uint32_t c = 0; c < RX_MAX_CELL_SPECIES; ++c) {
         const bool present = c < coarse.speciesCount;
         const uint64_t amount = present ? coarse.amounts[c] : 0;
-        const uint64_t mean = sums[c] / MR_CHILDREN_PER_CELL;
+        const uint64_t mean = (sums[c] + roundUp) / MR_CHILDREN_PER_CELL;
         const uint64_t layer = MrLayerLess(amount, mean) ? amount : mean;
         const uint32_t address = target + (c * MR_LAYER_ENTRY_WORDS);
         g_layers[address] = present ? coarse.species[c] : 0u;
