@@ -787,6 +787,20 @@ FX_FN int64_t OhFlowSpeed(int64_t momentum, uint64_t faceMass) {
                                            : (speed < -OH_FLOW_SPEED_LIMIT_Q16 ? -OH_FLOW_SPEED_LIMIT_Q16 : speed);
 }
 
+// 圧力の射影が見る予測の速さ(T-1363): 運動量 ÷ 面の質量そのもの。上の上限(1 小刻みに 1 ボクセル)は運ぶ時だけに効かせる。
+// 射影が上限で止めた速さを見て、直しを止める前の運動量に足すと、上限を超えた分の慣性が圧力から見えず直されない
+// (薄くなった面で速さ = 運動量 ÷ 面の質量が膨らみ続け、膨らみたい体積が吸い込みでも出ていき続けた = 暖機の 1/10^5 の薄い気体)。
+// ここでの止めは右辺の桁あふれの止めだけ(1 小刻みに 256 ボクセル。右辺 × 2^24 が 64bit に収まる)
+FX_CONST int64_t OH_FLOW_PREDICTED_LIMIT_Q16 = 16777216;
+
+FX_FN int64_t OhFlowPredictedSpeed(int64_t momentum, uint64_t faceMass) {
+    const int64_t speed = OhMulDivToward0(momentum, 1, faceMass);
+
+    return speed > OH_FLOW_PREDICTED_LIMIT_Q16 ? OH_FLOW_PREDICTED_LIMIT_Q16
+                                               : (speed < -OH_FLOW_PREDICTED_LIMIT_Q16 ? -OH_FLOW_PREDICTED_LIMIT_Q16
+                                                                                       : speed);
+}
+
 // 重さの加速(1 小刻みの速さの変わり ÷ 1 小刻み。Q16): g Δt² ÷ s = 9806650 µm/s² × 2^L ÷ (500000 µm × 3600 × N²)
 FX_FN uint64_t OhFlowGravityQ16(int32_t bodyLevel, uint32_t flowSubsteps) {
     const uint64_t numerator = ((uint64_t)9806650 << bodyLevel) * 65536;

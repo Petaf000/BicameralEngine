@@ -1117,11 +1117,14 @@ namespace {
         // --grow-dump 書き出し先 回数(T-1362。CPU の線の答えだけ回し、V 字がこの回数以上の解きの問題を書き出す。刻みごとの一番多い回数も出す)
         std::string dumpPath;
         uint32_t dumpMinCycles = 0;
+        std::string
+            tracePath;  // --grow-trace 書き出し先(T-1363。CPU の線の答えで、小刻みごとに層で一番薄いボクセルを書き出す)
     };
 
     // CPU で回して、上限で止まった解きの最後の赤黒を見る(T-1349 の ①: ゆっくり収まっているのか、整数の行き来で収まらないのか)
     std::expected<void, std::string> GrowCpu(const Context& context, const Shape& shape, const PressureRule& rule,
-                                             uint32_t ticks, std::ostream* dump = nullptr, uint32_t dumpMinCycles = 0) {
+                                             uint32_t ticks, std::ostream* dump = nullptr, uint32_t dumpMinCycles = 0,
+                                             std::ostream* trace = nullptr) {
         auto one = MakePaper(context.table, context.shared, context.tables.gases, shape);
         if (!one)
             return std::unexpected("層を作れない");
@@ -1133,6 +1136,7 @@ namespace {
             ApplyRule(rule, flows[o]);
             flows[o].pressureDump = dump;
             flows[o].pressureDumpMinCycles = dumpMinCycles;
+            flows[o].flowTrace = trace;
         }
 
         uint64_t reportedSolves = 0;
@@ -1142,7 +1146,7 @@ namespace {
                 return std::unexpected(std::format("CPU の流れが崩れた(刻み {})", t));
 
             test::OhShellFlow& flow = flows[0];
-            if (dump != nullptr) {
+            if (dump != nullptr || trace != nullptr) {
                 Log(Channel::Gpu, Level::Info, "CPU: 刻み {}: 解き {}・V 字の和 {}・この刻みの一番多い {}・上限 {}", t,
                     flow.pressureSolves, flow.pressureSweepsUsed, flow.pressureMostSweeps, flow.pressureCapped);
                 flow.pressureMostSweeps = 0;
@@ -1189,6 +1193,12 @@ namespace {
     std::expected<void, std::string> Grow(const Context& context, const GrowOptions& options) {
         if (options.cpuTicks != 0) {
             const Shape shape = options.shape.value_or(Shape{"紙 48 × 12・層 4 段", 48, 12, 4});
+            if (!options.tracePath.empty()) {
+                std::ofstream trace(options.tracePath, std::ios::binary);
+                return GrowCpu(context, shape, PressureRule{"多重格子を線まで(既定)", 0, 4}, options.cpuTicks, nullptr,
+                               0, &trace);
+            }
+
             if (!options.dumpPath.empty()) {
                 std::ofstream dump(options.dumpPath, std::ios::binary);
                 return GrowCpu(context, shape, PressureRule{"多重格子を線まで(既定)", 0, 4}, options.cpuTicks, &dump,
@@ -1273,6 +1283,8 @@ namespace {
             } else if (text == "--grow-dump" && i + 2 < arguments.size()) {
                 growOptions.dumpPath = arguments[++i];
                 growOptions.dumpMinCycles = static_cast<uint32_t>(std::strtoul(arguments[++i], nullptr, 10));
+            } else if (text == "--grow-trace" && i + 1 < arguments.size()) {
+                growOptions.tracePath = arguments[++i];
             } else if (text == "--grow-cpu" && i + 1 < arguments.size()) {
                 growOptions.cpuTicks = static_cast<uint32_t>(std::strtoul(arguments[++i], nullptr, 10));
             } else if (text == "--grow-ticks" && i + 2 < arguments.size()) {
