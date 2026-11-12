@@ -18,7 +18,7 @@ probe_phase は場面の線(湯気・池・氷の結果。EXPECT_OUTCOME の 6 �
 
 ## メモ・参考
 - 場面の線を戻すのは、場面を世界の木へ移す時(T-1219。T-1160 の判断待ち 3 の仮)。
-- 流す時間は 640 秒前後(CPU。T-1368 の測り)。
+- 流す時間は 640 秒前後(CPU。T-1368 の測り)。main 10213abf の上の ctest では 1063 秒(ほかの作業ツリーのビルドと重なった。TIMEOUT 1800)。
 
 ## 作業ログ
 - 2026-11-13(wt5 の作業役): 引数と ctest を足し、release の exe(`probe_phase_test --no-scene-lines`)を raw で直接流した: すべて通った(FAILED 0)。

@@ -40,3 +40,4 @@ main で DISABLED の lab_box(CPU)の 6 件の失敗(どれも試験の前提が
 ## 作業ログ
 - 2026-11-13(wt5 の作業役): t-1368 から t-1369-lab-box-tests を切り、lab_box_test・gpu_lab_box_test を直した。lab_box_test を raw で直接流して
   TestTableMark の比べる刻みを +10 から替えた刻みへ直した(+10 は境目)。gpu_lab_box〔HW・WARP〕を ctest で流した。ADR-0505 に 1 行追記。
+  main 10213abf へ rebase した後の release(警告 0)で ctest lab_box・probe_phase_checks・probe_phase_porous_stone・gpu_lab_box〔HW・WARP〕が合格。
