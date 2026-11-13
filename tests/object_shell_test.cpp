@@ -419,6 +419,15 @@ namespace {
         uint32_t dumpEvery = 0;
     };
 
+    // 速さの上限の調べ(T-1380。研究・既定 = 今と同じ答え): 運ぶ時の速さの上限(OhShellFlow::speedLimitQ16。0 = 既定の 1 小刻みに 1 ボクセル)・
+    // 越えた分の持ち越しの形(OhShellFlow::overspeedCarry)・流れの小刻みを 2 の何乗倍にするか
+    struct SpeedRule {
+        int64_t limitQ16 = 0;
+        uint32_t carry = 0;
+        uint32_t substepLog2 = 0;
+        int64_t centerLimitQ16 = 0;  // ① 運動量を運ぶ時の中心の速さの止め(0 = 既定の半分)
+    };
+
     // 圧力の反復の回数(T-1201。燃え方の場面ごと: 0 始め〔火の来た列が 1/3 まで〕・1 最中・2 消えかけ〔0.5 s 新しい列に火が来ない〕)
     struct SweepStats {
         uint64_t solves = 0;
@@ -445,12 +454,17 @@ namespace {
         uint32_t shellsReturned = 0;
         int32_t hottestShellKelvin = 0;
         int32_t hottestSkeletonKelvin = 0;
-        int32_t hottestCellKelvin = 0;            // 囲むセル(閉じた 1 セル。燃えた熱が全部ここに溜まる)
-        uint64_t voxelTicks = 0;                  // 回したボクセルの数の和(費用)
-        int64_t fastestMillimetresPerSecond = 0;  // 流れ: 一番速い面
-        uint64_t limitedShares = 0;               // 流れ: 出る上限で縮めた(ボクセル × 小刻み)
-        std::array<SweepStats, 3> sweepStats{};   // 流れ: 圧力の反復の回数(燃え方の場面ごと。T-1201)
-        int64_t gapSpeedQ16 = 0;                  // 流れ: 決まった回数と止まった時の面の速さの差の最大(T-1201)
+        int32_t hottestCellKelvin = 0;                     // 囲むセル(閉じた 1 セル。燃えた熱が全部ここに溜まる)
+        uint64_t voxelTicks = 0;                           // 回したボクセルの数の和(費用)
+        int64_t fastestMillimetresPerSecond = 0;           // 流れ: 一番速い面
+        int64_t fastestPredictedMillimetresPerSecond = 0;  // 流れ: 射影の答えの一番速い面(上限で止める前。T-1380)
+        uint64_t overspeedFaces = 0;                       // 流れ: 射影の答えが速さの上限を越えた面 × 小刻み(T-1380)
+        uint64_t countedFaces = 0;                         // 流れ: 数えた面 × 小刻み
+        uint64_t centerClamped = 0;                        // 流れ: ① の中心の速さの止めに当たった数・数えた数(T-1380)
+        uint64_t centerCounted = 0;
+        uint64_t limitedShares = 0;              // 流れ: 出る上限で縮めた(ボクセル × 小刻み)
+        std::array<SweepStats, 3> sweepStats{};  // 流れ: 圧力の反復の回数(燃え方の場面ごと。T-1201)
+        int64_t gapSpeedQ16 = 0;                 // 流れ: 決まった回数と止まった時の面の速さの差の最大(T-1201)
         int64_t gapReferenceQ16 = 0;
         int64_t biasLineMinusFixed = 0;  // 流れ: 丸めの偏り(T-1355。OhShellFlow の bias*。比べの時だけ)
         std::array<int64_t, 2> biasResidualQ8{};
@@ -491,7 +505,7 @@ namespace {
     Burn RunBurn(const Tables& tables, const Fuel& fuel, int32_t cellLevel, ShellMode mode, bool sleeping = true,
                  bool probe = false, uint32_t layers = 1, bool skeletonWalls = true, const Grid& grid = {},
                  bool inWorld = false, const Tables* splitTables = nullptr, uint32_t splitLog2 = 0,
-                 const PressureRule& pressure = {}) {
+                 const PressureRule& pressure = {}, const SpeedRule& speedRule = {}) {
         const test::OhCpuTable shared{.view = tables.table.View(),
                                       .objectSpecies = tables.object.species,
                                       .molarMasses = tables.table.molarMasses};
@@ -503,7 +517,8 @@ namespace {
                                             .objectSpecies = objectTables.object.species,
                                             .molarMasses = objectTables.table.molarMasses};
         // 流れの小刻みは箱が細かいほど多く(1 小刻みに 1 ボクセルの上限が同じ 1.875 m/s になるように)
-        test::OhShellFlow flow{.substeps = 4u << static_cast<uint32_t>(grid.bodyLevel - BODY_LEVEL),
+        test::OhShellFlow flow{.substeps = (4u << static_cast<uint32_t>(grid.bodyLevel - BODY_LEVEL))
+                                           << speedRule.substepLog2,
                                .pressureSweeps = pressure.sweeps,
                                .pressureUntilQuiet = pressure.untilQuiet,
                                .pressureWarmStart = pressure.warmStart,
@@ -517,7 +532,10 @@ namespace {
                                .gapSweeps = pressure.gapSweeps,
                                .skeletonWalls = skeletonWalls,
                                .pressureDump = pressure.dump,
-                               .pressureDumpEvery = pressure.dumpEvery};
+                               .pressureDumpEvery = pressure.dumpEvery,
+                               .speedLimitQ16 = speedRule.limitQ16,
+                               .overspeedCarry = speedRule.carry,
+                               .centerSpeedLimitQ16 = speedRule.centerLimitQ16};
         const test::OhGasList& gases = tables.object.gases;
         test::OhWorld world = MakeWorld(tables.table, fuel, cellLevel, grid);
         world.sleeping = sleeping;
@@ -698,7 +716,14 @@ namespace {
         }
 
         // 1 小刻み・1 ボクセル の速さ = 1.875 m/s(7.8 mm・1/240 s。細かい箱も小刻みを同じ割合で増やすので同じ): q(Q16)× 1875 ÷ 65536 mm/s
-        burn.fastestMillimetresPerSecond = (flow.fastestQ16 * 1875) / 65536;
+        // (小刻みを 2^k 倍にした時は 1 小刻みが 1/2^k の長さなので、同じ q が 2^k 倍速い。T-1380)
+        burn.fastestMillimetresPerSecond = ((flow.fastestQ16 * 1875) / 65536) << speedRule.substepLog2;
+        burn.fastestPredictedMillimetresPerSecond = ((flow.fastestPredictedQ16 * 1875) / 65536)
+                                                    << speedRule.substepLog2;
+        burn.centerClamped = flow.centerClamped;
+        burn.centerCounted = flow.centerCounted;
+        burn.overspeedFaces = flow.overspeedFaces;
+        burn.countedFaces = flow.countedFaces;
         burn.limitedShares = flow.limitedShares;
         burn.gapSpeedQ16 = flow.gapSpeedQ16;
         burn.gapReferenceQ16 = flow.gapReferenceQ16;
@@ -759,6 +784,23 @@ namespace {
             std::printf("  流れ: 一番速い面 %lld mm/s・出る上限で縮めた %llu\n",
                         static_cast<long long>(burn.fastestMillimetresPerSecond),
                         static_cast<unsigned long long>(burn.limitedShares));
+
+        if (burn.countedFaces != 0)
+            std::printf(
+                "  速さの上限(T-1380): 射影の答えの一番速い面 %lld mm/s・上限を越えた面 × 小刻み %llu / %llu(%.4f "
+                "%%)・ハッシュ "
+                "%016llx\n",
+                static_cast<long long>(burn.fastestPredictedMillimetresPerSecond),
+                static_cast<unsigned long long>(burn.overspeedFaces),
+                static_cast<unsigned long long>(burn.countedFaces),
+                100.0 * static_cast<double>(burn.overspeedFaces) / static_cast<double>(burn.countedFaces),
+                static_cast<unsigned long long>(burn.digest));
+
+        if (burn.centerCounted != 0)
+            std::printf("  ① の中心の速さの止めに当たった %llu / %llu(%.4f %%)\n",
+                        static_cast<unsigned long long>(burn.centerClamped),
+                        static_cast<unsigned long long>(burn.centerCounted),
+                        100.0 * static_cast<double>(burn.centerClamped) / static_cast<double>(burn.centerCounted));
 
         if (burn.sweepStats[0].solves + burn.sweepStats[1].solves + burn.sweepStats[2].solves != 0) {
             std::printf("  圧力の反復(1 回に解く赤黒の平均 / 一番多い / 上限で止まった / 解いた回数):");
@@ -879,12 +921,27 @@ int main(int argc, char** argv) {
             pressure.finishCompare = (rule % 10) != 0;
         }
 
+        // [速さの上限 Q16(0 = 既定 65536 = 1 小刻みに 1 ボクセル)][越えた分の持ち越し 0 = 今 / 1 = 運動量を上限で止める]
+        //  [流れの小刻みを 2 の何乗倍に](T-1380。調べるだけ。省くと今と同じ答え)
+        SpeedRule speedRule;
+        if (argc >= 19)
+            speedRule.limitQ16 = std::atoll(argv[18]);
+
+        if (argc >= 20)
+            speedRule.carry = static_cast<uint32_t>(std::atoi(argv[19]));
+
+        if (argc >= 21)
+            speedRule.substepLog2 = static_cast<uint32_t>(std::atoi(argv[20]));
+
+        if (argc >= 22)
+            speedRule.centerLimitQ16 = std::atoll(argv[21]);  // [① の中心の速さの止め Q16(0 = 既定 32768)]
+
         const uint32_t sweeps = pressure.sweeps;
         const TableKind kind = monoxide ? TableKind::FuelGas : TableKind::FuelGasWithoutMonoxide;
         const Tables split = MakeTables(kind, splitLog2);
         const Burn burn = RunBurn(monoxide ? fuelGas : noMonoxide, FUELS[fuelIndex], cellLevel, ShellMode::Flow, true,
                                   false, layers, true, grid, inWorld, splitLog2 != 0 ? &split : nullptr, splitLog2,
-                                  pressure);
+                                  pressure, speedRule);
         char label[200];
         std::snprintf(label, sizeof(label),
                       "層 %u 段・箱 %.2f mm・骨格 %u 列・%s%s・反応 %u 分け・圧力 上限 %u 回%s%s%s", layers,
