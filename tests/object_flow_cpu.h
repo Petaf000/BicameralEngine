@@ -99,6 +99,15 @@ namespace bicameral::test {
         // 調べるだけ(T-1363): 小刻みごとに、層で一番薄いボクセルの見立てと面の速さ(上限で止める前)を 1 行ずつ書き出す
         std::ostream* flowTrace = nullptr;
         uint64_t flowTraceSubstep = 0;
+        // 調べるだけ(T-1380。研究・既定 0 = 今と同じ答え): 運ぶ時の速さの上限(Q16 ボクセル / 小刻み。0 = OH_FLOW_SPEED_LIMIT_Q16)と、
+        // 射影の答えが上限を越えた面の持ち越しの形(0 = 越えた慣性を運動量に持ち越す〔今。ADR-0534〕/ 1 = 射影の後に運動量を
+        // 上限 × 面の質量で止める〔越えた分は運ばれずに残った膨らみとして、次の小刻みの圧力が押し直す〕)
+        int64_t speedLimitQ16 = 0;
+        uint32_t overspeedCarry = 0;
+        // 数えるだけ(T-1380): 射影の後に予測の速さが上限を越えた面 × 小刻み・数えた面 × 小刻み・予測の速さの最大(Q16)
+        uint64_t overspeedFaces = 0;
+        uint64_t countedFaces = 0;
+        int64_t fastestPredictedQ16 = 0;
 
         // --- 1 刻みの受け渡し(作業。真実ではない。T-1332)---
         reaction::RxCell cellView{};      // 囲むセルの見立て = 刻みの初めのセル + この物の小刻みごとの粗い量
@@ -674,6 +683,19 @@ namespace bicameral::test {
     }
 
     // 1 つの流れの小刻み。戻り値 = 量が負・枠があふれなかった
+    // 運ぶ時の速さの上限(T-1380 の調べの口。既定は OH_FLOW_SPEED_LIMIT_Q16)
+    inline int64_t FlowSpeedLimitOf(const OhShellFlow& flow) {
+        return flow.speedLimitQ16 == 0 ? reaction::OH_FLOW_SPEED_LIMIT_Q16 : flow.speedLimitQ16;
+    }
+
+    // 運ぶ時の面の速さ(上限が既定なら OhFlowSpeed と同じ値)
+    inline int64_t FlowSpeedOf(const OhShellFlow& flow, int64_t momentum, uint64_t faceMass) {
+        if (flow.speedLimitQ16 == 0)
+            return reaction::OhFlowSpeed(momentum, faceMass);
+
+        return std::clamp(reaction::OhFlowPredictedSpeed(momentum, faceMass), -flow.speedLimitQ16, flow.speedLimitQ16);
+    }
+
     inline bool StepShellFlowSubstep(const OhCpuTable& table, const OhGasList& gases, OhWorld& world, uint32_t o,
                                      OhShellFlow& flow, std::vector<uint8_t>& changed) {
         namespace rx = bicameral::reaction;
@@ -746,7 +768,7 @@ namespace bicameral::test {
                 if (wall[a][f] != 0)
                     flow.momentum[a][f] = 0;
 
-                speed[a][f] = rx::OhFlowSpeed(flow.momentum[a][f], faceMass[a][f]);
+                speed[a][f] = FlowSpeedOf(flow, flow.momentum[a][f], faceMass[a][f]);
             });
         }
 
@@ -1002,7 +1024,18 @@ namespace bicameral::test {
                     next[a][f] += (minus - plus) * static_cast<int64_t>(cellFlow.mass);
                 }
 
-                speed[a][f] = rx::OhFlowSpeed(next[a][f], faceMass[a][f]);
+                // 上限を越えた面(T-1380。数える・持ち越しの形 1 なら運動量を上限で止める)
+                const int64_t predicted = rx::OhFlowPredictedSpeed(next[a][f], faceMass[a][f]);
+                const int64_t limit = FlowSpeedLimitOf(flow);
+                ++flow.countedFaces;
+                flow.fastestPredictedQ16 = std::max(flow.fastestPredictedQ16, std::abs(predicted));
+                if (std::abs(predicted) > limit) {
+                    ++flow.overspeedFaces;
+                    if (flow.overspeedCarry == 1)
+                        next[a][f] = (predicted > 0 ? limit : -limit) * static_cast<int64_t>(faceMass[a][f]);
+                }
+
+                speed[a][f] = FlowSpeedOf(flow, next[a][f], faceMass[a][f]);
                 flow.fastestQ16 = std::max(flow.fastestQ16, std::abs(speed[a][f]));
             });
         }
