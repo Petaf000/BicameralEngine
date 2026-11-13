@@ -1,6 +1,14 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-11-13(本体の作業役 31 回目・22:30 の巡目の締めのマージ。前は 30 回目)
+最終更新: 2026-11-13(本体の作業役 32 回目・09:40 の巡目のマージ。前は 31 回目)
+
+## この仕事でしたこと(2026-11-13・本体の作業役・32 回目〔09:40 の巡目: runner/ready の印のマージ・試験・push〕)
+- **入れた(--no-ff・衝突なし)**: wt6 t-1231-phase-layer-gpu 06179455(2f6a6683。T-1231 Done = 相の層の配りを GPU の木の段に・T-1252 段 2 の 8 本目・既定とハッシュ不変・**ADR-0537 の 1〔相の層の欄だけ、欄の頁を割り当ての段で控えめに取る = 土台の欄の頁の取り方の小さい変更〕は司令塔が仮に受け取った**)/ **既定の切り替えとして 1 本で** wt4 t-1367-rc-one-side-balance 8c26de8a(9a9ab9dd。T-1367 Done = 放射の段の面の崖を「両側とも τ ≥ 32」に・ADR-0535 の追記・透ける帯と通さない帯が触れる面で透ける側も放つ = 既定の答えとハッシュが変わる〔固定のハッシュを持つ放射の試験は無い〕)/ 文書だけ wt5 t-1331-shape-design 0db05316(e3bd5477。20 §12.6・ADR-0541 Proposed・T-1386〜T-1388)・wt5 t-0820-occupancy-shape ab7a5eb4(31f24231。20 §7.4・ADR-0543 Proposed・T-1392〜T-1394・T-1386 は T-1392 に含めた)。
+- **入れなかった**: wt5 t-1356-slope-touch-proto(研究・捨てる試作。印は runner/ready に残す)。
+- **記録**: ROADMAP(T-1231 Done・T-1252 段 2 の 8 本目・T-1367 Done・T-1331 の区切り・T-1386〜T-1388・T-1392〜T-1394 の行)・ADR-0537(受け取りの 1 行)・QUESTIONS(**Q192【エンジン】** = ADR-0541 の案 1 / 2 と ADR-0543 の A / B・a / b を 1 つの問い・仮 = 案 1・A・a)・COMMANDER(09:40 の巡目の配り・司令塔の次は T-1395・ADR-0544)・チケット T-1231・T-1367 を Done。
+- **試験(release・RTX 3070 Ti)**: t-1231 の後(2f6a6683)= release ビルド警告 0・field_owner・multires_layers・float_check 系 5・dxil_alloca_check 合格。t-1367 の後(9a9ab9dd)= release ビルド警告 0・CPU cascade_light(308 秒)・cascade_face(**745 秒**)・radiation_reference・radiation_scene_spread(136 秒)・probe_radiation・float_check 系 5・dxil_alloca_check 合格 + GPU 8 本(gpu_field_region・_warp〔186 秒〕・gpu_multires_layers・gpu_cascade_light〔**826 秒**〕・_warp・gpu_cascade_tree_grid〔**601 秒**〕・gpu_probe_physics_radiation・gpu_radiation_cost)合格・archmap --check OK(文書のマージの後も・本体の Linux 側で 31 秒)。
+  - **時間の注意**: gpu_cascade_light 826 秒・gpu_cascade_tree_grid 601 秒は、wt4 の同じ組(t-1367 の上)の 55 秒・50 秒、前の main の 72〜141 秒・29 秒より 10 倍ほど長い。ほかの作業ツリーのビルド・試験・run(wt2〜wt6 が同時に動いていた)との重なりと見ているが**未確認**。次に main で GPU を回す時に 1 本だけ重ならない時に測り直す(遅いままなら t-1231 / t-1367 の後の不具合として T-1374 に分ける)。
+- 次の番号は **D-701・ADR-0479・Q193・T-1374**(本体。Q192 は使った)。
 
 ## この仕事でしたこと(2026-11-13・本体の作業役・31 回目〔22:30 の巡目の締め: runner/ready の印のマージ・試験・push〕)
 - **入れた(--no-ff・来た順・どれも既定の切り替えではない・衝突なし)**: wt3 t-1362-mg-startup-cap aff05952(6f9cce58。T-1362 段 1 Done = 根は暖機の面の重みの濃淡・測りの口 --grow-dump だけ)/ wt4 t-1365-radiation-face-continuous 457cd300(00d1e1ab。T-1365 研究の区切り・CPU リファレンスだけの口 faceCoupling 既定 0・おすすめ = 形 2 二流束・T-1367 を分けた)/ wt6 t-1252-conserved-owner ace42c0d(6a0d04ac。T-1252 段 2 の 7 本目 = 保存量の配り手の欄・ADR-0532 の 9)/ wt5 t-1369-lab-box-tests 05bcdae1(f1e00fe2。T-1369・T-1370 Done = lab_box の DISABLED を外した・ctest probe_phase_checks を足した)/ wt2 t-1340-wide-grain-layers-2 06e5a31f(9e768da1。T-1340 Done = 溢れの世界で粒を生む表の層を GPU で・ADR-0533)/ **最後に 1 本で既定の切り替え** wt3 t-1363-shell-warmup-thin-face 0ba13461(T-1363・T-1362 Done = 根は射影の右辺が上限で止めた予測の速さを見ていた作り方の誤り → OhFlowPredictedSpeed・ADR-0534・暖機の V 字 5 / 5 / 6・**層の流れのある場面のハッシュが変わる**〔期待の固定は無い〕・T-1364 は要らない・Q191 は聞かなくてよくなった)。
