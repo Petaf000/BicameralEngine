@@ -104,6 +104,10 @@ namespace bicameral::test {
         // 上限 × 面の質量で止める〔越えた分は運ばれずに残った膨らみとして、次の小刻みの圧力が押し直す〕)
         int64_t speedLimitQ16 = 0;
         uint32_t overspeedCarry = 0;
+        // 調べるだけ(T-1380): ① 運動量を運ぶ時の中心の速さの止め(Q16 ボクセル / 小刻み。0 = 既定の 32768 = 半分)と、止めに当たった中心 × 小刻みの数・数えた数
+        int64_t centerSpeedLimitQ16 = 0;
+        uint64_t centerClamped = 0;
+        uint64_t centerCounted = 0;
         // 数えるだけ(T-1380): 射影の後に予測の速さが上限を越えた面 × 小刻み・数えた面 × 小刻み・予測の速さの最大(Q16)
         uint64_t overspeedFaces = 0;
         uint64_t countedFaces = 0;
@@ -791,7 +795,11 @@ namespace bicameral::test {
                         plusFace[a] = center;
                         const int64_t qMinus = outsideMinus ? 0 : speed[a][box.Face(a, minusFace)];
                         const int64_t qPlus = outsidePlus ? 0 : speed[a][box.Face(a, plusFace)];
-                        const int64_t centerSpeed = std::clamp<int64_t>((qMinus + qPlus) / 2, -32768, 32768);
+                        const int64_t centerLimit = flow.centerSpeedLimitQ16 == 0 ? 32768 : flow.centerSpeedLimitQ16;
+                        const int64_t centerRaw = (qMinus + qPlus) / 2;
+                        const int64_t centerSpeed = std::clamp<int64_t>(centerRaw, -centerLimit, centerLimit);
+                        ++flow.centerCounted;
+                        flow.centerClamped += centerRaw != centerSpeed ? 1u : 0u;
                         if (centerSpeed == 0)
                             continue;
 

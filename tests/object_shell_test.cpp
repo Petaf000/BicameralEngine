@@ -425,6 +425,7 @@ namespace {
         int64_t limitQ16 = 0;
         uint32_t carry = 0;
         uint32_t substepLog2 = 0;
+        int64_t centerLimitQ16 = 0;  // ① 運動量を運ぶ時の中心の速さの止め(0 = 既定の半分)
     };
 
     // 圧力の反復の回数(T-1201。燃え方の場面ごと: 0 始め〔火の来た列が 1/3 まで〕・1 最中・2 消えかけ〔0.5 s 新しい列に火が来ない〕)
@@ -459,9 +460,11 @@ namespace {
         int64_t fastestPredictedMillimetresPerSecond = 0;  // 流れ: 射影の答えの一番速い面(上限で止める前。T-1380)
         uint64_t overspeedFaces = 0;                       // 流れ: 射影の答えが速さの上限を越えた面 × 小刻み(T-1380)
         uint64_t countedFaces = 0;                         // 流れ: 数えた面 × 小刻み
-        uint64_t limitedShares = 0;                        // 流れ: 出る上限で縮めた(ボクセル × 小刻み)
-        std::array<SweepStats, 3> sweepStats{};            // 流れ: 圧力の反復の回数(燃え方の場面ごと。T-1201)
-        int64_t gapSpeedQ16 = 0;                           // 流れ: 決まった回数と止まった時の面の速さの差の最大(T-1201)
+        uint64_t centerClamped = 0;                        // 流れ: ① の中心の速さの止めに当たった数・数えた数(T-1380)
+        uint64_t centerCounted = 0;
+        uint64_t limitedShares = 0;              // 流れ: 出る上限で縮めた(ボクセル × 小刻み)
+        std::array<SweepStats, 3> sweepStats{};  // 流れ: 圧力の反復の回数(燃え方の場面ごと。T-1201)
+        int64_t gapSpeedQ16 = 0;                 // 流れ: 決まった回数と止まった時の面の速さの差の最大(T-1201)
         int64_t gapReferenceQ16 = 0;
         int64_t biasLineMinusFixed = 0;  // 流れ: 丸めの偏り(T-1355。OhShellFlow の bias*。比べの時だけ)
         std::array<int64_t, 2> biasResidualQ8{};
@@ -531,7 +534,8 @@ namespace {
                                .pressureDump = pressure.dump,
                                .pressureDumpEvery = pressure.dumpEvery,
                                .speedLimitQ16 = speedRule.limitQ16,
-                               .overspeedCarry = speedRule.carry};
+                               .overspeedCarry = speedRule.carry,
+                               .centerSpeedLimitQ16 = speedRule.centerLimitQ16};
         const test::OhGasList& gases = tables.object.gases;
         test::OhWorld world = MakeWorld(tables.table, fuel, cellLevel, grid);
         world.sleeping = sleeping;
@@ -712,10 +716,12 @@ namespace {
         }
 
         // 1 小刻み・1 ボクセル の速さ = 1.875 m/s(7.8 mm・1/240 s。細かい箱も小刻みを同じ割合で増やすので同じ): q(Q16)× 1875 ÷ 65536 mm/s
-        // (小刻みを 2^k 倍にした時は 1 小刻みが 1/2^k の長さなので、同じ q が 2^k 倍遅い。T-1380)
-        burn.fastestMillimetresPerSecond = ((flow.fastestQ16 * 1875) / 65536) >> speedRule.substepLog2;
-        burn.fastestPredictedMillimetresPerSecond = ((flow.fastestPredictedQ16 * 1875) / 65536) >>
-                                                    speedRule.substepLog2;
+        // (小刻みを 2^k 倍にした時は 1 小刻みが 1/2^k の長さなので、同じ q が 2^k 倍速い。T-1380)
+        burn.fastestMillimetresPerSecond = ((flow.fastestQ16 * 1875) / 65536) << speedRule.substepLog2;
+        burn.fastestPredictedMillimetresPerSecond = ((flow.fastestPredictedQ16 * 1875) / 65536)
+                                                    << speedRule.substepLog2;
+        burn.centerClamped = flow.centerClamped;
+        burn.centerCounted = flow.centerCounted;
         burn.overspeedFaces = flow.overspeedFaces;
         burn.countedFaces = flow.countedFaces;
         burn.limitedShares = flow.limitedShares;
@@ -789,6 +795,12 @@ namespace {
                 static_cast<unsigned long long>(burn.countedFaces),
                 100.0 * static_cast<double>(burn.overspeedFaces) / static_cast<double>(burn.countedFaces),
                 static_cast<unsigned long long>(burn.digest));
+
+        if (burn.centerCounted != 0)
+            std::printf("  ① の中心の速さの止めに当たった %llu / %llu(%.4f %%)\n",
+                        static_cast<unsigned long long>(burn.centerClamped),
+                        static_cast<unsigned long long>(burn.centerCounted),
+                        100.0 * static_cast<double>(burn.centerClamped) / static_cast<double>(burn.centerCounted));
 
         if (burn.sweepStats[0].solves + burn.sweepStats[1].solves + burn.sweepStats[2].solves != 0) {
             std::printf("  圧力の反復(1 回に解く赤黒の平均 / 一番多い / 上限で止まった / 解いた回数):");
@@ -920,6 +932,9 @@ int main(int argc, char** argv) {
 
         if (argc >= 21)
             speedRule.substepLog2 = static_cast<uint32_t>(std::atoi(argv[20]));
+
+        if (argc >= 22)
+            speedRule.centerLimitQ16 = std::atoll(argv[21]);  // [① の中心の速さの止め Q16(0 = 既定 32768)]
 
         const uint32_t sweeps = pressure.sweeps;
         const TableKind kind = monoxide ? TableKind::FuelGas : TableKind::FuelGasWithoutMonoxide;
