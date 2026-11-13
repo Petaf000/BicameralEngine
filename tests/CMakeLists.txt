@@ -909,9 +909,11 @@ set_tests_properties(gpu_probe_peek gpu_probe_peek_warp PROPERTIES TIMEOUT 900)
 # ctest(debug・GBV)は 1 分(3600 刻み)。10 分(36,000 刻み)は release で: job.py run -Preset release -Exe gpu_probe_fire_test
 bicameral_add_gpu_test(gpu_probe_fire_test)
 target_link_libraries(gpu_probe_fire_test PRIVATE bicameral_sim)
-bicameral_add_gpu_test_case(gpu_probe_fire gpu_probe_fire_test gpu --ticks 3600 --no-gbv)
+# 炎のある場面(T-1366): 熱分解の燃える気体(D-660。試験の表だけ)+ アプリと同じ流れる区画。初めの刻みを CPU リファレンスと突き合わせる
+bicameral_add_gpu_test_case(gpu_probe_fire gpu_probe_fire_test gpu --flame --ticks 3600 --no-gbv)
 # 放射の段の無い GPU の仮の世界で、現実の伝導率(T-1066)だと木箱の火が広がらない(CPU とは一致)。GPU の放射(T-1154)まで止める。
-# ただし CPU の仮の世界に放射の段(RC)を入れても 30 秒で広がらない(T-1113 の測り)ので、燃える気体(D-660・T-1156)も要る
+# ただし CPU の仮の世界に放射の段(RC)を入れても 30 秒で広がらない(T-1113 の測り)ので、燃える気体(D-660・T-1156)も要る。
+# 燃える気体を入れると 1 秒で全部の壁が燃える爆発になる(セルに混ざった木は熱の厚みが無い。T-1366)。基準は物の木箱で取り直す(T-1383)
 set_tests_properties(gpu_probe_fire PROPERTIES DISABLED TRUE)
 # 仮の世界の GPU の刻みに気体の区画(T-0592): 静かな大気と燃える木箱が CPU リファレンス(probe_gas)と毎刻みビット一致
 bicameral_add_gpu_test(gpu_probe_gas_test)
