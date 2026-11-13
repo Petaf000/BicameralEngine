@@ -327,7 +327,7 @@ namespace {
             for (uint32_t z = 0; z < PROBE_GRID_SIZE; ++z) {
                 for (uint32_t x = 0; x < PROBE_GRID_SIZE; ++x) {
                     const bool grass = x < riverStart || x >= FAR_FIRST_X;
-                    if (grass && !setting.gap)
+                    if (grass)  // gap でも草の列は重ねる(前は gap で重ねず、tall と gap を合わせると 1 層だった。T-0414)
                         world[ProbeCellIndex(x, GRASS_Y + layer, z)] = world[ProbeCellIndex(x, GRASS_Y, z)];
                 }
             }
