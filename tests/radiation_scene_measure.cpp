@@ -11,6 +11,7 @@
 //   expect=1 / expect=0(試験: 終わりに付けたセルの 2 つ先〔x+2〕の草が 1% 以上燃えた / 隣〔x+1〕の草が 1% も燃えていない。外れたら終了コード 1。T-1156)・
 //   watch=1(付けたセルと隣の熱の内訳を 0.25 秒ごとに出す: 温度・放射の段が当てた分の累計・残り〔伝導と反応と流れ〕の累計・草と O2。T-1156)
 //   face=<0〜2>(RC の段の面の受け渡しの形。CascadeParams::faceCoupling。0 = 既定の崖・1 = Rosseland・2 = 二流束。T-1365 研究)・
+//   ix=<x>(火をつける草の x。既定 4。川の手前で付けて川を越えるかを短く測る。草が燃えた秒・watch・expect も ix から数える。T-0414)・
 //   seed=<向きの種>・sec=<上限の秒>(既定 60)・tall=<草の層の数>・trace=1(1 秒ごとの経過)
 //   gas=1(気体の区画: 川と両岸の上の空気 x 32〜51・y 4〜11・z 16〜47。T-0671 の場面の flow_regions と同じ。閉じた壁)・
 //   gz=<奥行き>(気体の区画の z の奥行き。既定 32。z = 32 を中に縮める。CPU の気体の段が重いので)・gh=<高さ>(既定 8)・
@@ -77,8 +78,10 @@ namespace {
         bool liquid = false;       // 液体の区画(川)を載せる
         uint32_t slowShift = 0;    // 草の規則の速さを 1/2^slowShift に
         uint64_t wetWater = 0;     // 岸の草のセルに足す液体の水(µmol)
-        uint32_t gasDepth = 32;    // 気体の区画の z の奥行き(z = 32 を中に。CPU の気体の段は 50〜70 µs/セル/刻み)
-        uint32_t gasHeight = 8;    // 気体の区画の高さ(y 4 から)
+        // 火をつける草の x(ix=。既定 4 = 場面の指標と同じ。川の近くで付けて川を越えるかを短く測る。T-0414)
+        uint32_t igniteX = 4;
+        uint32_t gasDepth = 32;  // 気体の区画の z の奥行き(z = 32 を中に。CPU の気体の段は 50〜70 µs/セル/刻み)
+        uint32_t gasHeight = 8;  // 気体の区画の高さ(y 4 から)
         uint32_t gasConductivityDivisor = 1;  // 気体の物質の熱伝導率を割る(5000 = 場面の倍率を外す)
         uint32_t
             condensedConductivityDivisor = 1;  // 凝縮相の熱伝導率を割る(20000 = 倍率を外す。砂は倍率が無いので割らない)
@@ -178,6 +181,8 @@ namespace {
                         std::clamp<uint64_t>(value, 1, PROBE_GRID_SIZE - GRASS_Y));
                 else if (key == "gxb" || key == "gyb" || key == "gzb")
                     setting.gasBoundary[key[1] - 'x'] = static_cast<GasBoundary>(std::min<uint64_t>(value, 2));
+                else if (key == "ix")
+                    setting.igniteX = static_cast<uint32_t>(std::min<uint64_t>(value, PROBE_GRID_SIZE - 6));
                 else if (key == "gz")
                     setting.gasDepth = static_cast<uint32_t>(std::clamp<uint64_t>(value, 1, PROBE_GRID_SIZE));
             }
@@ -445,11 +450,12 @@ namespace {
             options.params.faceCoupling = setting.faceCoupling;
             reference.SetCascadeRadiation(options);
         }
-        std::array<WatchedCell, 5> watched = {WatchedCell{.name = "付けた", .x = 4, .y = GRASS_Y, .z = 32},
-                                              WatchedCell{.name = "x+1", .x = 5, .y = GRASS_Y, .z = 32},
-                                              WatchedCell{.name = "x+2", .x = 6, .y = GRASS_Y, .z = 32},
-                                              WatchedCell{.name = "z+1", .x = 4, .y = GRASS_Y, .z = 33},
-                                              WatchedCell{.name = "上", .x = 4, .y = GRASS_Y + 1, .z = 32}};
+        std::array<WatchedCell, 5> watched = {
+            WatchedCell{.name = "付けた", .x = setting.igniteX, .y = GRASS_Y, .z = 32},
+            WatchedCell{.name = "x+1", .x = setting.igniteX + 1, .y = GRASS_Y, .z = 32},
+            WatchedCell{.name = "x+2", .x = setting.igniteX + 2, .y = GRASS_Y, .z = 32},
+            WatchedCell{.name = "z+1", .x = setting.igniteX, .y = GRASS_Y, .z = 33},
+            WatchedCell{.name = "上", .x = setting.igniteX, .y = GRASS_Y + 1, .z = 32}};
 
         // 区画(T-0697。T-0671 の場面の flow_regions と同じ形。気体は閉じた壁)
         const uint32_t riverFirst = FAR_FIRST_X - setting.riverCells;
@@ -475,7 +481,7 @@ namespace {
         const uint64_t farStart = FarGrass(table, reference.State(0));
         const uint64_t nearStart = AmountInColumns(table, reference.State(0), "cellulose", 0, riverFirst, GRASS_Y,
                                                    GRASS_Y + 1);
-        const std::vector<ProbeCommand> ignite = {MakePokeCommand(0, 0, 4, GRASS_Y, 32)};
+        const std::vector<ProbeCommand> ignite = {MakePokeCommand(0, 0, setting.igniteX, GRASS_Y, 32)};
         const uint32_t riverStart = riverFirst;
         Outcome outcome;
         outcome.riverWaterStart = AmountInColumns(table, reference.State(0), "water", riverStart, FAR_FIRST_X);
@@ -514,7 +520,8 @@ namespace {
             if ((tick + 1) % (TICKS_PER_SECOND / 10) == 0) {
                 const auto cells = reference.State(tick + 1);
                 for (uint32_t i = 0; i < outcome.burnSeconds.size(); ++i) {
-                    const uint64_t grass = AmountOf(table, cells[ProbeCellIndex(5 + i, GRASS_Y, 32)], "cellulose");
+                    const uint64_t grass = AmountOf(table, cells[ProbeCellIndex(setting.igniteX + 1 + i, GRASS_Y, 32)],
+                                                    "cellulose");
                     if (outcome.burnSeconds[i] < 0 && grass * 100 < GRASS_START_MICROMOLES * 99)
                         outcome.burnSeconds[i] = static_cast<double>(tick + 1) / TICKS_PER_SECOND;
                 }
@@ -565,8 +572,10 @@ namespace {
                                  static_cast<double>(farStart == 0 ? 1 : farStart);
         outcome.riverWaterEnd = AmountInColumns(table, reference.State(tick), "water", riverStart, FAR_FIRST_X);
         outcome.vaporEnd = AmountInColumns(table, reference.State(tick), "water_vapor", 0, PROBE_GRID_SIZE);
-        outcome.nextGrass = AmountOf(table, reference.State(tick)[ProbeCellIndex(5, GRASS_Y, 32)], "cellulose");
-        outcome.secondGrass = AmountOf(table, reference.State(tick)[ProbeCellIndex(6, GRASS_Y, 32)], "cellulose");
+        outcome.nextGrass = AmountOf(table, reference.State(tick)[ProbeCellIndex(setting.igniteX + 1, GRASS_Y, 32)],
+                                     "cellulose");
+        outcome.secondGrass = AmountOf(table, reference.State(tick)[ProbeCellIndex(setting.igniteX + 2, GRASS_Y, 32)],
+                                       "cellulose");
         outcome.millisecondsPerTick = chr::duration<double, std::milli>(total).count() / static_cast<double>(tick);
         outcome.pairsPerTick = pairs / (tick == 0 ? 1 : tick);
 
