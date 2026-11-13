@@ -720,7 +720,8 @@ namespace {
 
     // --- 11. セルごとに 1 回の放つ量(T-1161)---
 
-    // 前の形(面ごとに黒体の量・割合・放射率を求め、向こうの飽和で帯を選ぶ)をそのまま写した定義
+    // 前の形(面ごとに黒体の量・割合・放射率を求め、両側の飽和で帯を選ぶ)をそのまま写した定義
+    // (T-1367 で帯を選ぶ条件を「向こうが飽和」から「両側とも飽和」に直した。式の分け方の確かめはそのまま)
     rx::RcBands FaceEmissionBefore(uint32_t temperatureMk, rx::RcCellLight light, rx::RcCellLight across) {
         using namespace bicameral::fx;
         const uint64_t black = rx::RcFaceBlackEmission(temperatureMk);
@@ -734,12 +735,12 @@ namespace {
                                         16;
 
         rx::RcBands bands{};
-        bands.shortBand = across.depthShortQ32 >= rx::RD_DEPTH_SATURATED_Q32
-                              ? 0
-                              : FxShiftRightU128(FxMulU64Full(blackShort, emissivityShort), 16);
-        bands.longBand = across.depthLongQ32 >= rx::RD_DEPTH_SATURATED_Q32
-                             ? 0
-                             : FxShiftRightU128(FxMulU64Full(blackLong, emissivityLong), 16);
+        const bool sealedShort = light.depthShortQ32 >= rx::RD_DEPTH_SATURATED_Q32 &&
+                                 across.depthShortQ32 >= rx::RD_DEPTH_SATURATED_Q32;
+        const bool sealedLong = light.depthLongQ32 >= rx::RD_DEPTH_SATURATED_Q32 &&
+                                across.depthLongQ32 >= rx::RD_DEPTH_SATURATED_Q32;
+        bands.shortBand = sealedShort ? 0 : FxShiftRightU128(FxMulU64Full(blackShort, emissivityShort), 16);
+        bands.longBand = sealedLong ? 0 : FxShiftRightU128(FxMulU64Full(blackLong, emissivityLong), 16);
 
         return bands;
     }
@@ -791,7 +792,7 @@ namespace {
                                     const rx::RcCellLight across{.depthShortQ32 = acrossShort,
                                                                  .depthLongQ32 = acrossLong};
                                     const rx::RcBands before = FaceRelativeBefore(temperature, word, light, across);
-                                    const rx::RcBands after = rx::RcMaskAcross(cell, across);
+                                    const rx::RcBands after = rx::RcMaskAcross(cell, light, across);
                                     const rx::RcBands face = rx::RcFaceEmissionRelative(temperature, word, light,
                                                                                         across);
                                     ++cases;

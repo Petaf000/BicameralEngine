@@ -1,9 +1,10 @@
 // cascade_face_test.cpp — 熱の放射の段(RC)の面の受け渡しの形の研究の測り(T-1365・ADR-0535 (b))。
 // CascadeParams::faceCoupling(0 = 今の崖〔RcMaskAcross〕・1 = Rosseland の上限付き・2 = 二流束)を CPU リファレンスで比べる:
-//   1. 形 0 は RcMaskAcross とビット単位で同じ・係数は τ について単調・両側で同じ
+//   1. 形 0 は RcMaskAcross とビット単位で同じ・係数は τ について単調・どの形も両側で同じ(形 0 は T-1367 から)
 //   2. 保存: どの形でも 放った + 持ち越しを放った = 吸った + 返した + 外へ(ビット単位)
 //   3. 拡散(記録): 一様な物の板の中で T⁴ を 2 次の形にした時、真ん中のセルの正味 ÷ Rosseland の解析解(4σ Δ²(T⁴) ÷ 3τ)
-//   4. 釣り合い(記録): 同じ温度の閉じた箱(石の殻・τ 2 の物・τ 40 の板・石の塊)で、セルの正味の最大(W)
+//   4. 釣り合い: 同じ温度の閉じた箱(石の殻・τ 2 の物・τ 40 の板・石の塊)で、セルの正味の最大(W)と殻の内の和。
+//      どの形も殻の内の和 ÷ 放った が向きの粗さの残りの大きさ以下(T-1367: 形 0 は片側だけ通さない面で +5.9 % だった)
 //   5. 2 つのセルの受け渡し(記録): 熱い 800 K と冷たい 300 K の隣どうしが放射で渡す W(木・砂は既定の灰色の固体の a。伝導と比べる)
 //   6. 費用(記録): 3 の場面の 1 刻みの ms
 // 場面は CascadeGrid を直接作る。double は参照値と表示だけ。
@@ -125,9 +126,13 @@ namespace {
         for (const uint64_t own : depths) {
             for (const uint64_t across : depths) {
                 const rx::RcBands cliff = rx::RcCoupleAcross(bands, Medium(own), Medium(across), rx::RC_FACE_CLIFF);
-                const rx::RcBands mask = rx::RcMaskAcross(bands, Medium(across));
+                const rx::RcBands mask = rx::RcMaskAcross(bands, Medium(own), Medium(across));
                 EXPECT(cliff.shortBand == mask.shortBand && cliff.longBand == mask.longBand);
-                for (const uint32_t form : {rx::RC_FACE_ROSSELAND, rx::RC_FACE_TWO_FLUX}) {
+                // 形 0 は両側とも飽和の時だけ 0(T-1367)
+                const bool sealed = own >= rx::RD_DEPTH_SATURATED_Q32 && across >= rx::RD_DEPTH_SATURATED_Q32;
+                EXPECT(sealed ? (mask.shortBand == 0 && mask.longBand == 0)
+                              : (mask.shortBand == bands.shortBand && mask.longBand == bands.longBand));
+                for (const uint32_t form : FORMS) {
                     const rx::RcBands there = rx::RcCoupleAcross(bands, Medium(own), Medium(across), form);
                     const rx::RcBands back = rx::RcCoupleAcross(bands, Medium(across), Medium(own), form);
                     EXPECT(there.longBand == back.longBand);
@@ -230,6 +235,8 @@ namespace {
 
     // --- 4. 釣り合い ---
 
+    constexpr double BALANCE_SHARE_LIMIT = 0.03;  // 殻の内の和 ÷ 放った の上限(T-1367)
+
     // 場面: 0 = τ 2 の物だけ・1 = τ 40 の物だけ・2 = τ 2 の物の中に τ 40 の板と石の塊
     void RecordBalance(uint32_t scene) {
         constexpr int64_t SIZE = 12;
@@ -279,12 +286,14 @@ namespace {
                 }
             }
 
-            // 殻の内側の面(τ 2 の物と石が触れる面)の正味の和: 崖は石だけが放つので τ 2 の物が温まる
+            // 殻の内側の面(τ 2 の物と石が触れる面)の正味の和: 崖が向こうだけを見ていた時は石だけが放ち、τ 2 の物が温まった(T-1367)
             std::printf(
                 "  形 %-12s 正味の最大 %8.1f W(セル %lld,%lld,%lld)・殻の内の和 %+9.1f W・放った %.0f W・保存 %s\n",
                 FORM_NAMES[f], worst / TICKS * UNITS_TO_WATTS, static_cast<long long>(worstCell % SIZE),
                 static_cast<long long>((worstCell / SIZE) % SIZE), static_cast<long long>(worstCell / (SIZE * SIZE)),
                 inside / TICKS * UNITS_TO_WATTS, emitted / TICKS * UNITS_TO_WATTS, conserves ? "OK" : "NG");
+            // 向きの粗さの残り(n0 4・2 段・8 刻み。T-1365 の形 1・2 は τ 2 の箱で −2.3 %・−2.0 %)の大きさ以下
+            EXPECT(std::fabs(inside) <= BALANCE_SHARE_LIMIT * emitted);
         }
     }
 
