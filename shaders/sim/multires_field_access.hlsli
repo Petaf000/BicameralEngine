@@ -201,11 +201,17 @@ bool CoarsenKeepsUniformCarried(uint32_t childSlot, uint32_t parentSlot) {
 
 // --- 割り当ての段: 要求 i が配り手の欄 field に取る頁の数(CPU の AllocateOwnerPages の規則)---
 // 細かくする: 頁を持つ親が欄の頁を持てば鎖の段の数(子は親の値から配る)。
-// 粗くする: 親が頁を持つ枠になり(広げる親も)まだ欄の頁が無く、子が欄の頁か 0 でない一様の値を持つか、広げる親の一様の値が 0 でない時 1
+// 粗くする: 親が頁を持つ枠になり(広げる親も)まだ欄の頁が無く、子が欄の頁か 0 でない一様の値を持つか、広げる親の一様の値が 0 でない時 1。
+// 相の層の配り(セルを読む)は欄の値が全部 0 でも子・親の Ec を書きうるので、頁を持つ親(細かく)・頁を持つ枠になる親(粗く)なら取る(ADR-0537 の 1)
 uint32_t CarriedOwnerNeed(uint32_t field, uint32_t i, MrRequestState state) {
     const MrBlock target = g_blocks[state.target];
-    if (g_requests[i].op == MR_REQUEST_REFINE)
-        return !MrIsUniform(target) && CarriedPageOf(field, target.page) != MF_NO_PAGE ? state.levels : 0u;
+    const bool readsCells = CarriedOwner(field) == SF_OWNER_PHASE_LAYER;
+    if (g_requests[i].op == MR_REQUEST_REFINE) {
+        if (MrIsUniform(target))
+            return 0;
+
+        return readsCells || CarriedPageOf(field, target.page) != MF_NO_PAGE ? state.levels : 0u;
+    }
 
     const MrBlock parent = g_blocks[target.parent];
     const bool expanded = state.pageNeed != 0;
@@ -214,6 +220,9 @@ uint32_t CarriedOwnerNeed(uint32_t field, uint32_t i, MrRequestState state) {
 
     if (!expanded && CarriedPageOf(field, parent.page) != MF_NO_PAGE)
         return 0;
+
+    if (readsCells)
+        return 1;
 
     const bool childValues = MrIsUniform(target) ? CarriedUniformNonZero(field, state.target)
                                                  : CarriedPageOf(field, target.page) != MF_NO_PAGE;

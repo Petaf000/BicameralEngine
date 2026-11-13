@@ -26,6 +26,9 @@
 #endif
 #include "sim/multires_refine_place.hlsli"
 #endif
+#ifndef MR_WIDE_CELLS
+#include "common/phase_layer.hlsli"  // 相の層の配り(セルを読む配り手。T-1231。溢れを使う世界は一般の配り = CPU と同じ)
+#endif
 
 // 再帰の深さの上限(要求の鎖は MR_MAX_CHAIN_LEVELS 段まで)
 static const uint32_t MR_MAX_RECURSION = MR_MAX_CHAIN_LEVELS;
@@ -183,7 +186,7 @@ uint32_t ChildLayerPage(MrRefineRecord record, MrBlock parent, uint32_t childPag
 // 要求の鎖の本物の子だけ(影の鎖は区画を読まない = T-1252 の残り)。1 スレッド = 子のセル t。
 // 一様な親: 子も一様(SfOwnerRefineUniform。スレッド t < 値の数が値 t を)。頁を持つ親: 親のセルの値を子 j へ SfOwnerRefineChild
 // (子の欄の頁は割り当ての段が取ってある = 親が欄の頁を持つ時。無ければ親も子も 0 なので書かない)。
-// 相の層の配り(セルを読む)はまだ(T-1231。GPU の世界は相の層の配り手の欄を写さない)
+// 頁を持つ親の相の層の配り(セルを読む)はセルの中身の配りの後に RefinePhaseLayerCarried(T-1231。溢れを使う世界は一般の配り)
 void RefineCarriedFields(MrBlock parent, uint32_t parentSlot, uint32_t parentCell, uint32_t childSlot,
                          uint32_t childPage, bool uniformChild, uint32_t t) {
     const uint32_t count = CarriedFieldCount();
@@ -204,6 +207,11 @@ void RefineCarriedFields(MrBlock parent, uint32_t parentSlot, uint32_t parentCel
             continue;
         }
 
+#ifndef MR_WIDE_CELLS
+        if (owner == SF_OWNER_PHASE_LAYER)
+            continue;
+#endif
+
         const uint32_t childField = CarriedPageOf(f, childPage);
         if (childField == MF_NO_PAGE)
             continue;
@@ -215,6 +223,117 @@ void RefineCarriedFields(MrBlock parent, uint32_t parentSlot, uint32_t parentCel
                              SfOwnerRefineChild(owner, LoadCarriedPage(f, parentField, parentCell, c), j));
     }
 }
+
+#ifndef MR_WIDE_CELLS
+// --- 相の層の配り手の欄(セルを読む配り。CPU の RefinePhaseLayerOctant・CoarsenPhaseLayerOctant。T-1231・ADR-0537)---
+// 式は common/phase_layer.hlsli(CPU と 1 つの源)。1 スレッド = 親の八分の一のセル t(t < 64)が子 8 つを読む。
+// 子のセルは決まった数の回し(FX_UNROLL)で g_cells から毎回読み直す(書き換えた構造体の配列を動的な添字で読まない。T-0397)。
+// 最後の重みのある子は回しの中の比べで選ぶ。欄の頁は割り当ての段が取ってある(CarriedOwnerNeed の相の層の規則)
+
+// 相の層の欄の番号(無ければ載せた欄の数)
+uint32_t PhaseLayerCarriedField() {
+    const uint32_t count = CarriedFieldCount();
+    uint32_t found = count;
+    for (uint32_t f = 0; f < count; ++f) {
+        if (found == count && CarriedOwner(f) == SF_OWNER_PHASE_LAYER)
+            found = f;
+    }
+
+    return found;
+}
+
+// 子 1 つの部分のエネルギー(CPU の SplitPart: 最後の重みのある子が残り = total − ほかの子の和)
+int64_t PhaseLayerChildPart(int64_t heat, int64_t total, int64_t given, int64_t chemical, uint64_t capacity,
+                            uint64_t capacitySum, bool last) {
+    if (last)
+        return total - given;
+
+    return PlRefinePartEnergy(heat, chemical, capacity, capacitySum);
+}
+
+// 細かくする(CPU の RefinePhaseLayerCell): 混ざった親は層と気体を子の熱容量の重みで別々に配り(D-674 を 2 回)、子のエネルギー = 層 + 気体。
+// 子の Ec は混ざった子だけ(配った層か、温度の揃う分け方)
+void RefinePhaseLayerCarried(uint32_t f, MrBlock parent, uint32_t octant, uint32_t childPage, uint32_t t) {
+    GpuReactionTable table;
+    table.unused = 0;
+    const uint32_t parentCell = MrOctantCell(octant, t);
+    const RxCell parentValue = g_cells[PageCellAddress(parent.page, parentCell)];
+    const int64_t parentEnergy = LoadCarriedPage(f, CarriedPageOf(f, parent.page), parentCell, 0);
+    const uint32_t childField = CarriedPageOf(f, childPage);
+    const PlRefineHeats heats = PlRefineHeatsOf(table, parentValue, parentEnergy);
+
+    // --- 子 8 つの重み(熱容量の和と、熱容量を持つ最後の子)---
+    uint64_t condensedCapacity = 0;
+    uint64_t gasCapacity = 0;
+    uint32_t lastCondensed = MR_CHILDREN_PER_CELL;
+    uint32_t lastGas = MR_CHILDREN_PER_CELL;
+    FX_UNROLL
+    for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
+        const PlPartSums sums = PlPartSumsOf(table, g_cells[PageCellAddress(childPage, MrChildCell(t, j))]);
+        condensedCapacity += sums.condensedCapacity;
+        gasCapacity += sums.gasCapacity;
+        lastCondensed = sums.condensedCapacity > 0 ? j : lastCondensed;
+        lastGas = sums.gasCapacity > 0 ? j : lastGas;
+    }
+
+    const bool split = heats.mixed != 0 && condensedCapacity != 0 && gasCapacity != 0;
+
+    // --- 最後でない子の部分の和 ---
+    int64_t condensedGiven = 0;
+    int64_t gasGiven = 0;
+    if (split) {
+        FX_UNROLL
+        for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
+            const PlPartSums sums = PlPartSumsOf(table, g_cells[PageCellAddress(childPage, MrChildCell(t, j))]);
+            if (j != lastCondensed)
+                condensedGiven += PlRefinePartEnergy(heats.condensedHeat, sums.condensedChemical,
+                                                     sums.condensedCapacity, condensedCapacity);
+
+            if (j != lastGas)
+                gasGiven += PlRefinePartEnergy(heats.gasHeat, sums.gasChemical, sums.gasCapacity, gasCapacity);
+        }
+    }
+
+    // --- 子のエネルギーと子の Ec ---
+    FX_UNROLL
+    for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
+        const uint32_t index = MrChildCell(t, j);
+        RxCell child = g_cells[PageCellAddress(childPage, index)];
+        int64_t condensedPart = 0;
+        if (split) {
+            const PlPartSums sums = PlPartSumsOf(table, child);
+            condensedPart = PhaseLayerChildPart(heats.condensedHeat, heats.condensedEnergy, condensedGiven,
+                                                sums.condensedChemical, sums.condensedCapacity, condensedCapacity,
+                                                j == lastCondensed);
+            const int64_t gasPart = PhaseLayerChildPart(heats.gasHeat, heats.gasEnergy, gasGiven, sums.gasChemical,
+                                                        sums.gasCapacity, gasCapacity, j == lastGas);
+            child.energy = condensedPart + gasPart;
+            g_cells[PageCellAddress(childPage, index)] = child;
+        }
+
+        int64_t energy = 0;
+        if (PlLayerOf(table, child).mixed != 0)
+            energy = split ? condensedPart : PlEvenCondensedEnergy(table, child);
+
+        StoreCarriedPage(f, childField, index, 0, energy);
+    }
+}
+
+// 粗くする(CPU の CoarsenPhaseLayerCell): 粗くした親のセル coarse(同じスレッドが書いた)と子 8 つのセル・Ec から親の Ec
+int64_t CoarsenPhaseLayerCarried(uint32_t f, MrBlock child, uint32_t childSlot, RxCell coarse, uint32_t t) {
+    GpuReactionTable table;
+    table.unused = 0;
+    int64_t condensedSum = 0;
+    FX_UNROLL
+    for (uint32_t j = 0; j < MR_CHILDREN_PER_CELL; ++j) {
+        const uint32_t index = MrChildCell(t, j);
+        condensedSum += PlCondensedPartOf(table, LoadBlockCell(child, childSlot, index),
+                                          LoadCarriedCell(f, child, childSlot, index, 0));
+    }
+
+    return PlCoarsenCondensedEnergy(table, coarse, condensedSum);
+}
+#endif
 
 // 細かくした親の八分の一のセル index の配り手の欄を 0 に(CPU の CoverParentOctant。頁を持つ親の欄の頁だけ)
 void CoverCarriedFields(MrBlock parent, uint32_t index) {
@@ -358,6 +477,17 @@ void RefineLevel(MrRefineRecord record, uint32_t t) {
         PlaceRefineChildren(parent, record.parentSlot, octant, childPage,
                             g_states[record.request].blockBase - 1 - record.depth,  // 隣の写しの位置(T-1189)
                             parentLayerPage, childLayerPage, t);                    // 層の分を沈む側へ(T-1240)
+#endif
+
+#ifndef MR_WIDE_CELLS
+    // --- 相の層の配り(セルの中身の配りの後・親を覆う前。CPU の RefineOwners の RefinePhaseLayerOctant。T-1231)。
+    //     子のセルは別のスレッドが写した・置いたので、全部のスレッドが書き終えてから(条件はグループで同じ)---
+    const uint32_t phaseField = PhaseLayerCarriedField();
+    if (fromRequest && real && !uniformChild && phaseField < CarriedFieldCount()) {
+        DeviceMemoryBarrierWithGroupSync();
+        if (t < MR_OCTANT_CELLS)
+            RefinePhaseLayerCarried(phaseField, parent, octant, childPage, t);
+    }
 #endif
 
 #ifdef MR_WIDE_CELLS
@@ -924,9 +1054,9 @@ void WriteCoarsenOctantLayers(MrBlock child, uint32_t childSlot, MrBlock parent,
 // 八分の一は子 8 つを SfOwnerCoarsen で(一様のままの親は値が親の値と同じ = TreeSettle が見た)。
 // 親の欄の頁は割り当ての段が取ってある(子に 0 でない値がありうる時)。保存量の配り手の欄は余り(子の段の単位)を世界の帳簿の
 // 「粗くした端数・出」の列へ(CPU の CoarsenOwners の AddFieldRemainder。一様のままの親でも足す = 余りは 0。atomic の足し算なので順によらない)。
-// 相の層の配り(セルを読む)はまだ(T-1231)
+// 相の層の配り(セルを読む): 頁を持つ枠になる親の八分の一は粗くしたセル coarse と子から親の Ec(溢れを使う世界は一般の配り。T-1231)
 void CoarsenCarriedFields(MrBlock child, uint32_t childSlot, MrBlock parent, uint32_t parentSlot, uint32_t parentPage,
-                          bool expandParent, uint32_t octant, uint32_t t) {
+                          bool expandParent, uint32_t octant, uint32_t t, RxCell coarse) {
     const uint32_t count = CarriedFieldCount();
     for (uint32_t f = 0; f < count; ++f) {
         if (!CarriedOwned(f))
@@ -952,6 +1082,12 @@ void CoarsenCarriedFields(MrBlock child, uint32_t childSlot, MrBlock parent, uin
 
         // --- 八分の一: 子 8 つを配り手の粗くする関数で ---
         const uint32_t index = MrOctantCell(octant, t);
+#ifndef MR_WIDE_CELLS
+        if (owner == SF_OWNER_PHASE_LAYER && paged) {
+            StoreCarriedPage(f, parentField, index, 0, CoarsenPhaseLayerCarried(f, child, childSlot, coarse, t));
+            continue;
+        }
+#endif
         for (uint32_t c = 0; c < components; ++c) {
             SfFamily family;
             FX_UNROLL
@@ -1149,7 +1285,7 @@ void CoarsenRequest(uint32_t request, uint32_t t) {
     g_fractions[FractionAddress(parentFraction, index)] = result.fraction;
 
     // 配り手の欄(セルの中身と一般の欄の後。CPU の Coarsen の最後の CoarsenOwners)
-    CoarsenCarriedFields(child, childSlot, parent, parentSlot, parentPage, expandParent, octant, t);
+    CoarsenCarriedFields(child, childSlot, parent, parentSlot, parentPage, expandParent, octant, t, result.cell);
 
 #ifndef MR_WIDE_CELLS
     if (parentLayerPage != MR_LAYER_NO_PAGE)

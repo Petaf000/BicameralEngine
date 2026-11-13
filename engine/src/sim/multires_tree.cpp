@@ -345,6 +345,11 @@ namespace bicameral::sim {
             if (!expanded && nest_fields::OwnerPageHeld(nest, field, parent.page))
                 return false;
 
+            // 相の層の配り(セルを読む)は子の Ec が全部 0 でも親の Ec を書きうる(凝縮相だけの子と気体だけの子 → 混ざった親)ので、
+            // 親が頁を持つ枠になれば取る(配りの中で頁を作らない = GPU の割り当ての段と同じ番号。ADR-0537 の 1)
+            if (nest.fields[field].desc.owner == state_field::SF_OWNER_PHASE_LAYER)
+                return true;
+
             const bool childValues = MrIsUniform(child) ? nest_fields::OwnerUniformNonZero(nest, field, state.target)
                                                         : nest_fields::OwnerPageHeld(nest, field, child.page);
 
@@ -362,10 +367,12 @@ namespace bicameral::sim {
                     if (state.status != MR_STATUS_GRANTED)
                         continue;
 
-                    // 細かくする: 頁を持つ親が欄の頁を持てば、鎖の子の全部に(子の値は親の値から配る)
+                    // 細かくする: 頁を持つ親が欄の頁を持てば、鎖の子の全部に(子の値は親の値から配る)。
+                    // 相の層の配り(セルを読む)は親の Ec が全部 0 でも置かれ方で混ざった子の Ec を書きうるので、頁を持つ親なら取る(ADR-0537 の 1)
                     if (nest.requests[i].op == MR_REQUEST_REFINE) {
                         const MrBlock& parent = nest.blocks[state.target];
-                        if (MrIsUniform(parent) || !nest_fields::OwnerPageHeld(nest, f, parent.page))
+                        const bool readsCells = field.desc.owner == state_field::SF_OWNER_PHASE_LAYER;
+                        if (MrIsUniform(parent) || (!readsCells && !nest_fields::OwnerPageHeld(nest, f, parent.page)))
                             continue;
 
                         for (uint32_t depth = 0; depth < state.levels; ++depth)
