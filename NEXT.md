@@ -1,5 +1,9 @@
 # NEXT.md — 次にやること(上から順に)
 
+**2026-11-13 本体の作業役(33 回目・09:40 の巡目の続き): t-1380-shell-overspeed-carry(T-1380 Done・T-1381 を分けた)・t-0414-grass-fire-revisit(測る道具だけ)・T-1392 の文書だけ・t-1366-crate-fire-flame(T-1366 打ち切り)・t-1395-mixed-solid-heat(ADR-0544 Proposed → Q193)を main へ(試験・push。結果は HANDOFF 33 回目)。**
+**次のチャットがまず入れるもの**: runner/ready の **t-1227-1228-stage2**(wt6。入れる前に wt6 の GPU の組〔runner/logs/20261113-022251-test〕の合格・rebase main・release を確かめる。dxil_alloca_check の multires_tree_wide_fold_check 6 → 5 は --update で下げてよい)。**入れないもの**: t-1356(研究)・t-1392-occupancy-count のコード(ADR-0543 がユーザー未確認 = Q192 の答え待ち・文書は入った)。
+残る判断待ち: Q93 ②・Q157・Q148・Q189・Q190・**Q192**(結ぶ形・占める数え・占める量の定義)・**Q193**(凝縮相の熱の厚み・仮 = A 皮)。次の番号は **D-701・ADR-0479・Q194・T-1374**(本体)。
+
 **2026-11-13 本体の作業役(32 回目・09:40 の巡目): t-1231-phase-layer-gpu(T-1231 Done・T-1252 段 2 の 8 本目)・**既定の切り替え** t-1367-rc-one-side-balance(T-1367 Done・放射の面の崖が両側に)・文書だけ t-1331-shape-design・t-0820-occupancy-shape(ADR-0541・ADR-0543 Proposed → Q192)を main へ(試験・push。結果は HANDOFF 32 回目)。**
 **次のチャットがまず入れるもの**: runner/ready に来た印を来た順に(t-1356 は入れない)。main で GPU を回す時に gpu_cascade_light・gpu_cascade_tree_grid を 1 本だけ重ならない時に測り直す(826 秒・601 秒は重なりと見ているが未確認。HANDOFF 32 回目)。
 **作業中(09:40 の巡目)**: wt2 T-0414 草原の火の再開の調べ / wt3 ADR-0534 の残り / wt4 T-1366(木箱の炎) / wt5 T-0820 の形の設計の後(T-1392〜T-1394 は Q192 待ち) / wt6 T-1227 / T-1228 段 2。

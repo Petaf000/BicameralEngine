@@ -1,6 +1,13 @@
 # HANDOFF.md — 前のチャットからの引き継ぎ
 
-最終更新: 2026-11-13(本体の作業役 32 回目・09:40 の巡目のマージ。前は 31 回目)
+最終更新: 2026-11-13(本体の作業役 33 回目・09:40 の巡目の続きのマージ。前は 32 回目)
+
+## この仕事でしたこと(2026-11-13・本体の作業役・33 回目〔09:40 の巡目の続き: runner/ready の印のマージ・試験・push〕)
+- **入れた(--no-ff・どれも既定の切り替えではない・衝突なし〔tests/object_shell_test.cpp は t-1380 と t-1366 の両方が触ったが自動で合わさった〕)**: wt3 t-1380-shell-overspeed-carry 3fd1ea65(T-1380 Done = 速さの上限の持ち越しは今のまま・CPU の試験の口だけ既定 0・T-1381 を分けた)/ wt2 t-0414-grass-fire-revisit 08d07455(測る道具 radiation_scene_measure の ix= と tall・gap の直し・T-0414 §6・T-1377 / T-1378 の候補)/ **t-1392 の文書だけ**(62f933ff = wt5 t-1392-occupancy-count e3b6860a から 4 ファイルを checkout: 20 §7.4.10・ADR-0543 追記 1・T-1392 / T-1393。コード occupancy.hlsli・occupancy_test は ADR-0543 がユーザー未確認〔Q192〕なので入れない・印は残す)/ wt4 t-1366-crate-fire-flame 623dcb55(T-1366 打ち切り = セルに混ざった木箱は炎ありで 1 秒で爆発 = 基準にしない・gpu_probe_fire は DISABLED のまま --flame・確かめの run wt4 20261113-025108 は CPU と 2/2 刻み一致・T-1383 のチケット)/ 文書だけ wt5 t-1395-mixed-solid-heat c56615cd(20 §10.6.1・ADR-0544 Proposed・T-1395〜T-1397)。
+- **入れなかった**: t-1356-slope-touch-proto(研究)・t-1392-occupancy-count のコード(上)・t-1227-1228-stage2(wt6・司令塔の指示が無い。印に「GPU の組の合格・rebase main・release の後」とある)。印はどれも runner/ready に残す。
+- **記録**: ROADMAP(ADR-0534 の残り → T-1380 Done・T-1381〔研究・D-428・N 4 → 8 で +18〜31 %・N 16 で火が消える〕・T-1366 打ち切り・T-1383・T-1395〜T-1397・T-1377 / T-1378・T-1366 / T-1377 に「T-1395〜T-1397 待ち」・T-0813 の優先度を上げた〔wt4 着手・別の根〕・T-1392 の行と「紙の場面の箱の体積の二重の数え」の行)・チケット T-1143 / T-1186 に「N への依りを含む」の注・QUESTIONS(Q192 に (4) 占める量の定義 (ii) / (i)・Q190 に T-0414 の測り・**Q193【エンジン】** = 凝縮相の熱の厚み A〔皮・仮〕/ B / C / D)・COMMANDER(wt5 に T-1395〜T-1397・ADR-0544・司令塔の次は T-1398・ADR-0545)。土台に足りないもの(セルに混ざった燃える固体の熱の厚み)は ROADMAP の T-1395 の行に書いた(BACKLOG には書いていない)。
+- **試験(release・RTX 3070 Ti)**: t-1380 の後 = release ビルド警告 0。t-0414 と t-1392 の文書の後(62f933ff)= release ビルド警告 0・object_shell(**1098 秒** = ほかの作業ツリーと重なり。wt3 は 289 秒)・radiation_scene_spread(196 秒)・float_check 系 5・dxil_alloca_check 合格・archmap --check OK。t-1366・t-1395 の後 = release ビルド警告 0(700 秒・CMake の作り直しで vcpkg の「compiler hash」に長く止まって見えた = wt2 のビルドと重なり)・gpu_probe_fire_test のビルド OK・archmap --check OK。object_shell は t-1366 の後に流し直していない(表を fuel_gas_test_table.h へ移しただけ・ビルドは通った)。会話の入れ物が 04:20 UTC 頃に再起動したが、記録は失われていなかった。
+- 次の番号は **D-701・ADR-0479・Q194・T-1374**(本体。Q193 は使った)。
 
 ## この仕事でしたこと(2026-11-13・本体の作業役・32 回目〔09:40 の巡目: runner/ready の印のマージ・試験・push〕)
 - **入れた(--no-ff・衝突なし)**: wt6 t-1231-phase-layer-gpu 06179455(2f6a6683。T-1231 Done = 相の層の配りを GPU の木の段に・T-1252 段 2 の 8 本目・既定とハッシュ不変・**ADR-0537 の 1〔相の層の欄だけ、欄の頁を割り当ての段で控えめに取る = 土台の欄の頁の取り方の小さい変更〕は司令塔が仮に受け取った**)/ **既定の切り替えとして 1 本で** wt4 t-1367-rc-one-side-balance 8c26de8a(9a9ab9dd。T-1367 Done = 放射の段の面の崖を「両側とも τ ≥ 32」に・ADR-0535 の追記・透ける帯と通さない帯が触れる面で透ける側も放つ = 既定の答えとハッシュが変わる〔固定のハッシュを持つ放射の試験は無い〕)/ 文書だけ wt5 t-1331-shape-design 0db05316(e3bd5477。20 §12.6・ADR-0541 Proposed・T-1386〜T-1388)・wt5 t-0820-occupancy-shape ab7a5eb4(31f24231。20 §7.4・ADR-0543 Proposed・T-1392〜T-1394・T-1386 は T-1392 に含めた)。
